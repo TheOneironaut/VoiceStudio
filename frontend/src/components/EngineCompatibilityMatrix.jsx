@@ -233,6 +233,8 @@ function normalizeEntry(entry) {
     // null/absent on every other backend, which never renders a picker.
     curated_models: Array.isArray(entry.curated_models) ? entry.curated_models : null,
     active_model_id: entry.active_model_id || null,
+    curated_voices: Array.isArray(entry.curated_voices) ? entry.curated_voices : null,
+    active_voice_id: entry.active_voice_id || null,
   };
 }
 
@@ -626,6 +628,15 @@ export default function EngineCompatibilityMatrix({
     async (id, modelId) => {
       if (!onSelect || !modelId) return;
       await onSelect(activeFamily, id, modelId);
+      reload();
+    },
+    [onSelect, activeFamily, reload],
+  );
+
+  const changeVoice = useCallback(
+    async (id, voiceId) => {
+      if (!onSelect || !voiceId) return;
+      await onSelect(activeFamily, id, undefined, voiceId);
       reload();
     },
     [onSelect, activeFamily, reload],
@@ -1030,6 +1041,26 @@ export default function EngineCompatibilityMatrix({
                             {b.curated_models.map((m) => (
                               <option key={m.key} value={m.key}>
                                 {m.label}
+                              </option>
+                            ))}
+                          </Select>
+                        </span>
+                      )}
+                      {b.curated_voices && b.curated_voices.length > 0 && (
+                        <span className="engine-matrix__voice-picker inline-flex shrink-0 items-center gap-[4px]">
+                          <span className={cn('text-[11px]', MUTED)}>{t('segment.voice')}</span>
+                          <Select
+                            size="sm"
+                            className="w-auto min-w-[130px]"
+                            value={b.active_voice_id || ''}
+                            disabled={!onSelect || !b.available}
+                            onChange={(e) => changeVoice(b.id, e.target.value)}
+                            aria-label={`${t('segment.voice')}: ${b.display_name}`}
+                            data-testid={`curated-voice-select-${b.id}`}
+                          >
+                            {b.curated_voices.map((voice) => (
+                              <option key={voice.key} value={voice.key}>
+                                {voice.label}
                               </option>
                             ))}
                           </Select>

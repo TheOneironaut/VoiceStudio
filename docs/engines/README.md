@@ -39,6 +39,7 @@ approval), [Windows](../install/windows.md), [Linux](../install/linux.md),
 | OmniVoice (subprocess) | [omnivoice-subprocess](omnivoice-subprocess.md) | CUDA · MPS · CPU | ✅ | opt-in pick, no install |
 | PocketTTS (Kyutai) | [pockettts](pockettts.md) | CPU (not Intel Mac) | ✅ | `uv sync --extra pockettts` + license |
 | Confucius4-TTS | [confucius4-tts](confucius4-tts.md) | CUDA · CPU | ✅ | clone + env var |
+| Gemini 3.1 Flash TTS Preview | [gemini-tts](gemini-tts.md) | Google API | — (preset voices) | API key + engine selection |
 
 ## Speech-to-text
 

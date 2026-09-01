@@ -203,6 +203,9 @@ dependencies = [
     # protobuf runtime already present transitively.
     "grpcio>=1.60",
     "protobuf>=4.25",
+    # Cloud TTS adapter for Gemini 3.1 Flash TTS Preview. The SDK is inert
+    # unless the user explicitly selects the Gemini engine and supplies a key.
+    "google-genai>=2.21.0,<3",
 ]
 
 [project.optional-dependencies]

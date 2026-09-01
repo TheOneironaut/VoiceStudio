@@ -175,8 +175,13 @@ def test_list_backends_shape(registry_sandbox):
         "min_vram_gb",
     }
     mlx_audio_extra = {"curated_models", "active_model_id"}
+    gemini_extra = {"curated_voices", "active_voice_id"}
     for entry in out:
-        expected = required | mlx_audio_extra if entry["id"] == "mlx-audio" else required
+        expected = required.copy()
+        if entry["id"] == "mlx-audio":
+            expected |= mlx_audio_extra
+        if entry["id"] == "gemini-3.1-flash-tts":
+            expected |= gemini_extra
         assert set(entry.keys()) == expected, (
             f"entry {entry.get('id')} has wrong keys: "
             f"missing {expected - entry.keys()}, "

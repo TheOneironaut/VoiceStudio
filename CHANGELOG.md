@@ -16,7 +16,11 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Added
 
+- Gemini 3.1 Flash TTS Preview is available as a native preset-voice engine with persistent immediate and provider-batch jobs. — thanks @TheOneironaut!
+
 ### Docs
+
+- The Gemini TTS guide covers API-key setup, voice selection, long-form resume, provider batch, and upstream synchronization. — thanks @TheOneironaut!
 
 - The CosyVoice guide now states that packaged builds have no one-click runtime installer and records the exact readiness checks exposed by [Discussion 1631](https://github.com/debpalash/VoiceStudio/discussions/1631).
 - A production private-API guide now covers pinned containers, root credentials, network isolation, streaming proxies, health checks, upgrades, and benchmark evidence (#1720)

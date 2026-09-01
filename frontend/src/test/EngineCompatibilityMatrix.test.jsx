@@ -923,6 +923,48 @@ describe('EngineCompatibilityMatrix', () => {
     expect(screen.getByTestId('curated-model-select-mlx-audio')).toBeDisabled();
   });
 
+  it('renders Gemini voices separately and passes voice_id through onSelect', async () => {
+    let activeVoiceId = 'Kore';
+    const apiListEngines = vi.fn(async () => ({
+      tts: {
+        active: 'gemini-3.1-flash-tts',
+        backends: [
+          {
+            id: 'gemini-3.1-flash-tts',
+            display_name: 'Gemini 3.1 Flash TTS Preview',
+            available: true,
+            curated_voices: [
+              { key: 'Kore', label: 'Kore', repo_id: 'Kore' },
+              { key: 'Puck', label: 'Puck', repo_id: 'Puck' },
+            ],
+            active_voice_id: activeVoiceId,
+          },
+        ],
+      },
+      asr: { active: '', backends: [] },
+      llm: { active: 'off', backends: [] },
+    }));
+    const onSelect = vi.fn(async (_family, _id, _modelId, voiceId) => {
+      activeVoiceId = voiceId;
+    });
+    render(
+      <EngineCompatibilityMatrix
+        family="tts"
+        onSelect={onSelect}
+        apiListEngines={apiListEngines}
+        apiGetEngineHealth={vi.fn()}
+      />,
+    );
+    await waitFor(() => screen.getByText('Gemini 3.1 Flash TTS Preview'));
+    const select = screen.getByTestId('curated-voice-select-gemini-3.1-flash-tts');
+    fireEvent.change(select, { target: { value: 'Puck' } });
+
+    await waitFor(() => {
+      expect(onSelect).toHaveBeenCalledWith('tts', 'gemini-3.1-flash-tts', undefined, 'Puck');
+    });
+    await waitFor(() => expect(select).toHaveValue('Puck'));
+  });
+
   // ── showFamilyTabs={false} — pinned per-family mount (Model Catalogue → Engines) ─
   function multiFamilyResponse() {
     return {

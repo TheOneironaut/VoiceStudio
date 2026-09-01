@@ -48,10 +48,10 @@ export default function EnginesTab({
   const onSelect = useCallback(
     // modelId is only ever set by mlx-audio's curated-model picker (#981) —
     // every other call site (the "Use" button) omits it.
-    async (family, backendId, modelId) => {
+    async (family, backendId, modelId, voiceId) => {
       try {
         addBreadcrumb(`engine:${family}=${backendId}`);
-        const r = await selectMutation.mutateAsync({ family, backendId, modelId });
+        const r = await selectMutation.mutateAsync({ family, backendId, modelId, voiceId });
         // Consume the routing echo: warn (not a bare success) when the pick
         // lands on a CPU fallback on this host. See notifyEngineSelected.
         notifyEngineSelected(r, t, family);

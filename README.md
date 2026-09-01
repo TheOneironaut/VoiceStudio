@@ -3,7 +3,7 @@
   <h1>VoiceStudio</h1>
   <p><sub>Previously OmniVoice-Studio</sub></p>
   <h3>Local voice cloning, dubbing, dictation, and long-form audio.</h3>
-  <p>16 TTS engines · 11 ASR engines · 646-language catalogue · macOS, Windows, and Linux</p>
+  <p>17 TTS engines · 11 ASR engines · 646-language catalogue · macOS, Windows, and Linux</p>
   <p><strong>Local-first.</strong> No account, API key, subscription, or usage meter for the core workflow.</p>
 
   <p>
@@ -44,7 +44,7 @@
 |---|---|
 | **Workflows** | Voice cloning and design, video dubbing, dictation, stories, audiobooks, batch generation |
 | **Language catalogue** | 646 TTS languages; actual coverage and quality depend on the selected engine |
-| **Engines** | 16 TTS · 11 ASR · switch in Model Catalogue or with <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>E</kbd> |
+| **Engines** | 17 TTS · 11 ASR · switch in Model Catalogue or with <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>E</kbd> |
 | **Platforms** | macOS 13.3+ on Apple Silicon · Windows 10/11 x64 · Linux x86_64 with glibc 2.39+ |
 | **Compute** | CUDA · Apple Silicon MPS/MLX · ROCm on Linux · CPU · optional remote workers |
 | **Interfaces** | Desktop app · local REST/SSE/WebSocket API · OpenAI-compatible audio API · MCP Server |
@@ -189,6 +189,7 @@ Engine support is capability-specific. Check cloning, language, platform, memory
 | **MOSS-TTS-v1.5** ⚡ | 31 | Yes | — | CUDA/CPU | CPU | CUDA/CPU | Apache-2.0 |
 | **dots.tts** ⚡ | 24 | Yes | — | CUDA/CPU | CPU | — | Apache-2.0 |
 | **Confucius4-TTS** ⚡ | 14 | Yes | — | CUDA/CPU | CPU | CUDA/CPU | Apache-2.0 |
+| **Gemini 3.1 Flash TTS Preview** ⚡ | Multilingual | — | Yes | Cloud API | Cloud API | Cloud API | Google API terms |
 
 ⚡ Installed or registered on demand.
 

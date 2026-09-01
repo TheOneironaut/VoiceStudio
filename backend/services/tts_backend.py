@@ -2154,6 +2154,7 @@ class SherpaOnnxBackend(TTSBackend):
 # the descriptor below.
 
 _LAZY_REGISTRY: dict[str, tuple[str, str]] = {
+    "gemini-3.1-flash-tts": ("engines.gemini_tts", "GeminiTTSBackend"),
     "indextts2": ("engines.indextts", "IndexTTS2Backend"),
     # Phase 4 Plan 04-01 (GGUF-03): hardware-adaptive GGUF runtime wrapper.
     # Lazy so the import of services.tts_backend doesn't pull
@@ -2278,6 +2279,7 @@ _LAST_ERRORS: dict[str, str] = {}
 # Short install hints surfaced as tooltips on the Model Catalogue → Engines UI.
 # Helps users understand what pip package to install and where.
 _INSTALL_HINTS: dict[str, str] = {
+    "gemini-3.1-flash-tts": "Set GEMINI_API_KEY (or GOOGLE_API_KEY), then select this engine. Uses the cloud Gemini API; no voice cloning.",
     "omnivoice":     "pip install omnivoice  (bundled — no extra install needed)",
     "omnivoice-subprocess": "No extra install; uses the host OmniVoice install. Opt in with OMNIVOICE_TTS_BACKEND=omnivoice-subprocess (same model in a killable sidecar, for unattended reliability).",
     "cosyvoice":     "git clone --recursive FunAudioLLM/CosyVoice + pip install -r requirements.txt + SoX",
@@ -2469,6 +2471,26 @@ def list_backends() -> list[dict]:
                 for key, repo_id in cls.CURATED_MODELS.items()
             ]
             out[-1]["active_model_id"] = active_model
+        if bid == "gemini-3.1-flash-tts":
+            from engines.gemini_tts import DEFAULT_VOICE, VOICES
+            from core import prefs
+
+            # This backend executes in Google's service, not on the host CPU.
+            # Keep the shared TTS gpu_compat contract intact while presenting
+            # the same remote routing badge used by network-backed engines.
+            out[-1]["effective_device"] = "network"
+            out[-1]["routing_status"] = "n/a"
+            out[-1]["routing_reason"] = None
+            active_voice = prefs.resolve(
+                "gemini_tts_voice",
+                env="GEMINI_TTS_VOICE",
+                default=DEFAULT_VOICE,
+            )
+            out[-1]["curated_voices"] = [
+                {"key": voice, "label": voice, "repo_id": voice}
+                for voice in VOICES
+            ]
+            out[-1]["active_voice_id"] = active_voice
     return out
 
 

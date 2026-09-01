@@ -19,9 +19,9 @@ export type EngineFamily = 'tts' | 'asr' | 'llm';
 // optional so the matrix still renders a legacy/older payload that omits them
 // (it gates with `??` / `?.length` and suppresses the routing badge).
 type GPUTarget = 'cuda' | 'mps' | 'rocm' | 'xpu' | 'cpu';
-// Where an engine actually runs on THIS host. `network` is LLM-only (remote).
+// Where an engine actually runs on THIS host. `network` is remote/cloud.
 type EffectiveDevice = GPUTarget | 'network';
-// `n/a` is LLM-only; resolve_routing only ever returns the first four.
+// `n/a` is used by remote engines; resolve_routing only returns the first four.
 type RoutingStatus = 'accelerated' | 'cpu_fallback' | 'cpu_only' | 'unavailable' | 'n/a';
 
 export interface EngineBackend {
@@ -66,6 +66,10 @@ export interface EngineBackend {
   // Settings can render a model picker. Absent on every other backend.
   curated_models?: CuratedModel[];
   active_model_id?: string;
+  // Gemini TTS preset voices. Kept separate from curated_models so model
+  // registry consumers can retain the mlx-audio-only invariant.
+  curated_voices?: CuratedModel[];
+  active_voice_id?: string;
 }
 
 // #981 — one of mlx-audio's curated models (see backend

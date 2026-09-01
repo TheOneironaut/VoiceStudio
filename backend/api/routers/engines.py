@@ -539,11 +539,10 @@ def engine_selftest(engine_id: str):
 class SelectEngineRequest(BaseModel):
     family: str   # "tts" | "asr" | "llm"
     backend_id: str
-    # Only meaningful for family="tts", backend_id="mlx-audio" (#981) — picks
-    # which of mlx-audio's curated models is actually loaded. A curated key
-    # ("kokoro") or a raw HF repo id ("mlx-community/Kokoro-82M-bf16") — the
-    # same tolerance MLXAudioBackend.__init__ already has. Ignored otherwise.
+    # Optional engine-specific variant. Used by mlx-audio for a curated model
+    # and by Gemini TTS for its prebuilt voice.
     model_id: str | None = None
+    voice_id: str | None = None
 
 
 class SelectEngineResponse(BaseModel):
@@ -608,6 +607,12 @@ def select_engine(req: SelectEngineRequest):
                 "Hugging Face repo ID like 'owner/name'.",
             )
         prefs.set_("mlx_audio_model_id", req.model_id)
+    if req.family == "tts" and req.backend_id == "gemini-3.1-flash-tts" and req.voice_id is not None:
+        from engines.gemini_tts import VOICES
+
+        if req.voice_id not in VOICES:
+            raise HTTPException(400, "Unknown Gemini TTS voice.")
+        prefs.set_("gemini_tts_voice", req.voice_id)
     prefs.set_(pref_key, req.backend_id)
     return {
         "family": req.family,

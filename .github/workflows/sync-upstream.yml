@@ -1,0 +1,46 @@
+name: Sync upstream VoiceStudio
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream into sync branch
+        id: sync
+        env:
+          UPSTREAM_URL: https://github.com/debpalash/VoiceStudio.git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          bash scripts/sync-upstream.sh
+
+      - name: Open or update pull request
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr view upstream-sync --json url >/dev/null 2>&1; then
+            gh pr view upstream-sync --json url --jq .url
+          else
+            gh pr create \
+              --base main \
+              --head upstream-sync \
+              --title "Sync debpalash/VoiceStudio upstream" \
+              --body "Automated upstream merge. Review conflicts and run the full test suite before merging."
+          fi
