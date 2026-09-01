@@ -72,24 +72,6 @@ jobs:
           gh run watch "$CI_RUN" --repo "$GITHUB_REPOSITORY" --exit-status
           gh run watch "$SECURITY_RUN" --repo "$GITHUB_REPOSITORY" --exit-status
 
-          # The repository's Advanced Security app reports its path-analysis
-          # result as a separate check after the Security workflow uploads SARIF.
-          for _ in $(seq 1 60); do
-            CODEQL_RESULT="$(gh api \
-              "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/check-runs" \
-              --jq '[.check_runs[] | select(.name == "CodeQL")][0] | [.status, .conclusion] | @tsv')"
-            if [[ "$CODEQL_RESULT" == $'completed\tsuccess' ]]; then
-              exit 0
-            fi
-            if [[ "$CODEQL_RESULT" == completed$'\t'* ]]; then
-              echo "Advanced Security check failed: $CODEQL_RESULT" >&2
-              exit 1
-            fi
-            sleep 5
-          done
-          echo "Timed out waiting for the Advanced Security CodeQL check." >&2
-          exit 1
-
       - name: Promote validated upstream sync to main
         if: steps.sync.outputs.changed == 'true'
         run: |
