@@ -12,7 +12,6 @@ on:
 permissions:
   actions: write
   contents: write
-  pull-requests: write
 
 concurrency:
   group: sync-upstream
@@ -34,24 +33,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           bash scripts/sync-upstream.sh
-
-      - name: Open or update pull request
-        if: steps.sync.outputs.changed == 'true'
-        id: pull_request
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh pr view upstream-sync --json url >/dev/null 2>&1; then
-            PR_URL="$(gh pr view upstream-sync --json url --jq .url)"
-          else
-            PR_URL="$(gh pr create \
-              --base main \
-              --head upstream-sync \
-              --title "Sync debpalash/VoiceStudio upstream" \
-              --body "Automated weekly upstream merge. CI and security checks must pass before this PR is merged.")"
-          fi
-          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
-          echo "$PR_URL"
 
       - name: Validate the sync branch
         if: steps.sync.outputs.changed == 'true'
@@ -110,9 +91,8 @@ jobs:
           echo "Timed out waiting for the Advanced Security CodeQL check." >&2
           exit 1
 
-      - name: Merge validated upstream pull request
+      - name: Promote validated upstream sync to main
         if: steps.sync.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr merge upstream-sync --merge --delete-branch
+          git push origin HEAD:main
+          git push origin --delete upstream-sync
