@@ -51,7 +51,12 @@ export default function EnginesTab({
     async (family, backendId, modelId, voiceId) => {
       try {
         addBreadcrumb(`engine:${family}=${backendId}`);
-        const r = await selectMutation.mutateAsync({ family, backendId, modelId, voiceId });
+        const r = await selectMutation.mutateAsync({
+          family,
+          backendId,
+          modelId,
+          ...(voiceId ? { voiceId } : {}),
+        });
         // Consume the routing echo: warn (not a bare success) when the pick
         // lands on a CPU fallback on this host. See notifyEngineSelected.
         notifyEngineSelected(r, t, family);

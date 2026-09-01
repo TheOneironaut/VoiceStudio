@@ -204,7 +204,10 @@ export function useSelectEngine() {
       backendId: string;
       modelId?: string;
       voiceId?: string;
-    }) => enginesApi.selectEngine(family, backendId, modelId, voiceId),
+    }) =>
+      voiceId
+        ? enginesApi.selectEngine(family, backendId, modelId, voiceId)
+        : enginesApi.selectEngine(family, backendId, modelId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.engines }),
   });
 }
