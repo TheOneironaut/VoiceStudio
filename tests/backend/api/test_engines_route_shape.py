@@ -122,6 +122,11 @@ def test_tts_asr_routing_keys_are_well_formed(fresh_app):
     body = client.get("/engines").json()
     for fam in ("tts", "asr"):
         for entry in body[fam]["backends"]:
+            if fam == "tts" and entry["id"] == "gemini-3.1-flash-tts":
+                assert entry["routing_status"] == "n/a"
+                assert entry["effective_device"] == "network"
+                assert entry["routing_reason"] is None
+                continue
             assert entry["routing_status"] in _TTS_ASR_STATUSES
             assert entry["effective_device"] in _VALID_FAMILIES
             # routing_reason is a scrubbed str or JSON null — never the empty

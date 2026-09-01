@@ -49,6 +49,10 @@ GET /archetypes/{archetype_id}/preview
 GET /archetypes/{archetype_id}/preview/state
 GET /audiobook/jobs
 GET /batch/download/{job_id}/{lang}
+GET /batch/gemini-tts/jobs
+GET /batch/gemini-tts/jobs/{job_id}
+GET /batch/gemini-tts/jobs/{job_id}/audio
+GET /batch/gemini-tts/voices
 GET /batch/jobs
 GET /batch/jobs/{job_id}
 GET /community/items
@@ -171,6 +175,9 @@ POST /audiobook/plan
 POST /audiobook/preview
 POST /audiobook/resume/{job_id}
 POST /batch/enqueue
+POST /batch/gemini-tts/jobs
+POST /batch/gemini-tts/jobs/{job_id}/cancel
+POST /batch/gemini-tts/jobs/{job_id}/retry
 POST /batch/jobs/{job_id}/cancel
 POST /clean-audio
 POST /community/items/{item_id}/use
