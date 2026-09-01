@@ -58,19 +58,28 @@ def split_text(text: str, *, max_chars: int = 1800) -> list[str]:
     return chunks
 
 
-def _job_dir(job_id: str) -> Path:
+def _safe_job_path(job_id: str, *parts: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise KeyError(job_id)
-    return JOBS_DIR / job_id
+    root = os.path.realpath(os.fspath(JOBS_DIR))
+    candidate = os.path.realpath(os.path.join(root, job_id, *parts))
+    safe_prefix = os.path.normcase(root + os.sep)
+    if not os.path.normcase(candidate).startswith(safe_prefix):
+        raise KeyError(job_id)
+    return Path(candidate)
+
+
+def _job_dir(job_id: str) -> Path:
+    return _safe_job_path(job_id)
 
 
 def _manifest_path(job_id: str) -> Path:
-    return _job_dir(job_id) / "manifest.json"
+    return _safe_job_path(job_id, "manifest.json")
 
 
 def audio_path(job_id: str) -> Path:
     """Return the fixed output path for a validated Gemini batch job."""
-    path = _job_dir(job_id) / "narration.wav"
+    path = _safe_job_path(job_id, "narration.wav")
     if not path.is_file():
         raise KeyError(job_id)
     return path
