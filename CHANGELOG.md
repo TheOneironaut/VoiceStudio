@@ -17,6 +17,7 @@ the frozen-backend fallback mirror it for their toolchains.
 ### Added
 
 - Gemini 3.1 Flash TTS Preview is available as a native preset-voice engine with persistent immediate and provider-batch jobs. — thanks @TheOneironaut!
+- Windows releases now include an independently updatable per-user MSI that installs and uninstalls without elevation (#1713)
 - Engine status and diagnostic bundles now record loaded execution provider, device, precision, fallback stage, accelerator identity, runtime versions, and parent-process memory visibility (#1717)
 
 ### Docs
