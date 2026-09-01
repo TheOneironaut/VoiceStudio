@@ -18,6 +18,7 @@ EXPECTED_EXACT_REGEXES = {
     "^hf_QWERTYUIOPasdfghjklZXCVBNM0123456789xyzAB$",
     "^max_length=400$",
     "^Ed25519PrivateKey$",
+    r"^omnivoice\.dubSplit\.v1$",
 }
 
 

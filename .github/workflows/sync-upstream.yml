@@ -6,7 +6,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/sync-upstream.yml"
+      - ".gitleaks.toml"
       - "scripts/sync-upstream.sh"
+      - "tests/test_gitleaks_allowlist.py"
   schedule:
     - cron: "17 4 * * 1"
 
