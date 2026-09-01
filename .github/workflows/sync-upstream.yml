@@ -6,6 +6,7 @@ on:
     - cron: "17 4 * * 1"
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -32,15 +33,82 @@ jobs:
 
       - name: Open or update pull request
         if: steps.sync.outputs.changed == 'true'
+        id: pull_request
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh pr view upstream-sync --json url >/dev/null 2>&1; then
-            gh pr view upstream-sync --json url --jq .url
+            PR_URL="$(gh pr view upstream-sync --json url --jq .url)"
           else
-            gh pr create \
+            PR_URL="$(gh pr create \
               --base main \
               --head upstream-sync \
               --title "Sync debpalash/VoiceStudio upstream" \
-              --body "Automated upstream merge. Review conflicts and run the full test suite before merging."
+              --body "Automated weekly upstream merge. CI and security checks must pass before this PR is merged.")"
           fi
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "$PR_URL"
+
+      - name: Validate the sync branch
+        if: steps.sync.outputs.changed == 'true'
+        timeout-minutes: 90
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARGET_SHA="$(git rev-parse HEAD)"
+
+          gh workflow run ci.yml --ref upstream-sync
+          gh workflow run security.yml --ref upstream-sync
+
+          find_run() {
+            local workflow="$1"
+            local run_id=""
+            for _ in $(seq 1 30); do
+              run_id="$(gh run list \
+                --workflow "$workflow" \
+                --branch upstream-sync \
+                --event workflow_dispatch \
+                --limit 20 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$TARGET_SHA\") | .databaseId" \
+                | head -n 1)"
+              if [[ -n "$run_id" ]]; then
+                echo "$run_id"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "Could not find the dispatched $workflow run for $TARGET_SHA." >&2
+            return 1
+          }
+
+          CI_RUN="$(find_run ci.yml)"
+          SECURITY_RUN="$(find_run security.yml)"
+          gh run watch "$CI_RUN" --exit-status
+          gh run watch "$SECURITY_RUN" --exit-status
+
+          # The repository's Advanced Security app reports its path-analysis
+          # result as a separate check after the Security workflow uploads SARIF.
+          for _ in $(seq 1 60); do
+            CODEQL_RESULT="$(gh api \
+              "repos/$GITHUB_REPOSITORY/commits/$TARGET_SHA/check-runs" \
+              --jq '[.check_runs[] | select(.name == "CodeQL")][0] | [.status, .conclusion] | @tsv')"
+            if [[ "$CODEQL_RESULT" == $'completed\tsuccess' ]]; then
+              exit 0
+            fi
+            if [[ "$CODEQL_RESULT" == completed$'\t'* ]]; then
+              echo "Advanced Security check failed: $CODEQL_RESULT" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for the Advanced Security CodeQL check." >&2
+          exit 1
+
+      - name: Merge validated upstream pull request
+        if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr merge upstream-sync --merge --delete-branch
