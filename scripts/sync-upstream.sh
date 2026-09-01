@@ -21,17 +21,15 @@ git fetch origin main
 git fetch upstream "$UPSTREAM_BRANCH"
 
 if git fetch origin "$SYNC_BRANCH" 2>/dev/null; then
-  BASE_REF="origin/$SYNC_BRANCH"
   git checkout -B "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
   git merge --no-edit origin/main
 else
-  BASE_REF="origin/main"
   git checkout -B "$SYNC_BRANCH" origin/main
 fi
 
 git merge --no-edit "upstream/$UPSTREAM_BRANCH"
 
-if git diff --quiet "$BASE_REF"..HEAD; then
+if git diff --quiet origin/main..HEAD; then
   echo "The sync branch is already current."
   set_changed_output false
   exit 0
@@ -39,4 +37,4 @@ fi
 
 git push origin "$SYNC_BRANCH"
 set_changed_output true
-echo "Pushed $SYNC_BRANCH. Review and merge it into main through a pull request."
+echo "Pushed $SYNC_BRANCH. Validate it before promoting it to main."

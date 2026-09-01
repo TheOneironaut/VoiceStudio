@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/sync-upstream.yml"
+      - "scripts/sync-upstream.sh"
   schedule:
     - cron: "17 4 * * 1"
 
@@ -15,7 +16,7 @@ permissions:
 
 concurrency:
   group: sync-upstream
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   sync:
