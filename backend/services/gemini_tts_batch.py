@@ -58,28 +58,27 @@ def split_text(text: str, *, max_chars: int = 1800) -> list[str]:
     return chunks
 
 
-def _safe_job_path(job_id: str, *parts: str) -> Path:
+def _job_dir(job_id: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise KeyError(job_id)
-    root = os.path.realpath(os.fspath(JOBS_DIR))
-    candidate = os.path.realpath(os.path.join(root, job_id, *parts))
-    safe_prefix = os.path.normcase(root + os.sep)
-    if not os.path.normcase(candidate).startswith(safe_prefix):
-        raise KeyError(job_id)
-    return Path(candidate)
-
-
-def _job_dir(job_id: str) -> Path:
-    return _safe_job_path(job_id)
+    if JOBS_DIR.exists():
+        for directory in JOBS_DIR.iterdir():
+            if (
+                not directory.is_symlink()
+                and directory.is_dir()
+                and directory.name == job_id
+            ):
+                return directory
+    raise KeyError(job_id)
 
 
 def _manifest_path(job_id: str) -> Path:
-    return _safe_job_path(job_id, "manifest.json")
+    return _job_dir(job_id) / "manifest.json"
 
 
 def audio_path(job_id: str) -> Path:
     """Return the fixed output path for a validated Gemini batch job."""
-    path = _safe_job_path(job_id, "narration.wav")
+    path = _job_dir(job_id) / "narration.wav"
     if not path.is_file():
         raise KeyError(job_id)
     return path
@@ -121,7 +120,7 @@ def create_job(
     canonical_voice = normalize_voice(voice)
     chunks = split_text(text, max_chars=max_chars)
     job_id = uuid.uuid4().hex
-    directory = _job_dir(job_id)
+    directory = JOBS_DIR / job_id
     (directory / "chunks").mkdir(parents=True, exist_ok=False)
     (directory / "source.txt").write_text(text, encoding="utf-8")
     created_at = _now()
