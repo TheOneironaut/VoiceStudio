@@ -68,6 +68,14 @@ def _manifest_path(job_id: str) -> Path:
     return _job_dir(job_id) / "manifest.json"
 
 
+def audio_path(job_id: str) -> Path:
+    """Return the fixed output path for a validated Gemini batch job."""
+    path = _job_dir(job_id) / "narration.wav"
+    if not path.is_file():
+        raise KeyError(job_id)
+    return path
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(

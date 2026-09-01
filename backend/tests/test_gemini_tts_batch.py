@@ -5,6 +5,7 @@ import wave
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from services import gemini_tts_batch
 
@@ -71,6 +72,21 @@ def test_manifest_never_contains_api_key(tmp_path, monkeypatch):
 
     assert "must-not-be-written" not in manifest
     assert "api_key" not in json.loads(manifest)
+
+
+def test_audio_path_uses_fixed_filename_and_rejects_invalid_job_ids(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(gemini_tts_batch, "JOBS_DIR", tmp_path)
+    job_id = "a" * 32
+    directory = tmp_path / job_id
+    directory.mkdir()
+    expected = directory / "narration.wav"
+    expected.write_bytes(b"RIFF")
+
+    assert gemini_tts_batch.audio_path(job_id) == expected
+    with pytest.raises(KeyError):
+        gemini_tts_batch.audio_path("../outside")
 
 
 def test_provider_batch_submission_is_idempotent(tmp_path, monkeypatch):

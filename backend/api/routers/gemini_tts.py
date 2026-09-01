@@ -107,5 +107,10 @@ def download_audio(job_id: str) -> FileResponse:
         ) from exc
     if job["status"] != "completed" or not job["output_file"]:
         raise HTTPException(status_code=409, detail="Gemini batch audio is not ready.")
-    path = gemini_tts_batch.JOBS_DIR / job_id / job["output_file"]
+    try:
+        path = gemini_tts_batch.audio_path(job_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail="Gemini batch audio not found."
+        ) from exc
     return FileResponse(path, media_type="audio/wav", filename=f"gemini-{job_id}.wav")
