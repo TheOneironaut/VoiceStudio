@@ -1723,7 +1723,15 @@ _mimetypes.add_type("audio/flac", ".flac")
 # once ready. No torch import pre-ready — it would block 10-20s on the very
 # import whose progress this endpoint exists to report.
 @app.get("/health")
-def health():
+async def health():
+    # Keep the early-bind probe on uvicorn's event-loop thread.  A synchronous
+    # FastAPI handler is dispatched through AnyIO's worker pool; on Windows,
+    # starting that worker while Phase A is concurrently loading torch/numpy
+    # native DLLs can block in ``threading.Thread.start``.  The probe then
+    # stops answering even though uvicorn is listening, and the desktop shell
+    # eventually reports a misleading 300-second startup timeout.  This path
+    # performs no blocking I/O, so an async handler is both cheaper and immune
+    # to that native-import/thread-start deadlock.
     if not _startup_progress.is_ready():
         _step, _label = _startup_progress.current_step()
         return JSONResponse(
@@ -1754,7 +1762,9 @@ def health():
 # requires the x-omnivoice-backend marker header (stamped by the outermost
 # middleware) before trusting this body.
 @app.get("/startup/progress", include_in_schema=False)
-def startup_progress_endpoint():
+async def startup_progress_endpoint():
+    # See ``health`` above: this endpoint must remain callable specifically
+    # while the background thread is importing the native ML stack.
     return {**_startup_progress.snapshot(), "app_version": APP_VERSION}
 
 

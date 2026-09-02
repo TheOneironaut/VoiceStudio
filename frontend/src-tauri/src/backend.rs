@@ -563,6 +563,20 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
         // process group/Job rather than escaping into a new session.
         ("OMNIVOICE_DESKTOP_CONTAINED".into(), "1".into()),
     ];
+    // The Gemini Windows edition is cloud-first, but it currently shares the
+    // upstream backend and therefore still imports the optional local ML
+    // adapters.  Importing torch/numpy in Phase A's executor thread can
+    // deadlock CPython's Windows DLL loader against FastAPI worker-thread
+    // creation: uvicorn binds successfully, then readiness remains at
+    // `ml_imports` until the desktop's 300-second timeout.  Run Phase A inline
+    // for this edition.  A cold boot takes a few seconds longer before the
+    // socket binds, but it completes reliably; the generic VoiceStudio build
+    // keeps its early-bind behavior.
+    if app.config().identifier == "com.theoneironaut.voicestudio-gemini"
+        && std::env::var("OMNIVOICE_EAGER_INIT").is_err()
+    {
+        env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()));
+    }
     // Pin the child's OMNIVOICE_PORT to the value Rust resolved so Python's
     // network_share.backend_port() always agrees with the uvicorn --port we
     // pass below — otherwise a user-set OMNIVOICE_PORT would change the

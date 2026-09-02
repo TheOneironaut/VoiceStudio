@@ -18,6 +18,8 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Fixed
 
+- The Gemini Windows backend now avoids a Windows native-import/thread-start deadlock that left Uvicorn listening while setup timed out after 300 seconds. — thanks @TheOneironaut!
+
 ## [0.5.2] — 2026-09-02
 
 **Highlights**

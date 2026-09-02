@@ -174,6 +174,22 @@ def test_progress_ledger_state_machine():
     assert sp.snapshot()["status"] == "ready"
 
 
+def test_early_probe_handlers_do_not_enter_anyio_threadpool():
+    """The probe routes run on the event loop during native ML imports.
+
+    On Windows, dispatching these tiny handlers through AnyIO's worker pool
+    can deadlock thread creation against torch/numpy DLL loading.  Uvicorn is
+    then visibly listening, but every readiness probe wedges until the shell's
+    300-second budget expires.
+    """
+    src = (BACKEND_DIR / "main.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    async_names = {
+        n.name for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)
+    }
+    assert {"health", "startup_progress_endpoint"} <= async_names
+
+
 def test_phase_a_thread_join_contract():
     """Shutdown joins the Phase A executor thread via the started/finished
     events. Three properties keep that join sound (review finds on #1550):

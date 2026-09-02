@@ -48,6 +48,14 @@ def test_gemini_bundle_cannot_install_upstream_updates():
     assert "if !updater_enabled(app)" in updater
 
 
+def test_gemini_bundle_uses_windows_safe_eager_backend_startup():
+    backend = (ROOT / "frontend" / "src-tauri" / "src" / "backend.rs").read_text(
+        encoding="utf-8"
+    )
+    assert 'app.config().identifier == "com.theoneironaut.voicestudio-gemini"' in backend
+    assert 'env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()))' in backend
+
+
 def test_readme_promotes_the_exact_rolling_release_asset():
     readme = README.read_text(encoding="utf-8")
 
