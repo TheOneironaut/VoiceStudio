@@ -8,12 +8,14 @@ working VoiceStudio install on Windows 10 / 11 (x64).
 ### Using the MSI installer
 
 - **Windows 10 (21H2 or newer) or Windows 11**, x64.
-- **~10 GB free disk** for the app, its Python environment, and model weights.
+- **~10 GB free disk** for the app, its Python environment, and working data.
+  Local engine weights require additional space only if you select one.
 - Optional: an **NVIDIA GPU + driver** for CUDA acceleration — see
   [GPU support on Windows](#gpu-support). AMD GPUs run CPU-only on Windows.
 
-That's it — Python, FFmpeg, and the model weights are bundled or bootstrapped
-by the app itself on first launch. No toolchain needed.
+That's it — Python and FFmpeg are bundled or bootstrapped by the app itself on
+first launch. Gemini is the default TTS engine, so no local TTS checkpoint is
+downloaded unless you explicitly select a local engine. No toolchain needed.
 
 ### Building from source
 
@@ -67,8 +69,9 @@ bun install
 bun run desktop-prod
 ```
 
-The first launch creates the Python venv via `uv`, syncs deps, and downloads
-model weights. The splash screen shows progress.
+The first launch creates the Python venv via `uv` and syncs dependencies. The
+splash screen shows progress. Local model weights download only after you
+explicitly select a local engine.
 
 > **Note:** `bun run desktop-prod` runs a bash script under the hood. You can
 > launch it from PowerShell or cmd as shown — it finds Git Bash automatically

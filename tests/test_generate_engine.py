@@ -9,8 +9,8 @@ per-request override. These tests prove:
   2. An explicit per-request `engine` form field overrides the selection
      (same pattern as /ws/tts's `engine` and /v1/audio/speech's `model`).
   3. Unknown / unavailable engines fail with an actionable 400.
-  4. The default path (no selection, no override) still runs OmniVoice —
-     backward compatible for existing API consumers.
+  4. The default path (no selection, no override) runs Gemini without loading
+     or downloading the local OmniVoice checkpoint.
   5. Engines with `applies_own_mastering=True` skip the broadcast mastering
      chain, mirroring /v1/audio/speech and /ws/tts.
 
@@ -23,7 +23,7 @@ os.environ.setdefault("OMNIVOICE_DISABLE_FILE_LOG", "1")
 
 import importlib
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -198,27 +198,20 @@ def test_generate_cpu_only_host_emits_no_routing_header(client, monkeypatch, no_
     assert "x-omnivoice-routing" not in {k.lower() for k in res.headers}
 
 
-def test_generate_default_path_still_runs_omnivoice(client, monkeypatch, tmp_path):
-    """No selection + no override → the OmniVoice model path, unchanged."""
+def test_generate_default_path_runs_gemini(client, monkeypatch, tmp_path, no_omnivoice_model):
+    """No selection + no override uses Gemini and never touches OmniVoice."""
     # Neutralize any persisted Settings pick so the default resolution applies.
     from core import prefs as _prefs
     monkeypatch.setattr(_prefs, "_PREFS_PATH", str(tmp_path / "prefs.json"))
     monkeypatch.delenv("OMNIVOICE_TTS_BACKEND", raising=False)
 
-    mock_model = MagicMock()
-    mock_model.sampling_rate = 24000
-    mock_model.generate.return_value = [torch.zeros(1, 24000)]
-
-    async def _get():
-        return mock_model
-
-    import api.routers.generation as gen_mod
-    monkeypatch.setattr(gen_mod, "get_model", _get)
+    gemini = _make_fake_engine("gemini-3.1-flash-tts", own_mastering=True)
+    monkeypatch.setitem(_tts_mod()._REGISTRY, "gemini-3.1-flash-tts", gemini)
 
     res = client.post("/generate", data={"text": "Default path"})
 
     assert res.status_code == 200, res.text
-    assert mock_model.generate.called
+    assert len(gemini.calls) == 1
     assert res.headers.get("x-audio-id")
 
 

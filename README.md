@@ -27,7 +27,11 @@
   </p>
 
   <p>
-    <a href="https://github.com/debpalash/VoiceStudio/releases/latest"><img src="https://img.shields.io/badge/Download-macOS_·_Windows_·_Linux-10b981?style=for-the-badge" alt="Download VoiceStudio" /></a>
+    <a href="https://github.com/TheOneironaut/VoiceStudio/releases/download/gemini-windows/VoiceStudio-Gemini-Windows-x64.msi"><img src="https://img.shields.io/badge/Download-Gemini_Windows_MSI-10b981?style=for-the-badge&logo=windows" alt="Download VoiceStudio Gemini for Windows" /></a>
+  </p>
+
+  <p>
+    <a href="https://github.com/TheOneironaut/VoiceStudio/actions/workflows/gemini-windows-msi.yml"><img src="https://github.com/TheOneironaut/VoiceStudio/actions/workflows/gemini-windows-msi.yml/badge.svg" alt="Gemini Windows MSI build" /></a>
   </p>
 </div>
 
@@ -37,6 +41,9 @@
 
 > [!WARNING]
 > **Active beta.** Use the [latest release](https://github.com/debpalash/VoiceStudio/releases/latest) for stable work or `main` for current fixes. Report problems through [GitHub Issues](https://github.com/debpalash/VoiceStudio/issues).
+
+> [!NOTE]
+> **Gemini edition.** New installations use **Gemini 3.1 Flash TTS Preview** by default. Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` before generating speech. VoiceStudio does not download a local TTS checkpoint unless you explicitly select a local engine; an existing saved engine choice is preserved.
 
 ## At a glance
 
@@ -58,11 +65,11 @@
 | Platform | Package | Guide |
 |---|---|---|
 | macOS 13.3+ | DMG, Apple Silicon | [Install on macOS](docs/install/macos.md) |
-| Windows 10/11 | MSI, x64 | [Install on Windows](docs/install/windows.md) |
+| Windows 10/11 | [Gemini MSI, x64](https://github.com/TheOneironaut/VoiceStudio/releases/download/gemini-windows/VoiceStudio-Gemini-Windows-x64.msi) | [Install on Windows](docs/install/windows.md) |
 | Linux | AppImage, x86_64 with glibc 2.39+ | [Install on Linux](docs/install/linux.md) |
 | Docker | CUDA, ROCm, or CPU; worker-only GPU profiles | [Run with Docker](docs/install/docker.md) |
 
-Download packages from the [latest release](https://github.com/debpalash/VoiceStudio/releases/latest). First launch creates a managed Python environment and downloads the default model. Later launches reuse both.
+Download this fork's [Windows Gemini MSI](https://github.com/TheOneironaut/VoiceStudio/releases/download/gemini-windows/VoiceStudio-Gemini-Windows-x64.msi). First launch creates a managed Python environment, but the Gemini default does not download local TTS model weights. Local engines remain available as an explicit choice.
 
 > [!NOTE]
 > On macOS, first launch needs a one-time right-click → **Open** approval. Intel Macs cannot run the local Python backend; use a [remote backend](docs/install/macos.md) instead.

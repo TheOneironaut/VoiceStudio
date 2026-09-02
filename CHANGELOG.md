@@ -14,6 +14,8 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Changed
 
+- New installations default to Gemini 3.1 Flash TTS, avoiding local TTS checkpoint downloads until a local engine is explicitly selected. — thanks @TheOneironaut!
+
 ### Added
 
 - Gemini 3.1 Flash TTS Preview is available as a native preset-voice engine with persistent immediate and provider-batch jobs. — thanks @TheOneironaut!

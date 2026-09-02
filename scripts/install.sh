@@ -314,7 +314,7 @@ install_binary() {
         step "next" "Run VoiceStudio from ~/.local/bin (or your app launcher)"
     fi
     echo ""
-    note "First launch downloads ML model weights (~5 GB). After that, launches are instant."
+    note "Gemini is the default TTS engine; local TTS weights download only after selecting a local engine."
     echo ""
 }
 
@@ -599,7 +599,7 @@ install_source() {
     echo ""
     step "next" "Run ./run.sh to start VoiceStudio"
     echo ""
-    note "First launch downloads ~5 GB of ML model weights (VoiceStudio TTS + Whisper)."
+    note "Gemini is the default TTS engine; local TTS weights download only after selecting a local engine."
     note "After that, launches are instant."
     echo ""
     note "GPU: $GPU_INFO"

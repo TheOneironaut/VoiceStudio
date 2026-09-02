@@ -1,27 +1,29 @@
 # Gemini 3.1 Flash TTS Preview
 
-Gemini is an opt-in cloud TTS engine for steerable, multilingual narration. It
+Gemini is this fork's default cloud TTS engine for steerable, multilingual narration. It
 is locked to `gemini-3.1-flash-tts-preview`; the UI does not expose other Gemini
-models. Text and narration instructions leave the machine only after you select
-this engine and start generation.
+models. Text and narration instructions leave the machine only after you start
+generation with Gemini selected. Existing saved engine choices still win over
+the default.
 
 ## Setup
 
-Install the locked dependencies, set a key in the shell that starts VoiceStudio,
-and select **Gemini 3.1 Flash TTS Preview** in **Model Catalogue → Engines**:
+Install the locked dependencies and set a key in the shell that starts VoiceStudio:
 
 ```powershell
 uv sync
-$env:GEMINI_API_KEY="YOUR_GOOGLE_API_KEY"
-$env:OMNIVOICE_TTS_BACKEND="gemini-3.1-flash-tts"
+[Environment]::SetEnvironmentVariable("GEMINI_API_KEY", "YOUR_GOOGLE_API_KEY", "User")
 ```
 
 `GOOGLE_API_KEY` is accepted as a fallback. The key is read from the environment;
 it is not written to preferences, manifests, logs, or generated project files.
+Restart VoiceStudio after setting it so the installed app receives the new value.
 
 The engine row includes Google's preset voice picker. `GEMINI_TTS_VOICE` can pin
 the same choice for headless use. Gemini does not clone reference audio, so
 VoiceStudio rejects clone-dependent flows instead of silently changing voices.
+No local TTS checkpoint is downloaded unless you explicitly select a local TTS
+engine. `OMNIVOICE_TTS_BACKEND` can still override the default for headless use.
 
 ## Long-form and provider batch
 

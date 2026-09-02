@@ -1,0 +1,96 @@
+name: Gemini Windows MSI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gemini-windows-msi
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RUST_TARGET: x86_64-pc-windows-msvc
+  RELEASE_TAG: gemini-windows
+  MSI_NAME: VoiceStudio-Gemini-Windows-x64.msi
+
+jobs:
+  build:
+    name: Build and publish Windows MSI
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend/src-tauri -> target
+          key: ${{ env.RUST_TARGET }}-gemini
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Bundle uv
+        shell: pwsh
+        run: |
+          $version = "0.11.7"
+          $archive = Join-Path $env:RUNNER_TEMP "uv.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "uv"
+          Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/$version/uv-$env:RUST_TARGET.zip" -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+          New-Item -ItemType Directory -Force frontend/src-tauri/binaries | Out-Null
+          Copy-Item -LiteralPath (Join-Path $expanded "uv.exe") -Destination "frontend/src-tauri/binaries/uv-$env:RUST_TARGET.exe"
+
+      - name: Bundle FFmpeg
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $expanded = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+          $bin = Get-ChildItem -LiteralPath $expanded -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName "bin" }
+          Copy-Item -LiteralPath (Join-Path $bin "ffmpeg.exe") -Destination "frontend/src-tauri/binaries/ffmpeg-$env:RUST_TARGET.exe"
+          Copy-Item -LiteralPath (Join-Path $bin "ffprobe.exe") -Destination "frontend/src-tauri/binaries/ffprobe-$env:RUST_TARGET.exe"
+
+      - name: Build MSI
+        working-directory: frontend
+        run: bun run tauri build --target $env:RUST_TARGET --bundles msi --config src-tauri/tauri.gemini-windows.conf.json
+
+      - name: Verify and stage MSI
+        shell: pwsh
+        run: |
+          $bundle = "frontend/src-tauri/target/$env:RUST_TARGET/release/bundle/msi"
+          $msi = Get-ChildItem -LiteralPath $bundle -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw "Tauri did not produce an MSI in $bundle" }
+          & ./scripts/verify-windows-msi.ps1 -MsiPath $msi.FullName
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item -LiteralPath $msi.FullName -Destination "dist/$env:MSI_NAME"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$env:MSI_NAME").Hash.ToLowerInvariant()
+          "$hash  $env:MSI_NAME" | Set-Content -Encoding ascii "dist/$env:MSI_NAME.sha256"
+
+      - name: Publish rolling Gemini release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "Windows installer for the Gemini-default VoiceStudio build from commit $env:GITHUB_SHA. Existing engine preferences are preserved; new installations default to Gemini 3.1 Flash TTS and do not download a local TTS checkpoint."
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title "VoiceStudio Gemini for Windows" --notes $notes
+          } else {
+            gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --title "VoiceStudio Gemini for Windows" --notes $notes
+          }
+          gh release upload $env:RELEASE_TAG "dist/$env:MSI_NAME" "dist/$env:MSI_NAME.sha256" --clobber --repo $env:GITHUB_REPOSITORY

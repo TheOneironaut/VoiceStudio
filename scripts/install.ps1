@@ -252,8 +252,8 @@ Write-Host ("─" * 56) -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  next             Run bun run desktop-prod to start VoiceStudio" -ForegroundColor Green
 Write-Host ""
-Note "First launch downloads ~5 GB of ML model weights (VoiceStudio TTS + Whisper)."
-Note "After that, launches are instant."
+Note "Gemini is the default TTS engine; no local TTS checkpoint is downloaded unless you select a local engine."
+Note "The first launch still creates the managed Python environment."
 Write-Host ""
 Note "GPU: $gpuInfo"
 Note "Logs: $logDir\omnivoice.log"

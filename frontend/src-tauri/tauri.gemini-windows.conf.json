@@ -1,0 +1,9 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "VoiceStudio Gemini",
+  "identifier": "com.theoneironaut.voicestudio-gemini",
+  "bundle": {
+    "targets": ["msi"],
+    "createUpdaterArtifacts": false
+  }
+}

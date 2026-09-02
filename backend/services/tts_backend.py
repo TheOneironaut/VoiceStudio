@@ -10,7 +10,7 @@ A uniform protocol for every TTS engine. Today we ship:
 
 Callers should use `get_active_tts_backend()` to pick the configured engine
 instead of importing a specific class. The selection is controlled by the
-`OMNIVOICE_TTS_BACKEND` env var (default: `"omnivoice"`).
+`OMNIVOICE_TTS_BACKEND` env var (default: `"gemini-3.1-flash-tts"`).
 
 The protocol deliberately stays narrow: `generate(...)` returns a 1-channel
 tensor sampled at `sample_rate`. Streaming is left for a later pass — the
@@ -2617,11 +2617,18 @@ def gpu_routing_verdict() -> dict:
     }
 
 
+DEFAULT_TTS_BACKEND = "gemini-3.1-flash-tts"
+
+
 def active_backend_id() -> str:
     # Env var > persisted UI choice > default. Env wins so power-users can
     # pin a backend without the Settings picker silently undoing it.
     from core import prefs
-    return prefs.resolve("tts_backend", env="OMNIVOICE_TTS_BACKEND", default="omnivoice")
+    return prefs.resolve(
+        "tts_backend",
+        env="OMNIVOICE_TTS_BACKEND",
+        default=DEFAULT_TTS_BACKEND,
+    )
 
 
 # Cached active backend instance + its id (MM2-01). Without this, every call

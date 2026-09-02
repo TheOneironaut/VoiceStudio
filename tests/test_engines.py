@@ -75,6 +75,15 @@ def test_tts_active_backend_env_override(monkeypatch):
     assert tts_backend.active_backend_id() == "omnivoice"
 
 
+def test_tts_active_backend_defaults_to_gemini(monkeypatch, tmp_path):
+    from core import prefs as _prefs
+
+    monkeypatch.setattr(_prefs, "_PREFS_PATH", str(tmp_path / "prefs.json"))
+    monkeypatch.delenv("OMNIVOICE_TTS_BACKEND", raising=False)
+
+    assert tts_backend.active_backend_id() == "gemini-3.1-flash-tts"
+
+
 # ── #919: sherpa-onnx gates on OMNIVOICE_SHERPA_MODEL ────────────────────────
 # sherpa-onnx ships no bundled model, so with the package installed but no model
 # dir configured it must report unavailable-with-a-reason — not "ready" and then
