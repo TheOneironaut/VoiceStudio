@@ -74,6 +74,12 @@ jobs:
 
       - name: Promote validated upstream sync to main
         if: steps.sync.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git push origin HEAD:main
           git push origin --delete upstream-sync
+          # Pushes made with GITHUB_TOKEN intentionally do not start another
+          # workflow. Dispatch the rolling installer explicitly so the public
+          # MSI always matches the newly promoted main branch.
+          gh workflow run gemini-windows-msi.yml --repo "$GITHUB_REPOSITORY" --ref main
