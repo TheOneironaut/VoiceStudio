@@ -189,6 +189,13 @@ def test_early_probe_handlers_do_not_enter_anyio_threadpool():
     }
     assert {"health", "startup_progress_endpoint"} <= async_names
 
+    health = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "health"
+    )
+    segment = ast.get_source_segment(src, health)
+    assert "await asyncio.to_thread(_health_device)" in segment
+
 
 def test_phase_a_thread_join_contract():
     """Shutdown joins the Phase A executor thread via the started/finished

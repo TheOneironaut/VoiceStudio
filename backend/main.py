@@ -1744,6 +1744,14 @@ async def health():
             },
             headers={"Retry-After": "2"},
         )
+    # Native imports are complete once ready, so it is safe to use a worker
+    # here.  Keep CUDA driver discovery off the event loop: the first driver
+    # query can itself be slow on a broken/mismatched Windows installation.
+    device = await asyncio.to_thread(_health_device)
+    return {"status": "ok", "device": device, "version": APP_VERSION}
+
+
+def _health_device() -> str:
     import torch
 
     device = "cpu"
@@ -1751,8 +1759,7 @@ async def health():
         device = f"cuda ({torch.cuda.get_device_name(0)})"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = "mps"
-
-    return {"status": "ok", "device": device, "version": APP_VERSION}
+    return device
 
 
 # ── Startup progress ────────────────────────────────────────────────────
