@@ -20,14 +20,27 @@ fi
 git fetch origin main
 git fetch upstream "$UPSTREAM_BRANCH"
 
-if git fetch origin "$SYNC_BRANCH" 2>/dev/null; then
-  git checkout -B "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
-  git merge --no-edit origin/main
-else
-  git checkout -B "$SYNC_BRANCH" origin/main
-fi
+# Every run starts from the current main branch. A stale sync branch from an
+# interrupted run must never become part of the next merge candidate.
+git checkout -B "$SYNC_BRANCH" origin/main
 
-git merge --no-edit "upstream/$UPSTREAM_BRANCH"
+if ! git merge --no-edit "upstream/$UPSTREAM_BRANCH"; then
+  mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+
+  # Both repositories maintain release notes at the top of CHANGELOG.md, so
+  # otherwise harmless upstream updates frequently conflict there. Keep the
+  # Gemini edition's curated changelog while still failing closed for any code
+  # conflict that needs a human decision.
+  if [[ "${#conflicts[@]}" -eq 1 && "${conflicts[0]}" == "CHANGELOG.md" ]]; then
+    git checkout --ours -- CHANGELOG.md
+    git add CHANGELOG.md
+    git commit --no-edit
+  else
+    printf 'Upstream merge requires manual conflict resolution:\n' >&2
+    printf '  %s\n' "${conflicts[@]}" >&2
+    exit 1
+  fi
+fi
 
 if git diff --quiet origin/main..HEAD; then
   echo "The sync branch is already current."
