@@ -15,6 +15,7 @@ the frozen-backend fallback mirror it for their toolchains.
 ### Changed
 
 - New installations default to Gemini 3.1 Flash TTS, avoiding local TTS checkpoint downloads until a local engine is explicitly selected. — thanks @TheOneironaut!
+- The Gemini Windows edition stays on its dedicated rolling MSI instead of consuming standard upstream updater manifests. — thanks @TheOneironaut!
 
 ### Added
 

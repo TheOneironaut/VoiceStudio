@@ -26,6 +26,15 @@ const STABLE_PER_USER_MANIFEST: &str =
     "https://github.com/debpalash/VoiceStudio/releases/latest/download/latest-user.json";
 const PREVIEW_PER_USER_MANIFEST: &str =
     "https://github.com/debpalash/VoiceStudio/releases/download/preview/latest-user.json";
+const GEMINI_BUNDLE_IDENTIFIER: &str = "com.theoneironaut.voicestudio-gemini";
+
+fn updater_enabled_for_identifier(identifier: &str) -> bool {
+    identifier != GEMINI_BUNDLE_IDENTIFIER
+}
+
+fn updater_enabled(app: &AppHandle) -> bool {
+    updater_enabled_for_identifier(&app.config().identifier)
+}
 
 fn is_per_user_bundle(app: &AppHandle) -> bool {
     app.package_info().name.ends_with("(Current User)")
@@ -117,6 +126,13 @@ fn newest_of(a: Update, b: Update) -> Update {
 /// A manifest fetch error is non-fatal as long as the other manifest answers;
 /// an error is returned only when every manifest fails.
 async fn best_update(app: &AppHandle, channel: &str) -> Result<Option<Update>, String> {
+    // The rolling Gemini MSI intentionally has no signed updater artifacts.
+    // Never let that distinct edition consume the upstream manifests and
+    // replace itself with the standard VoiceStudio package.
+    if !updater_enabled(app) {
+        return Ok(None);
+    }
+
     let (stable_manifest, preview_manifest) = scoped_manifests(is_per_user_bundle(app));
     if channel != "preview" {
         return build_updater(app, stable_manifest, false)?
@@ -286,6 +302,12 @@ pub async fn list_releases(_channel: String) -> Result<Vec<ReleaseInfo>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_bundle_never_consumes_upstream_updates() {
+        assert!(!updater_enabled_for_identifier(GEMINI_BUNDLE_IDENTIFIER));
+        assert!(updater_enabled_for_identifier("com.debpalash.omnivoice-studio"));
+    }
 
     fn v(s: &str) -> Version {
         Version::parse(s).unwrap()
