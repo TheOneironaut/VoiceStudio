@@ -157,7 +157,7 @@ def test_preflight_includes_active_engine_routing(client):
     gr = body["gpu_routing"]
     if gr is not None:
         assert gr["routing_status"] in {
-            "accelerated", "cpu_fallback", "cpu_only", "unavailable", "none",
+            "accelerated", "cpu_fallback", "cpu_only", "unavailable", "none", "n/a",
         }
         assert "host_family" in gr
         ids = {c["id"] for c in body["checks"]}

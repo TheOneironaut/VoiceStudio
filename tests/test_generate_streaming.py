@@ -426,7 +426,12 @@ def test_stream_native_model_path(client, monkeypatch, tmp_path):
     import api.routers.generation as gen_mod
     monkeypatch.setattr(gen_mod, "get_model", _get)
 
-    data = {"text": LONG_TEXT, "seed": "9", "max_chunk_chars": "60"}
+    data = {
+        "text": LONG_TEXT,
+        "engine": "omnivoice",
+        "seed": "9",
+        "max_chunk_chars": "60",
+    }
     events = _stream_events(client, data)
     types = [e["type"] for e, _ in events]
     n_chunks = types.count("chunk")

@@ -82,6 +82,11 @@ def capture_first_run(data_dir: str | os.PathLike, timeout: float = 180.0) -> di
         OMNIVOICE_MODEL="test",
         OMNIVOICE_DISABLE_FILE_LOG="1",
         OMNIVOICE_DATA_DIR=str(data_dir),
+        # The Gemini edition intentionally boots with the cloud backend active.
+        # Engine discovery only checks that credentials are configured; it does
+        # not call Google.  Use a non-secret placeholder so the first-run probe
+        # can validate the active-engine contract without network traffic.
+        GEMINI_API_KEY="probe-placeholder-do-not-use",
     )
     try:
         proc = subprocess.run(
