@@ -523,7 +523,9 @@
     "view_all_files": "Visualizza tutti i file",
     "file": "Archivio",
     "audiobook_title": "Audiolibro",
-    "audiobook_desc": "Trasforma una lunga sceneggiatura o un EPUB in un audiolibro suddiviso in capitoli: copertine, metadati, un narratore."
+    "audiobook_desc": "Trasforma una lunga sceneggiatura o un EPUB in un audiolibro suddiviso in capitoli: copertine, metadati, un narratore.",
+    "convert_title": "Cambia voce",
+    "convert_desc": "Dillo una volta — ascoltalo con un'altra voce. Da voce a voce, tutto in locale."
   },
   "clone": {
     "prompt": "Richiedi",
@@ -616,7 +618,8 @@
     "seed_placeholder": "casuale ogni volta",
     "seed_keep": "Conserva questo seme",
     "seed_reroll": "Nuovo seme",
-    "seed_reroll_hint": "Lancia un nuovo seme casuale e conservalo"
+    "seed_reroll_hint": "Lancia un nuovo seme casuale e conservalo",
+    "define_convert": "Converti"
   },
   "about": {
     "app": "App",
@@ -743,6 +746,26 @@
     "engineCompatLabel": "{{family}} compatibilità motore",
     "active": "attivo",
     "whyUnavailable": "Cosa serve",
+    "diskDetails": "Dettagli disco",
+    "diskModelDownload": "Download del modello",
+    "diskPackageDownload": "Download dei pacchetti",
+    "diskUniqueInstalled": "Installazione univoca",
+    "diskPotentiallyShared": "Potenzialmente condiviso",
+    "diskTemporary": "Spazio libero temporaneo",
+    "diskDestination": "Destinazione",
+    "diskDestination_hf_model_cache": "Volume della cache modelli Hugging Face",
+    "diskDestination_engine_data": "Volume dei dati dei motori VoiceStudio",
+    "diskActualModel": "Modello effettivo",
+    "diskActualEnvironment": "Ambiente effettivo",
+    "diskActualCache": "Cache condivisa effettiva",
+    "diskActualTotal": "Totale effettivamente occupato",
+    "diskEstimateConfidence": "Affidabilità della stima",
+    "diskActualConfidence": "Affidabilità della misura",
+    "diskConfidence_exact": "Esatta",
+    "diskConfidence_measured": "Misurata",
+    "diskConfidence_estimated": "Stimata",
+    "diskConfidence_unknown": "Sconosciuta",
+    "diskDedup_uv_same_volume": "uv deduplica wheel identiche solo quando la cache e l’ambiente del motore sono sullo stesso volume.",
     "sectionReady": "Pronti all'uso",
     "sectionMore": "Aggiungi altri motori",
     "lastError": "Ultimo errore: {{error}}",
@@ -1569,6 +1592,9 @@
     "subs_in_video": "Sottotitoli nel video",
     "hardsub": "Masterizza i sottotitoli nell'immagine (hardsub)",
     "dual_subs_video": "Doppio (tradotto sopra l'originale in corsivo)",
+    "subs_style_line": "Riga",
+    "subs_style_karaoke": "Karaoke (evidenziazione delle parole)",
+    "karaoke_dual_note": "Il karaoke non è disponibile con i sottotitoli doppi",
     "format": "Formato",
     "wav_lossless": "WAV (senza perdita di dati)",
     "mp3_compressed": "MP3 (compresso)",
@@ -2036,6 +2062,7 @@
     "retry_cancelled": "Nuovo tentativo annullato",
     "transcription_failed": "Trascrizione non riuscita: {{message}}",
     "import_srt_no_job": "Carica o importa prima un video: non esiste un lavoro a cui allegare i sottotitoli.",
+    "import_srt_after_speakers": "SRT in coda. Prima verrà completata l’analisi dei parlanti per conservare le voci clonate.",
     "imported_cues": "Cue {{count}} importati da {{file}}",
     "skipped_malformed": "{{count}} saltato (formato non valido)",
     "dropped_overlap": "{{count}} eliminato (sovrapposizione)",
@@ -2646,5 +2673,18 @@
     "cta_design": "Descrivine una in Voce ← per progettarla",
     "new": "Nuova voce",
     "none_selected": "Nessuna voce selezionata — descrivine una, trascina un audio o scegli qui sotto."
+  },
+  "convert": {
+    "source_kicker": "Clip sorgente",
+    "drop_audio": "Trascina qui il clip da convertire — o fai clic. WAV, MP3, M4A…",
+    "target_voice": "Voce di destinazione",
+    "pick_voice": "Scegli un profilo vocale…",
+    "match_duration": "Adatta alla durata sorgente",
+    "match_duration_hint": "Allunga il risultato nel tempo (tono preservato) per avvicinarlo alla durata del clip sorgente.",
+    "convert": "Converti",
+    "converting": "Conversione…",
+    "transcript": "Cosa è stato sentito",
+    "result_kicker": "Take convertito",
+    "need_source_and_voice": "Aggiungi prima un clip sorgente e scegli una voce di destinazione."
   }
 }

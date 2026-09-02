@@ -523,7 +523,9 @@
     "view_all_files": "Visa alla filer",
     "file": "Arkiv",
     "audiobook_title": "Ljudbok",
-    "audiobook_desc": "Förvandla ett långt manus eller EPUB till en ljudbok med kapitel – omslag, metadata, en berättare."
+    "audiobook_desc": "Förvandla ett långt manus eller EPUB till en ljudbok med kapitel – omslag, metadata, en berättare.",
+    "convert_title": "Röstväxlare",
+    "convert_desc": "Säg det en gång — hör det med en annan röst. Tal till tal, helt lokalt."
   },
   "clone": {
     "prompt": "Fråga",
@@ -616,7 +618,8 @@
     "insert_token": "Infoga uttryckstoken",
     "script": "Manus",
     "starting_points": "Utgångspunkter",
-    "voice_kicker": "Röst"
+    "voice_kicker": "Röst",
+    "define_convert": "Konvertera"
   },
   "about": {
     "app": "App",
@@ -743,6 +746,26 @@
     "engineCompatLabel": "{{family}} motorkompatibilitet",
     "active": "aktiv",
     "whyUnavailable": "Vad som krävs",
+    "diskDetails": "Diskdetaljer",
+    "diskModelDownload": "Modellhämtning",
+    "diskPackageDownload": "Pakethämtning",
+    "diskUniqueInstalled": "Unikt installerat",
+    "diskPotentiallyShared": "Möjligen delat",
+    "diskTemporary": "Tillfälligt ledigt utrymme",
+    "diskDestination": "Mål",
+    "diskDestination_hf_model_cache": "Volym för Hugging Face-modellcache",
+    "diskDestination_engine_data": "Volym för VoiceStudio-motordata",
+    "diskActualModel": "Faktisk modell",
+    "diskActualEnvironment": "Faktisk miljö",
+    "diskActualCache": "Faktisk delad cache",
+    "diskActualTotal": "Faktisk egen totalsumma",
+    "diskEstimateConfidence": "Uppskattningens tillförlitlighet",
+    "diskActualConfidence": "Mätningens tillförlitlighet",
+    "diskConfidence_exact": "Exakt",
+    "diskConfidence_measured": "Uppmätt",
+    "diskConfidence_estimated": "Uppskattad",
+    "diskConfidence_unknown": "Okänd",
+    "diskDedup_uv_same_volume": "uv deduplicerar identiska wheels endast när cachen och motormiljön finns på samma volym.",
     "sectionReady": "Redo att använda",
     "sectionMore": "Lägg till fler motorer",
     "lastError": "Senaste fel: {{error}}",
@@ -1569,6 +1592,9 @@
     "subs_in_video": "Undertexter i video",
     "hardsub": "Bränn undertexter i bild (hardsub)",
     "dual_subs_video": "Dual (översatt ovanpå det kursiverade originalet)",
+    "subs_style_line": "Rad",
+    "subs_style_karaoke": "Karaoke (ordmarkering)",
+    "karaoke_dual_note": "Karaoke är inte tillgängligt med dubbla undertexter",
     "format": "Format",
     "wav_lossless": "WAV (förlustfri)",
     "mp3_compressed": "MP3 (komprimerad)",
@@ -2036,6 +2062,7 @@
     "retry_cancelled": "Försök igen avbröts",
     "transcription_failed": "Transkription misslyckades: {{message}}",
     "import_srt_no_job": "Ladda upp eller mata in en video först – det finns inget jobb att bifoga undertexter till.",
+    "import_srt_after_speakers": "SRT har köats. Talaranalysen slutförs först så att klonade röster bevaras.",
     "imported_cues": "Importerade {{count}} signal(er) från {{file}}",
     "skipped_malformed": "{{count}} hoppade över (felformat)",
     "dropped_overlap": "{{count}} tappade (överlappning)",
@@ -2646,5 +2673,18 @@
     "cta_design": "Beskriv en röst i Röst ← för att designa den",
     "new": "Ny röst",
     "none_selected": "Ingen röst vald — beskriv en, släpp ljud eller välj nedan."
+  },
+  "convert": {
+    "source_kicker": "Källklipp",
+    "drop_audio": "Släpp klippet som ska konverteras — eller klicka. WAV, MP3, M4A…",
+    "target_voice": "Målröst",
+    "pick_voice": "Välj en röstprofil…",
+    "match_duration": "Matcha källans längd",
+    "match_duration_hint": "Sträcker resultatet i tid (tonhöjden bevaras) så att det hamnar nära källklippets längd.",
+    "convert": "Konvertera",
+    "converting": "Konverterar…",
+    "transcript": "Vad som hördes",
+    "result_kicker": "Konverterad tagning",
+    "need_source_and_voice": "Lägg först till ett källklipp och välj en målröst."
   }
 }

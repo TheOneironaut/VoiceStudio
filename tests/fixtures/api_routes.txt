@@ -63,6 +63,8 @@ GET /community/submit-url
 GET /dictation/models
 GET /dictation/prefs
 GET /docs
+GET /dub/ass/{job_id}
+GET /dub/ass/{job_id}/{filename}
 GET /dub/audio/{job_id}
 GET /dub/download-audio/{job_id}
 GET /dub/download-audio/{job_id}/{filename}
@@ -93,6 +95,7 @@ GET /engines/sidecar/{engine_id}/install/status
 GET /engines/sonitranslate/status
 GET /engines/translation
 GET /engines/tts
+GET /engines/{engine_id}/disk-usage
 GET /engines/{engine_id}/health
 GET /export/history
 GET /gallery/categories
@@ -181,6 +184,7 @@ POST /batch/gemini-tts/jobs/{job_id}/retry
 POST /batch/jobs/{job_id}/cancel
 POST /clean-audio
 POST /community/items/{item_id}/use
+POST /convert
 POST /design/describe
 POST /dictation/prefs
 POST /dub/abort/{job_id}

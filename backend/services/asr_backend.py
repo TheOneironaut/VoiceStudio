@@ -24,6 +24,7 @@ faster-whisper because it's available on every platform we ship to).
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ import contextlib
 import threading
 import time
 import weakref
+from urllib.parse import urlsplit
 from utils.containment import contain_system_exit
 
 from abc import ABC, abstractmethod
@@ -147,25 +149,78 @@ def _isolated_engine_hint(streak: int) -> str:
 async def run_transcribe_guarded(executor, fn, *, what: str = "ASR",
                                  timeout: float = ASR_TRANSCRIBE_TIMEOUT_S,
                                  timeout_env: str = "OMNIVOICE_ASR_TRANSCRIBE_TIMEOUT_S",
-                                 reset_on_timeout: bool = False):
+                                 reset_on_timeout: bool = False,
+                                 on_abandon=None):
     """Run a blocking transcribe ``fn`` in ``executor`` with a hard wall-clock
     bound. On timeout, raise :class:`ASRTimeoutError` with guidance instead of
     letting the request hang forever.
 
-    ``run_in_executor`` cannot cancel the underlying thread, so a timed-out
+    A future cannot cancel the underlying thread, so a timed-out
     in-process CTranslate2/whisperx call still owns its model and device. The
     default deliberately leaves that worker accounted for: swapping in a fresh
     pool and immediately retrying the same backend overlaps two native calls,
     which produced the Windows access violation in #1669. A caller backed by a
     genuinely killable process may opt into ``reset_on_timeout``.
+
+    ``on_abandon`` is called once after a timed-out or cancelled worker can no
+    longer access its inputs. Queued work cancelled before it starts calls it
+    immediately; running work calls it from the worker finalizer. Normal
+    completion leaves cleanup with the caller.
     """
     loop = asyncio.get_running_loop()
     # Same SystemExit containment as the TTS pool (#1133 class): an ASR
     # dependency written as a CLI must not be able to shut the backend down.
-    fut = loop.run_in_executor(executor, contain_system_exit(fn, what))
+    inner = contain_system_exit(fn, what)
+    abandon_lock = threading.Lock()
+    abandon_state = {
+        "requested": False,
+        "finished": False,
+        "callback_called": False,
+    }
+
+    def _fire_abandon_callback() -> None:
+        if on_abandon is None:
+            return
+        with abandon_lock:
+            if abandon_state["callback_called"]:
+                return
+            abandon_state["callback_called"] = True
+        try:
+            on_abandon()
+        except Exception:  # noqa: BLE001 — cleanup cannot hide the ASR result
+            logger.exception("%s abandon cleanup failed", what)
+
+    def _job():
+        try:
+            return inner()
+        finally:
+            with abandon_lock:
+                abandon_state["finished"] = True
+                abandoned = abandon_state["requested"]
+            if abandoned:
+                _fire_abandon_callback()
+
+    concurrent_fut = executor.submit(_job)
+    fut = asyncio.wrap_future(concurrent_fut, loop=loop)
+
+    def _abandon() -> None:
+        cancelled_before_start = concurrent_fut.cancel()
+        with abandon_lock:
+            abandon_state["requested"] = True
+            finished = abandon_state["finished"]
+        fut.cancel()
+        if cancelled_before_start or finished:
+            _fire_abandon_callback()
+
     try:
-        result = await asyncio.wait_for(fut, timeout=timeout)
+        # Shield the wrapper so timeout does not discard our ability to tell a
+        # queued cancellation from a native thread that is still running.
+        result = await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+    except asyncio.CancelledError:
+        _abandon()
+        raise
     except asyncio.TimeoutError:
+        _abandon()
         if reset_on_timeout:
             reset_pool_after_wedge(executor, what=what)
         streak = _note_transcribe_timeout()
@@ -2000,6 +2055,42 @@ _ASR_OPENAI_COMPAT_MODEL_KEY = "asr.openai_compat.model"
 _ASR_OPENAI_COMPAT_SECRET_NAME = "asr_openai_compat_key"
 
 
+def normalize_openai_compat_asr_base_url(value: str) -> str:
+    """Normalize a safe ASR endpoint, allowing plain HTTP only on loopback."""
+    base = (value or "").strip().rstrip("/")
+    if not base:
+        return ""
+    try:
+        parsed = urlsplit(base)
+        _ = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid OpenAI-compatible ASR base URL") from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(
+            "OpenAI-compatible ASR base URL must be a credential-free HTTP(S) URL"
+        )
+    host = parsed.hostname.lower()
+    loopback = host == "localhost"
+    if not loopback:
+        try:
+            address = ipaddress.ip_address(host)
+            address = getattr(address, "ipv4_mapped", None) or address
+            loopback = address.is_loopback
+        except ValueError:
+            loopback = False
+    if scheme == "http" and not loopback:
+        raise ValueError("Non-loopback OpenAI-compatible ASR endpoints require HTTPS")
+    return base
+
+
 def resolve_openai_compat_asr_base_url() -> str:
     from services import settings_store
     return (
@@ -2063,7 +2154,7 @@ def probe_openai_compat_server(
     maps to a translated message:
 
       not_configured   no base URL anywhere
-      invalid_url      base URL without an http(s):// scheme
+      invalid_url      malformed URL or non-loopback HTTP endpoint
       ok               2xx — ``model_found`` says whether the configured
                        model appears in the server's list (None = unknown)
       ok_no_models     404/405/501 — reachable, but no /models endpoint
@@ -2078,7 +2169,7 @@ def probe_openai_compat_server(
 
     from core.scrub import scrub_text
 
-    base = (base_url if base_url is not None else resolve_openai_compat_asr_base_url()).strip().rstrip("/")
+    configured_base = base_url if base_url is not None else resolve_openai_compat_asr_base_url()
     mdl = (model if model is not None else resolve_openai_compat_asr_model()).strip()
     if api_key is None:
         key = resolve_openai_compat_asr_api_key()
@@ -2094,9 +2185,11 @@ def probe_openai_compat_server(
         "model_found": None,
         "detail": None,
     }
-    if not base:
+    if not configured_base.strip():
         return out
-    if not base.startswith(("http://", "https://")):
+    try:
+        base = normalize_openai_compat_asr_base_url(configured_base)
+    except ValueError:
         out["status"] = "invalid_url"
         return out
 
@@ -2107,7 +2200,7 @@ def probe_openai_compat_server(
     try:
         with httpx.Client(
             timeout=httpx.Timeout(timeout_s, connect=min(5.0, timeout_s)),
-            follow_redirects=True,
+            follow_redirects=False,
         ) as client:
             resp = client.get(f"{base}/models", headers=headers)
     except httpx.TimeoutException as exc:
@@ -2170,13 +2263,20 @@ class OpenAICompatASRBackend(ASRBackend):
     gpu_compat = ("cpu",)  # network client only — no local compute
 
     def __init__(self):
-        self._base_url = resolve_openai_compat_asr_base_url()
+        self._base_url = normalize_openai_compat_asr_base_url(
+            resolve_openai_compat_asr_base_url()
+        )
         self._model = resolve_openai_compat_asr_model()
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
-        if not resolve_openai_compat_asr_base_url():
+        base_url = resolve_openai_compat_asr_base_url()
+        if not base_url:
             return False, "Configure a server endpoint in Model Catalogue → Engines"
+        try:
+            normalize_openai_compat_asr_base_url(base_url)
+        except ValueError as exc:
+            return False, str(exc)
         try:
             import openai  # noqa: F401
         except ImportError:
@@ -2184,13 +2284,18 @@ class OpenAICompatASRBackend(ASRBackend):
         return True, "ready"
 
     def _client(self):
-        from openai import OpenAI
+        from openai import DefaultHttpxClient, OpenAI
         api_key = resolve_openai_compat_asr_api_key() or "not-needed"
         # max_retries=0: mirrors llm_skills.resolve_skill_client — a
         # rate-limited/slow server retrying inside the SDK would blow past
         # whatever bounded timeout the caller (dub transcribe, dictation)
         # expects from a single call.
-        return OpenAI(base_url=self._base_url, api_key=api_key, max_retries=0)
+        return OpenAI(
+            base_url=self._base_url,
+            api_key=api_key,
+            max_retries=0,
+            http_client=DefaultHttpxClient(follow_redirects=False),
+        )
 
     def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
         logger.info(

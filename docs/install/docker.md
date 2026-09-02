@@ -13,12 +13,12 @@ and [`palashdeb/omnivoice-studio` on Docker Hub](https://hub.docker.com/r/palash
 > |-----|--------------|
 > | `:latest` | **Rolling preview** — latest commit on `main`, at or ahead of the last release. This is the preview channel; pin `:stable` for production. |
 > | `:stable` | Most recent versioned release (updated on every `v*` git tag) |
-> | `:0.5.1` | Exact release version |
+> | `:0.5.2` | Exact release version |
 > | `:0.5` | Latest patch within the 0.5 minor |
 > | `:main` | Alias of the same rolling `main` build as `:latest` |
 > | `:sha-xxxxxxx` | Specific commit (produced by manual workflow dispatch) |
 > | `:rocm` | **AMD GPU (ROCm) build** of the rolling preview — the ROCm analogue of `:latest` |
-> | `:stable-rocm`, `:0.5.1-rocm`, `:0.5-rocm`, `:sha-xxxxxxx-rocm` | ROCm builds of the corresponding CUDA tags above |
+> | `:stable-rocm`, `:0.5.2-rocm`, `:0.5-rocm`, `:sha-xxxxxxx-rocm` | ROCm builds of the corresponding CUDA tags above |
 >
 > Versioning rule: preview builds always come from `main` and never
 > version-sort below `:stable` — upgrades flow naturally.
@@ -123,6 +123,33 @@ on `127.0.0.1` and do not run untrusted workloads in this container. See AMD's
 [`librocdxg` WSL container instructions](https://github.com/ROCm/librocdxg#4-container-launch--wsl-specific-flags)
 for the driver/runtime compatibility matrix.
 
+#### WSL2 architecture compatibility matrix
+
+VoiceStudio classifies the architecture result separately from device-node
+visibility. `/dev/dxg` alone is not proof of acceleration; a supported claim
+also needs the runtime probe, application routing, a completed workload, and
+GPU-utilization evidence.
+
+| Classification | Evidence required | VoiceStudio behavior |
+|---|---|---|
+| **Supported** | The native GFX tag is in the shipped PyTorch architecture list, and the named hardware has a published successful workload with GPU-utilization evidence. | Report the measured provider and device from Settings and diagnostics. |
+| **Best-effort override** | The native tag is absent, a mapped target is present in the PyTorch build, and `HSA_OVERRIDE_GFX_VERSION` is applied. No hardware validation is implied. | Attempt the mapped kernels; capture execution evidence and treat failures as unsupported for that host. |
+| **Unverified** | The bridge or override is configured, but no published end-to-end result exists for the named card and stack. | Do not advertise the card as supported; run the checks below before relying on it. |
+| **Unsupported** | Neither the native tag nor a usable mapped target is present, or the runtime/workload rejects the device. | Use an intentional CPU route or a different supported accelerator. |
+
+| Hardware / architecture | Current classification | Detail |
+|---|---|---|
+| AMD Radeon RX 6700 XT / `gfx1031` through WSL2 ROCDXG | **Unverified** | VoiceStudio can map `gfx1031` to `gfx1030` when that target exists in the PyTorch build, but no RX 6700 XT end-to-end validation has been published. |
+
+For an RX 6700 XT result to move out of **Unverified**, record the Windows AMD
+driver, WSL kernel/distribution, image and ROCDXG/ROCm versions,
+`torch.version.hip`, device name/count and compiled architecture list, effective
+HSA override, `rocminfo`, VoiceStudio self-check and engine-routing output, and
+one successful PyTorch TTS and ASR workload with utilization plus cold/warm
+latency. Record whether either workload fell back to CPU and, when it did, the
+CPU fallback stage and reason reported by VoiceStudio. A CPU-only completion
+does not qualify as successful GPU validation.
+
 The same flags work with **Podman** (`podman run --device /dev/kfd
 --device /dev/dri …`); in a **Quadlet** unit that's two `AddDevice=` lines:
 
@@ -137,7 +164,7 @@ Volume=omnivoice-data:/app/omnivoice_data
 Environment=OMNIVOICE_API_KEY=replace-with-a-long-random-key
 ```
 
-Release pins exist too: `:stable-rocm`, `:0.5.1-rocm`, `:0.5-rocm` mirror
+Release pins exist too: `:stable-rocm`, `:0.5.2-rocm`, `:0.5-rocm` mirror
 the CUDA tags exactly.
 
 > **Consumer cards and APUs (RX 6000/7000, Strix Point/Halo):** the backend

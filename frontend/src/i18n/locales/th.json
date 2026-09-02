@@ -523,7 +523,9 @@
     "view_all_files": "ดูไฟล์ทั้งหมด",
     "file": "ไฟล์",
     "audiobook_title": "หนังสือเสียง",
-    "audiobook_desc": "เปลี่ยนสคริปต์ขนาดยาวหรือ EPUB ให้เป็นหนังสือเสียงแบบแบ่งตอน ทั้งหน้าปก ข้อมูลเมตา ผู้บรรยายหนึ่งคน"
+    "audiobook_desc": "เปลี่ยนสคริปต์ขนาดยาวหรือ EPUB ให้เป็นหนังสือเสียงแบบแบ่งตอน ทั้งหน้าปก ข้อมูลเมตา ผู้บรรยายหนึ่งคน",
+    "convert_title": "ตัวเปลี่ยนเสียง",
+    "convert_desc": "พูดครั้งเดียว — ฟังเป็นอีกเสียงหนึ่ง เสียงพูดสู่เสียงพูด ทำงานในเครื่องทั้งหมด"
   },
   "clone": {
     "prompt": "พรอมต์",
@@ -616,7 +618,8 @@
     "seed_placeholder": "สุ่มในแต่ละครั้ง",
     "seed_keep": "เก็บเมล็ดพันธุ์นี้ไว้",
     "seed_reroll": "เมล็ดพันธุ์ใหม่",
-    "seed_reroll_hint": "สุ่มเมล็ดใหม่แบบสุ่มแล้วเก็บไว้"
+    "seed_reroll_hint": "สุ่มเมล็ดใหม่แบบสุ่มแล้วเก็บไว้",
+    "define_convert": "แปลง"
   },
   "about": {
     "app": "แอพ",
@@ -743,6 +746,26 @@
     "engineCompatLabel": "{{family}} ความเข้ากันได้ของเครื่องยนต์",
     "active": "ใช้งานอยู่",
     "whyUnavailable": "สิ่งที่ต้องมี",
+    "diskDetails": "รายละเอียดดิสก์",
+    "diskModelDownload": "ดาวน์โหลดโมเดล",
+    "diskPackageDownload": "ดาวน์โหลดแพ็กเกจ",
+    "diskUniqueInstalled": "พื้นที่ติดตั้งเฉพาะ",
+    "diskPotentiallyShared": "พื้นที่ที่อาจใช้ร่วมกัน",
+    "diskTemporary": "พื้นที่ว่างชั่วคราว",
+    "diskDestination": "ปลายทาง",
+    "diskDestination_hf_model_cache": "โวลุ่มแคชโมเดล Hugging Face",
+    "diskDestination_engine_data": "โวลุ่มข้อมูลเอนจิน VoiceStudio",
+    "diskActualModel": "โมเดลจริง",
+    "diskActualEnvironment": "สภาพแวดล้อมจริง",
+    "diskActualCache": "แคชที่ใช้ร่วมกันจริง",
+    "diskActualTotal": "ยอดรวมที่เป็นเจ้าของจริง",
+    "diskEstimateConfidence": "ความน่าเชื่อถือของค่าประมาณ",
+    "diskActualConfidence": "ความน่าเชื่อถือของการวัด",
+    "diskConfidence_exact": "แม่นยำ",
+    "diskConfidence_measured": "วัดแล้ว",
+    "diskConfidence_estimated": "โดยประมาณ",
+    "diskConfidence_unknown": "ไม่ทราบ",
+    "diskDedup_uv_same_volume": "uv จะลดข้อมูล wheel ที่ซ้ำกันเฉพาะเมื่อแคชและสภาพแวดล้อมของเอนจินอยู่ในโวลุ่มเดียวกัน",
     "sectionReady": "พร้อมใช้งาน",
     "sectionMore": "เพิ่มเครื่องยนต์อื่น ๆ",
     "lastError": "ข้อผิดพลาดครั้งล่าสุด: {{error}}",
@@ -1569,6 +1592,9 @@
     "subs_in_video": "คำบรรยายในวิดีโอ",
     "hardsub": "เขียนคำบรรยายลงในรูปภาพ (hardsub)",
     "dual_subs_video": "คู่ (แปลจากต้นฉบับที่เป็นตัวเอียง)",
+    "subs_style_line": "บรรทัด",
+    "subs_style_karaoke": "คาราโอเกะ (ไฮไลต์คำ)",
+    "karaoke_dual_note": "คาราโอเกะใช้ไม่ได้กับซับไตเติลแบบคู่",
     "format": "รูปแบบ",
     "wav_lossless": "WAV (ไม่สูญเสีย)",
     "mp3_compressed": "MP3 (บีบอัด)",
@@ -2036,6 +2062,7 @@
     "retry_cancelled": "ลองอีกครั้ง ยกเลิก",
     "transcription_failed": "การถอดเสียงล้มเหลว: {{message}}",
     "import_srt_no_job": "อัปโหลดหรือนำเข้าวิดีโอก่อน ไม่มีงานให้แนบคำบรรยาย",
+    "import_srt_after_speakers": "เพิ่ม SRT ลงในคิวแล้ว ระบบจะวิเคราะห์ผู้พูดให้เสร็จก่อนเพื่อรักษาเสียงที่โคลนไว้",
     "imported_cues": "นำเข้า {{count}} คิวจาก {{file}}",
     "skipped_malformed": "{{count}} ข้ามไป (มีรูปแบบไม่ถูกต้อง)",
     "dropped_overlap": "{{count}} ลดลง (ทับซ้อนกัน)",
@@ -2646,5 +2673,18 @@
     "cta_design": "อธิบายเสียงในแท็บ เสียง ← เพื่อออกแบบเสียง",
     "new": "เสียงใหม่",
     "none_selected": "ยังไม่ได้เลือกเสียง — อธิบายเสียง วางไฟล์เสียง หรือเลือกด้านล่าง"
+  },
+  "convert": {
+    "source_kicker": "คลิปต้นฉบับ",
+    "drop_audio": "วางคลิปที่จะแปลงที่นี่ — หรือคลิก WAV, MP3, M4A…",
+    "target_voice": "เสียงปลายทาง",
+    "pick_voice": "เลือกโปรไฟล์เสียง…",
+    "match_duration": "ให้ความยาวตรงกับต้นฉบับ",
+    "match_duration_hint": "ยืดผลลัพธ์ตามเวลา (คงระดับเสียงเดิม) ให้ใกล้เคียงความยาวของคลิปต้นฉบับ",
+    "convert": "แปลง",
+    "converting": "กำลังแปลง…",
+    "transcript": "สิ่งที่ได้ยิน",
+    "result_kicker": "เทคที่แปลงแล้ว",
+    "need_source_and_voice": "เพิ่มคลิปต้นฉบับและเลือกเสียงปลายทางก่อน"
   }
 }
