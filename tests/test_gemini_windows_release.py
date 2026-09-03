@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "gemini-windows-msi.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIG = ROOT / "frontend" / "src-tauri" / "tauri.gemini-windows.conf.json"
 README = ROOT / "README.md"
 SMOKE = ROOT / "scripts" / "smoke-gemini-windows.ps1"
@@ -48,6 +49,14 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     assert 'http://127.0.0.1:3900/engines' in smoke
     assert "gemini-3.1-flash-tts" in smoke
     assert "Local model checkpoint" in smoke
+
+
+def test_ci_cancels_only_superseded_non_main_runs():
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "group: ci-${{ github.ref }}-" in workflow
+    assert "github.ref == 'refs/heads/main' && github.sha || 'branch'" in workflow
+    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in workflow
 
 
 def test_gemini_windows_bundle_is_msi_only_without_unsigned_updater_payloads():
