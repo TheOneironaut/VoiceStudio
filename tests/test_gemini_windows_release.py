@@ -95,10 +95,13 @@ def test_gemini_bundle_imports_native_libraries_on_the_main_thread():
     assert 'env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()))' in backend
 
 
-def test_windows_parent_pipe_watchdog_starts_after_native_imports():
-    main = (ROOT / "backend" / "main.py").read_text(encoding="utf-8")
+def test_windows_uses_job_object_without_a_parent_pipe_thread():
+    parent_liveness = (ROOT / "backend" / "core" / "parent_liveness.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert main.index("import torchaudio") < main.rindex("arm_desktop_parent_watchdog()")
+    assert 'if sys.platform == "win32":' in parent_liveness
+    assert "redundant Unix fallback" in parent_liveness
 
 
 def test_readme_promotes_the_exact_rolling_release_asset():
