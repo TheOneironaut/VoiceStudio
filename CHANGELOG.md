@@ -14,6 +14,8 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Added
 
+- Gemini Windows releases now install and launch the built MSI on a clean cloud runner before publication, with path-filtered builds, reused caches, and superseded PR runs cancelled. — thanks @TheOneironaut!
+
 ### Docs
 
 ### Fixed

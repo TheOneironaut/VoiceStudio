@@ -6,8 +6,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "gemini-windows-msi.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIG = ROOT / "frontend" / "src-tauri" / "tauri.gemini-windows.conf.json"
 README = ROOT / "README.md"
+SMOKE = ROOT / "scripts" / "smoke-gemini-windows.ps1"
 
 MSI_NAME = "VoiceStudio-Gemini-Windows-x64.msi"
 RELEASE_TAG = "gemini-windows"
@@ -28,6 +30,42 @@ def test_gemini_windows_workflow_builds_and_publishes_fixed_msi():
     assert "verify-windows-msi.ps1" in workflow
     assert "gh release upload" in workflow
     assert "--clobber" in workflow
+
+
+def test_gemini_windows_release_is_gated_by_installed_app_smoke():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    smoke = SMOKE.read_text(encoding="utf-8")
+
+    assert "paths:" in workflow
+    assert '      - "package.json"' in workflow
+    assert '      - "bun.lock"' in workflow
+    assert '      - "README.md"' in workflow
+    assert '      - "CHANGELOG.md"' in workflow
+    assert "smoke-gemini-windows.ps1" in workflow
+    assert workflow.index("Smoke-test installed Gemini app") < workflow.index(
+        "Publish rolling Gemini release"
+    )
+    assert "if: failure()" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "msiexec.exe" in smoke
+    assert '"setup_complete": true' in smoke
+    assert 'http://127.0.0.1:3900/health' in smoke
+    assert 'http://127.0.0.1:3900/engines' in smoke
+    assert "gemini-3.1-flash-tts" in smoke
+    assert "Local model checkpoint" in smoke
+    assert "OMNIVOICE_LOG_DIR" in smoke
+    assert "OMNIVOICE_STARTUP_BUDGET_S = $ReadyTimeoutSeconds.ToString()" in smoke
+    assert '"OmniVoice\\Logs"' in smoke
+    assert 'Join-Path $appData "logs"' in smoke
+    assert 'Get-ChildItem -LiteralPath $appData -Recurse' not in smoke
+
+
+def test_ci_cancels_only_superseded_non_main_runs():
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "group: ci-${{ github.ref }}-" in workflow
+    assert "github.ref == 'refs/heads/main' && github.sha || 'branch'" in workflow
+    assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in workflow
 
 
 def test_gemini_windows_bundle_is_msi_only_without_unsigned_updater_payloads():
