@@ -22,6 +22,12 @@ def arm_desktop_parent_watchdog() -> bool:
     """Use stdin EOF as an unforgeable parent-liveness signal for desktop runs."""
     if os.environ.get("OMNIVOICE_DESKTOP_CONTAINED") != "1":
         return False
+    # The Windows shell already assigns the backend to a kill-on-close Job
+    # Object. A second thread blocked on stdin makes later CPython thread
+    # creation hang after torch/numpy load native DLLs, so do not arm this
+    # redundant Unix fallback on Windows.
+    if sys.platform == "win32":
+        return False
     reader = getattr(sys.stdin, "buffer", None)
     if reader is None:
         return False
@@ -32,14 +38,3 @@ def arm_desktop_parent_watchdog() -> bool:
         daemon=True,
     ).start()
     return True
-
-
-def defer_desktop_parent_watchdog() -> bool:
-    """Avoid a pre-import helper thread on Windows desktop children.
-
-    The Windows shell already owns the process through a Job Object. Starting
-    this stdin reader before torch/numpy load their native DLLs can leave the
-    loader stuck indefinitely, so the redundant pipe guard is armed after the
-    native startup phase instead. Other platforms retain the early guard.
-    """
-    return sys.platform == "win32" and os.environ.get("OMNIVOICE_DESKTOP_CONTAINED") == "1"
