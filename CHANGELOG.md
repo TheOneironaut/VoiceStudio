@@ -12,7 +12,6 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Changed
 
-- Forks no longer spend Actions minutes building Docker images they cannot publish to the upstream owner's registry (#10) — thanks @TheOneironaut!
 
 ### Added
 
