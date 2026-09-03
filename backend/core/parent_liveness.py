@@ -32,3 +32,14 @@ def arm_desktop_parent_watchdog() -> bool:
         daemon=True,
     ).start()
     return True
+
+
+def defer_desktop_parent_watchdog() -> bool:
+    """Avoid a pre-import helper thread on Windows desktop children.
+
+    The Windows shell already owns the process through a Job Object. Starting
+    this stdin reader before torch/numpy load their native DLLs can leave the
+    loader stuck indefinitely, so the redundant pipe guard is armed after the
+    native startup phase instead. Other platforms retain the early guard.
+    """
+    return sys.platform == "win32" and os.environ.get("OMNIVOICE_DESKTOP_CONTAINED") == "1"

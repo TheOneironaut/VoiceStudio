@@ -27,6 +27,22 @@ def test_watchdog_is_disabled_outside_desktop(monkeypatch):
     assert arm_desktop_parent_watchdog() is False
 
 
+def test_windows_desktop_defers_watchdog_until_after_native_imports(monkeypatch):
+    from core import parent_liveness
+
+    monkeypatch.setattr(parent_liveness.sys, "platform", "win32")
+    monkeypatch.setenv("OMNIVOICE_DESKTOP_CONTAINED", "1")
+    assert parent_liveness.defer_desktop_parent_watchdog() is True
+
+
+def test_non_windows_desktop_keeps_early_watchdog(monkeypatch):
+    from core import parent_liveness
+
+    monkeypatch.setattr(parent_liveness.sys, "platform", "linux")
+    monkeypatch.setenv("OMNIVOICE_DESKTOP_CONTAINED", "1")
+    assert parent_liveness.defer_desktop_parent_watchdog() is False
+
+
 def test_desktop_child_exits_when_parent_closes_stdin():
     env = os.environ.copy()
     env["OMNIVOICE_DESKTOP_CONTAINED"] = "1"

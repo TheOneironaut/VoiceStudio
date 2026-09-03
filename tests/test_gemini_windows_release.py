@@ -94,6 +94,12 @@ def test_gemini_bundle_keeps_the_responsive_deferred_backend_startup():
     assert 'env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()))' not in backend
 
 
+def test_windows_parent_pipe_watchdog_starts_after_native_imports():
+    main = (ROOT / "backend" / "main.py").read_text(encoding="utf-8")
+
+    assert main.index("import torchaudio") < main.rindex("arm_desktop_parent_watchdog()")
+
+
 def test_readme_promotes_the_exact_rolling_release_asset():
     readme = README.read_text(encoding="utf-8")
 
