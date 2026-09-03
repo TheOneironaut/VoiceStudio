@@ -8,6 +8,7 @@ on:
       - "backend/**"
       - "omnivoice/**"
       - "frontend/**"
+      - "package.json"
       - "bun.lock"
       - "pyproject.toml"
       - "uv.lock"
@@ -15,6 +16,7 @@ on:
       - "CHANGELOG.md"
       - "scripts/verify-windows-msi.ps1"
       - "scripts/smoke-gemini-windows.ps1"
+      - "scripts/inject-apprun.sh"
       - ".github/workflows/gemini-windows-msi.yml"
 
 permissions:

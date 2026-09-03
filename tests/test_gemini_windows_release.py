@@ -37,6 +37,7 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     smoke = SMOKE.read_text(encoding="utf-8")
 
     assert "paths:" in workflow
+    assert '      - "package.json"' in workflow
     assert '      - "bun.lock"' in workflow
     assert '      - "README.md"' in workflow
     assert '      - "CHANGELOG.md"' in workflow
