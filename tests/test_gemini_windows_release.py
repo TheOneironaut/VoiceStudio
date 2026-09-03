@@ -87,12 +87,12 @@ def test_gemini_bundle_cannot_install_upstream_updates():
     assert "if !updater_enabled(app)" in updater
 
 
-def test_gemini_bundle_keeps_the_responsive_deferred_backend_startup():
+def test_gemini_bundle_imports_native_libraries_on_the_main_thread():
     backend = (ROOT / "frontend" / "src-tauri" / "src" / "backend.rs").read_text(
         encoding="utf-8"
     )
-    assert 'app.config().identifier == "com.theoneironaut.voicestudio-gemini"' not in backend
-    assert 'env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()))' not in backend
+    assert 'app.config().identifier == "com.theoneironaut.voicestudio-gemini"' in backend
+    assert 'env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()))' in backend
 
 
 def test_windows_parent_pipe_watchdog_starts_after_native_imports():
