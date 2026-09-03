@@ -77,7 +77,10 @@ os.environ.setdefault("FOR_DISABLE_CONSOLE_CTRL_HANDLER", "1")
 # (utils.hf_progress.SafeFileWrapper — same wrapper the patched hub tqdm
 # already uses for its own fp.)
 from utils.hf_progress import SafeFileWrapper as _SafeStdio  # noqa: E402
-from core.parent_liveness import arm_desktop_parent_watchdog  # noqa: E402
+from core.parent_liveness import (  # noqa: E402
+    arm_desktop_parent_watchdog,
+    defer_desktop_parent_watchdog,
+)
 
 # Force UTF-8 stdio before wrapping (#1155): on Windows the spawned backend's
 # stdout defaults to cp1252, and any library that prints user text (kittentts
@@ -93,7 +96,9 @@ for _stream in (sys.stdout, sys.stderr):
 # The desktop keeps the backend's stdin pipe open for its own lifetime. EOF is
 # therefore a stable ownership signal that survives PID reuse and lets a child
 # terminate even when the shell crashes before its normal process-tree teardown.
-arm_desktop_parent_watchdog()
+_defer_desktop_parent_watchdog = defer_desktop_parent_watchdog()
+if not _defer_desktop_parent_watchdog:
+    arm_desktop_parent_watchdog()
 
 if not getattr(sys.stdout, "_is_safe_wrapper", False):
     sys.stdout = _SafeStdio(sys.stdout)
@@ -711,6 +716,12 @@ def _phase_a_build_inner() -> None:
         )
     except Exception:
         pass
+    # A Windows desktop child is already contained by the shell's Job Object.
+    # Arm the redundant stdin-EOF guard only after torch/numpy and the router
+    # fan-out have finished loading native DLLs; starting this helper thread
+    # earlier can deadlock the Windows loader indefinitely on a cold install.
+    if _defer_desktop_parent_watchdog:
+        arm_desktop_parent_watchdog()
     _phase_a_built = True
 
 
