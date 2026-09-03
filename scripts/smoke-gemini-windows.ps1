@@ -88,7 +88,9 @@ try {
     $env:OMNIVOICE_PRELOAD_CAPTURE_ASR = "0"
     $env:OMNIVOICE_PRELOAD_WATERMARK = "0"
     $env:OMNIVOICE_DISABLE_ANALYTICS = "1"
-    $env:OMNIVOICE_STARTUP_BUDGET_S = "180"
+    # The shell and this harness must agree on the same deadline; otherwise
+    # the backend could answer after the shell already declared startup failed.
+    $env:OMNIVOICE_STARTUP_BUDGET_S = $ReadyTimeoutSeconds.ToString()
     $env:OMNIVOICE_LOG_DIR = $resolvedLogDir
     $env:UV_HTTP_TIMEOUT = "120"
     $env:UV_HTTP_RETRIES = "5"

@@ -54,6 +54,7 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     assert "gemini-3.1-flash-tts" in smoke
     assert "Local model checkpoint" in smoke
     assert "OMNIVOICE_LOG_DIR" in smoke
+    assert "OMNIVOICE_STARTUP_BUDGET_S = $ReadyTimeoutSeconds.ToString()" in smoke
     assert '"OmniVoice\\Logs"' in smoke
     assert 'Join-Path $appData "logs"' in smoke
     assert 'Get-ChildItem -LiteralPath $appData -Recurse' not in smoke
