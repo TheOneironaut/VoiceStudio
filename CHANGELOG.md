@@ -12,6 +12,8 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Changed
 
+- Forks no longer spend Actions minutes building Docker images they cannot publish to the upstream owner's registry (#10) — thanks @TheOneironaut!
+
 ### Added
 
 - Gemini Windows releases now install and launch the built MSI on a clean cloud runner before publication, with path-filtered builds, reused caches, and superseded PR runs cancelled. — thanks @TheOneironaut!
