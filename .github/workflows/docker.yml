@@ -95,8 +95,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Docker Hub login — only when the secret is present, so forks / runs
-      # without the credential still publish to GHCR.
+      # Upstream-only job: Docker Hub is an optional second destination when
+      # its credential is present; GHCR remains the required destination.
       - name: Check Docker Hub credentials
         id: dockerhub
         run: echo "enabled=${{ secrets.DOCKERHUB_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
@@ -202,8 +202,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Same Docker Hub gating as the CUDA job: push there only when the
-      # secret exists, so forks still publish to GHCR.
+      # Same upstream-only Docker Hub gating as the CUDA job: push there only
+      # when its credential is present; GHCR remains required.
       - name: Check Docker Hub credentials
         id: dockerhub
         run: echo "enabled=${{ secrets.DOCKERHUB_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
