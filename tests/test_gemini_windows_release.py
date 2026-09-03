@@ -37,6 +37,9 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     smoke = SMOKE.read_text(encoding="utf-8")
 
     assert "paths:" in workflow
+    assert '      - "bun.lock"' in workflow
+    assert '      - "README.md"' in workflow
+    assert '      - "CHANGELOG.md"' in workflow
     assert "smoke-gemini-windows.ps1" in workflow
     assert workflow.index("Smoke-test installed Gemini app") < workflow.index(
         "Publish rolling Gemini release"
@@ -49,6 +52,8 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     assert 'http://127.0.0.1:3900/engines' in smoke
     assert "gemini-3.1-flash-tts" in smoke
     assert "Local model checkpoint" in smoke
+    assert "OMNIVOICE_LOG_DIR" in smoke
+    assert '"OmniVoice\\Logs"' in smoke
 
 
 def test_ci_cancels_only_superseded_non_main_runs():

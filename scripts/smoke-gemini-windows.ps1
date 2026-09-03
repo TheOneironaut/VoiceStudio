@@ -11,6 +11,7 @@ $ProgressPreference = "SilentlyContinue"
 $resolvedMsi = (Resolve-Path $MsiPath).Path
 $resolvedLogDir = [System.IO.Path]::GetFullPath($LogDir)
 $appData = Join-Path $env:LOCALAPPDATA "com.theoneironaut.voicestudio-gemini"
+$backendLogs = Join-Path $env:LOCALAPPDATA "OmniVoice\Logs"
 $temporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
 $modelsDir = Join-Path $temporaryRoot "voicestudio-gemini-models"
 $healthUrl = "http://127.0.0.1:3900/health"
@@ -26,12 +27,17 @@ function Invoke-SmokeJson([string]$Url) {
 
 function Copy-SmokeDiagnostics {
     New-Item -ItemType Directory -Force $resolvedLogDir | Out-Null
-    if (Test-Path $appData) {
-        Get-ChildItem -LiteralPath $appData -Recurse -File -ErrorAction SilentlyContinue |
+    $sources = @(
+        @{ Path = $appData; Prefix = "app-data" },
+        @{ Path = $backendLogs; Prefix = "backend-default" }
+    )
+    foreach ($source in $sources) {
+        if (-not (Test-Path $source.Path)) { continue }
+        Get-ChildItem -LiteralPath $source.Path -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -in ".log", ".txt", ".json" } |
             ForEach-Object {
-                $relative = $_.FullName.Substring($appData.Length).TrimStart("\")
-                $target = Join-Path $resolvedLogDir $relative
+                $relative = $_.FullName.Substring($source.Path.Length).TrimStart("\")
+                $target = Join-Path (Join-Path $resolvedLogDir $source.Prefix) $relative
                 New-Item -ItemType Directory -Force (Split-Path $target -Parent) | Out-Null
                 Copy-Item -LiteralPath $_.FullName -Destination $target -Force -ErrorAction SilentlyContinue
             }
@@ -81,6 +87,7 @@ try {
     $env:OMNIVOICE_PRELOAD_WATERMARK = "0"
     $env:OMNIVOICE_DISABLE_ANALYTICS = "1"
     $env:OMNIVOICE_STARTUP_BUDGET_S = "180"
+    $env:OMNIVOICE_LOG_DIR = $resolvedLogDir
     $env:UV_HTTP_TIMEOUT = "120"
     $env:UV_HTTP_RETRIES = "5"
     $env:GEMINI_API_KEY = $null
