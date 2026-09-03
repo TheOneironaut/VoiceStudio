@@ -563,6 +563,15 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
         // process group/Job rather than escaping into a new session.
         ("OMNIVOICE_DESKTOP_CONTAINED".into(), "1".into()),
     ];
+    // Keep Windows native imports on Python's main thread for the Gemini
+    // edition. backend/main.py deliberately defers the desktop parent-pipe
+    // watcher on Windows until those imports finish, so eager startup has no
+    // competing helper thread and later AnyIO workers can start normally.
+    if app.config().identifier == "com.theoneironaut.voicestudio-gemini"
+        && std::env::var("OMNIVOICE_EAGER_INIT").is_err()
+    {
+        env.push(("OMNIVOICE_EAGER_INIT".into(), "1".into()));
+    }
     // Pin the child's OMNIVOICE_PORT to the value Rust resolved so Python's
     // network_share.backend_port() always agrees with the uvicorn --port we
     // pass below — otherwise a user-set OMNIVOICE_PORT would change the
