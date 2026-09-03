@@ -21,7 +21,7 @@ the frozen-backend fallback mirror it for their toolchains.
 ### Fixed
 
 - Gemini Windows startup now defers its redundant parent-pipe watcher until native ML libraries finish importing, avoiding a cold-install DLL-loader hang. — thanks @TheOneironaut!
-- Gemini Windows native imports stay on Python's main thread so later API worker threads start normally after cold setup. — thanks @TheOneironaut!
+- Gemini Windows native imports stay on Python's main thread so later API worker threads start normally after cold setup. — thanks @TheOneironaut! (#8)
 - The Gemini Windows backend now avoids a Windows native-import/thread-start deadlock that left Uvicorn listening while setup timed out after 300 seconds. — thanks @TheOneironaut!
 
 ## [0.5.2] — 2026-09-02
