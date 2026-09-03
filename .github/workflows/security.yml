@@ -23,15 +23,6 @@ on:
     # Mondays 06:00 UTC — catch advisories disclosed since the last PR.
     - cron: "0 6 * * 1"
   workflow_dispatch:
-    inputs:
-      scope:
-        description: Validation scope for automated upstream syncs
-        required: false
-        default: full
-        type: choice
-        options:
-          - full
-          - gemini-windows
 
 env:
   # Match ci.yml: run JS actions on Node 24 (GH removes Node 20 in Sep 2026).
@@ -73,7 +64,6 @@ jobs:
   # ── CodeQL SAST (Python + JS/TS) ─────────────────────────────────────────
   codeql:
     name: CodeQL (${{ matrix.language }})
-    if: inputs.scope != 'gemini-windows'
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -122,7 +112,6 @@ jobs:
   # ── Python SAST (bandit → SARIF) ─────────────────────────────────────────
   bandit:
     name: Python SAST (bandit)
-    if: inputs.scope != 'gemini-windows'
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -163,7 +152,6 @@ jobs:
   # ── Dependency advisories (reporting) ────────────────────────────────────
   dependencies:
     name: Dependency audit
-    if: inputs.scope != 'gemini-windows'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

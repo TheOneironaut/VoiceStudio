@@ -14,7 +14,7 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Added
 
-- Gemini Windows releases now install and launch the built MSI on a clean cloud runner before publication, while upstream validation skips redundant platform matrices. — thanks @TheOneironaut!
+- Gemini Windows releases now install and launch the built MSI on a clean cloud runner before publication, with path-filtered builds and reused caches. — thanks @TheOneironaut!
 
 ### Docs
 

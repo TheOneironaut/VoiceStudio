@@ -6,9 +6,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "gemini-windows-msi.yml"
-SYNC_WORKFLOW = ROOT / ".github" / "workflows" / "sync-upstream.yml"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-SECURITY_WORKFLOW = ROOT / ".github" / "workflows" / "security.yml"
 CONFIG = ROOT / "frontend" / "src-tauri" / "tauri.gemini-windows.conf.json"
 README = ROOT / "README.md"
 SMOKE = ROOT / "scripts" / "smoke-gemini-windows.ps1"
@@ -51,18 +48,6 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     assert 'http://127.0.0.1:3900/engines' in smoke
     assert "gemini-3.1-flash-tts" in smoke
     assert "Local model checkpoint" in smoke
-
-
-def test_upstream_sync_uses_the_cost_reduced_gemini_validation_scope():
-    sync_workflow = SYNC_WORKFLOW.read_text(encoding="utf-8")
-    ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    security_workflow = SECURITY_WORKFLOW.read_text(encoding="utf-8")
-
-    assert sync_workflow.count("scope=gemini-windows") == 2
-    assert "scope:" in ci_workflow
-    assert ci_workflow.count("inputs.scope != 'gemini-windows'") == 2
-    assert "scope:" in security_workflow
-    assert security_workflow.count("inputs.scope != 'gemini-windows'") == 3
 
 
 def test_gemini_windows_bundle_is_msi_only_without_unsigned_updater_payloads():
