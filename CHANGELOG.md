@@ -20,6 +20,7 @@ the frozen-backend fallback mirror it for their toolchains.
 
 ### Fixed
 
+- Gemini Windows startup now keeps health and watchdog reporting available while native ML libraries import instead of blocking before the server binds. — thanks @TheOneironaut!
 - The Gemini Windows backend now avoids a Windows native-import/thread-start deadlock that left Uvicorn listening while setup timed out after 300 seconds. — thanks @TheOneironaut!
 
 ## [0.5.2] — 2026-09-02
