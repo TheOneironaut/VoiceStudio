@@ -41,8 +41,8 @@ jobs:
           set -euo pipefail
           TARGET_SHA="$(git rev-parse HEAD)"
 
-          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref upstream-sync
-          gh workflow run security.yml --repo "$GITHUB_REPOSITORY" --ref upstream-sync
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref upstream-sync --field scope=gemini-windows
+          gh workflow run security.yml --repo "$GITHUB_REPOSITORY" --ref upstream-sync --field scope=gemini-windows
 
           find_run() {
             local workflow="$1"

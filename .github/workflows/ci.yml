@@ -11,6 +11,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Validation scope for automated upstream syncs
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - gemini-windows
 
 permissions:
   contents: read
@@ -191,6 +200,7 @@ jobs:
   tauri-cross-platform:
     name: Tauri shell check (${{ matrix.label }})
     needs: test
+    if: inputs.scope != 'gemini-windows'
     strategy:
       fail-fast: false
       matrix:
@@ -291,6 +301,7 @@ jobs:
   smoke-matrix:
     name: Smoke (${{ matrix.label }})
     needs: test
+    if: inputs.scope != 'gemini-windows'
     strategy:
       fail-fast: false
       matrix:

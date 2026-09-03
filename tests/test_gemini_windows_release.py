@@ -6,8 +6,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "gemini-windows-msi.yml"
+SYNC_WORKFLOW = ROOT / ".github" / "workflows" / "sync-upstream.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+SECURITY_WORKFLOW = ROOT / ".github" / "workflows" / "security.yml"
 CONFIG = ROOT / "frontend" / "src-tauri" / "tauri.gemini-windows.conf.json"
 README = ROOT / "README.md"
+SMOKE = ROOT / "scripts" / "smoke-gemini-windows.ps1"
 
 MSI_NAME = "VoiceStudio-Gemini-Windows-x64.msi"
 RELEASE_TAG = "gemini-windows"
@@ -28,6 +32,37 @@ def test_gemini_windows_workflow_builds_and_publishes_fixed_msi():
     assert "verify-windows-msi.ps1" in workflow
     assert "gh release upload" in workflow
     assert "--clobber" in workflow
+
+
+def test_gemini_windows_release_is_gated_by_installed_app_smoke():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    smoke = SMOKE.read_text(encoding="utf-8")
+
+    assert "paths:" in workflow
+    assert "smoke-gemini-windows.ps1" in workflow
+    assert workflow.index("Smoke-test installed Gemini app") < workflow.index(
+        "Publish rolling Gemini release"
+    )
+    assert "if: failure()" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "msiexec.exe" in smoke
+    assert '"setup_complete": true' in smoke
+    assert 'http://127.0.0.1:3900/health' in smoke
+    assert 'http://127.0.0.1:3900/engines' in smoke
+    assert "gemini-3.1-flash-tts" in smoke
+    assert "Local model checkpoint" in smoke
+
+
+def test_upstream_sync_uses_the_cost_reduced_gemini_validation_scope():
+    sync_workflow = SYNC_WORKFLOW.read_text(encoding="utf-8")
+    ci_workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    security_workflow = SECURITY_WORKFLOW.read_text(encoding="utf-8")
+
+    assert sync_workflow.count("scope=gemini-windows") == 2
+    assert "scope:" in ci_workflow
+    assert ci_workflow.count("inputs.scope != 'gemini-windows'") == 2
+    assert "scope:" in security_workflow
+    assert security_workflow.count("inputs.scope != 'gemini-windows'") == 3
 
 
 def test_gemini_windows_bundle_is_msi_only_without_unsigned_updater_payloads():

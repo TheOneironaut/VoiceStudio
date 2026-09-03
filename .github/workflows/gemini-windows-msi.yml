@@ -4,6 +4,15 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - "backend/**"
+      - "omnivoice/**"
+      - "frontend/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "scripts/verify-windows-msi.ps1"
+      - "scripts/smoke-gemini-windows.ps1"
+      - ".github/workflows/gemini-windows-msi.yml"
 
 permissions:
   contents: write
@@ -23,6 +32,7 @@ jobs:
     name: Build and publish Windows MSI
     if: github.ref == 'refs/heads/main'
     runs-on: windows-2022
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +49,13 @@ jobs:
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: windows-bun-${{ hashFiles('frontend/bun.lock', 'bun.lock') }}
+          restore-keys: windows-bun-
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -81,6 +98,34 @@ jobs:
           Copy-Item -LiteralPath $msi.FullName -Destination "dist/$env:MSI_NAME"
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$env:MSI_NAME").Hash.ToLowerInvariant()
           "$hash  $env:MSI_NAME" | Set-Content -Encoding ascii "dist/$env:MSI_NAME.sha256"
+
+      - name: Reclaim build space when the runner is tight
+        shell: pwsh
+        run: |
+          $free = (Get-PSDrive -Name C).Free
+          Write-Host ("Free disk before installed-app smoke: {0:N1} GB" -f ($free / 1GB))
+          if ($free -lt 10GB) {
+            Remove-Item -LiteralPath "frontend/src-tauri/target/$env:RUST_TARGET" -Recurse -Force
+            Write-Host "Removed the already-staged Rust build tree to make room for the real Python environment."
+          }
+
+      - name: Smoke-test installed Gemini app
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          ./scripts/smoke-gemini-windows.ps1 `
+            -MsiPath "dist/$env:MSI_NAME" `
+            -LogDir "dist/smoke-logs" `
+            -ReadyTimeoutSeconds 1200
+
+      - name: Upload installed-app diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-windows-smoke-logs-${{ github.run_id }}
+          path: dist/smoke-logs
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Publish rolling Gemini release
         shell: pwsh
