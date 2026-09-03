@@ -28,7 +28,9 @@ function Invoke-SmokeJson([string]$Url) {
 function Copy-SmokeDiagnostics {
     New-Item -ItemType Directory -Force $resolvedLogDir | Out-Null
     $sources = @(
-        @{ Path = $appData; Prefix = "app-data" },
+        # Never recurse through appData/project/.venv: that can contain tens
+        # of thousands of package metadata files and exhaust the smoke budget.
+        @{ Path = (Join-Path $appData "logs"); Prefix = "desktop" },
         @{ Path = $backendLogs; Prefix = "backend-default" }
     )
     foreach ($source in $sources) {
