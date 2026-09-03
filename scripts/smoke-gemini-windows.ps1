@@ -16,13 +16,13 @@ $temporaryRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Pa
 $modelsDir = Join-Path $temporaryRoot "voicestudio-gemini-models"
 $healthUrl = "http://127.0.0.1:3900/health"
 $progressUrl = "http://127.0.0.1:3900/startup/progress"
-$enginesUrl = "http://127.0.0.1:3900/engines"
+$enginesUrl = "http://127.0.0.1:3900/engines/tts"
 $appProcess = $null
 $installed = $false
 $smokeSucceeded = $false
 
-function Invoke-SmokeJson([string]$Url) {
-    return Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 5 -UseBasicParsing
+function Invoke-SmokeJson([string]$Url, [int]$TimeoutSeconds = 5) {
+    return Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -UseBasicParsing
 }
 
 function Copy-SmokeDiagnostics {
@@ -129,9 +129,22 @@ try {
         throw "Backend did not become healthy within $ReadyTimeoutSeconds seconds"
     }
 
-    $engines = Invoke-SmokeJson $enginesUrl
-    if ($engines.tts.active -ne "gemini-3.1-flash-tts") {
-        throw "Expected Gemini TTS by default, got '$($engines.tts.active)'"
+    # The first synchronous API request may spend a few seconds creating
+    # AnyIO's worker after native imports finish. Retry this bounded readiness
+    # assertion instead of treating one 5-second client timeout as app failure.
+    $enginesDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    $ttsEngines = $null
+    while ([DateTime]::UtcNow -lt $enginesDeadline) {
+        try {
+            $ttsEngines = Invoke-SmokeJson $enginesUrl 15
+            break
+        }
+        catch {
+            Start-Sleep -Seconds 2
+        }
+    }
+    if (-not $ttsEngines -or $ttsEngines.active -ne "gemini-3.1-flash-tts") {
+        throw "Expected Gemini TTS by default, got '$($ttsEngines.active)'"
     }
 
     $checkpoint = Get-ChildItem -LiteralPath $modelsDir -Recurse -File -ErrorAction SilentlyContinue |

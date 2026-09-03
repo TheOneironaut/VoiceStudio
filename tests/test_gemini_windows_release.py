@@ -50,7 +50,8 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     assert "msiexec.exe" in smoke
     assert '"setup_complete": true' in smoke
     assert 'http://127.0.0.1:3900/health' in smoke
-    assert 'http://127.0.0.1:3900/engines' in smoke
+    assert 'http://127.0.0.1:3900/engines/tts' in smoke
+    assert "$enginesDeadline = [DateTime]::UtcNow.AddSeconds(60)" in smoke
     assert "gemini-3.1-flash-tts" in smoke
     assert "Local model checkpoint" in smoke
     assert "OMNIVOICE_LOG_DIR" in smoke
