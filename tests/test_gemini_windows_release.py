@@ -10,6 +10,7 @@ CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 CONFIG = ROOT / "frontend" / "src-tauri" / "tauri.gemini-windows.conf.json"
 README = ROOT / "README.md"
 SMOKE = ROOT / "scripts" / "smoke-gemini-windows.ps1"
+DOCKER_WORKFLOW = ROOT / ".github" / "workflows" / "docker.yml"
 
 MSI_NAME = "VoiceStudio-Gemini-Windows-x64.msi"
 RELEASE_TAG = "gemini-windows"
@@ -67,6 +68,12 @@ def test_ci_cancels_only_superseded_non_main_runs():
     assert "group: ci-${{ github.ref }}-" in workflow
     assert "github.ref == 'refs/heads/main' && github.sha || 'branch'" in workflow
     assert "cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}" in workflow
+
+
+def test_fork_does_not_spend_minutes_on_upstream_owned_docker_images():
+    workflow = DOCKER_WORKFLOW.read_text(encoding="utf-8")
+
+    assert workflow.count("if: github.repository == 'debpalash/VoiceStudio'") == 2
 
 
 def test_gemini_windows_bundle_is_msi_only_without_unsigned_updater_payloads():
