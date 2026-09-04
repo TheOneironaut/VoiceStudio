@@ -211,6 +211,17 @@ class TTSBackend(ABC):
     #: Human-readable name for the UI.
     display_name: str = "Base TTS"
 
+    #: Generic provider metadata. Existing in-tree engines are local and need
+    #: no key; cloud plugins override these through the shared adapter.
+    is_local: bool = True
+    requires_api_key: bool = False
+    supports_streaming: bool = False
+    supports_provider_batch: bool = False
+    voices: tuple[dict, ...] = ()
+    models: tuple[dict, ...] = ()
+    default_voice_id: Optional[str] = None
+    default_model_id: Optional[str] = None
+
     #: Output sample rate. May differ per engine (OmniVoice = 24k, VoxCPM2 = 48k).
     @property
     @abstractmethod
@@ -316,6 +327,15 @@ class TTSBackend(ABC):
         label results — without it, Kokoro-under-mlx and Dia-under-mlx
         rows are indistinguishable."""
         return None
+
+    @classmethod
+    def list_voices(cls) -> list[dict]:
+        """Preset voices without probing a provider during catalogue load."""
+        return [dict(voice) for voice in cls.voices]
+
+    @classmethod
+    def list_models(cls) -> list[dict]:
+        return [dict(model) for model in cls.models]
 
     @abstractmethod
     def generate(
@@ -2270,6 +2290,145 @@ _REGISTRY: dict[str, type[TTSBackend]] = _LazyRegistry({
 })
 
 
+def _decode_plugin_audio(payload) -> torch.Tensor:
+    """Convert a plugin AudioPayload at the one shared torch boundary."""
+    import io
+
+    import numpy as np
+
+    from services.plugin_sdk import AudioPayload
+
+    if not isinstance(payload, AudioPayload):
+        raise TypeError("TTS plugins must return services.plugin_sdk.AudioPayload.")
+    if not payload.data:
+        raise RuntimeError("TTS plugin returned empty audio.")
+    if payload.sample_rate <= 0 or payload.channels <= 0:
+        raise ValueError("TTS plugin returned invalid audio metadata.")
+
+    if payload.encoding == "pcm_s16le":
+        pcm = np.frombuffer(payload.data, dtype="<i2")
+        if pcm.size % payload.channels:
+            raise ValueError("TTS plugin returned truncated PCM audio.")
+        wav = pcm.reshape(-1, payload.channels).astype(np.float32) / 32768.0
+        wav = wav.mean(axis=1)
+    elif payload.encoding in {"wav", "mp3"}:
+        import soundfile as sf
+
+        wav, decoded_rate = sf.read(io.BytesIO(payload.data), dtype="float32", always_2d=True)
+        if int(decoded_rate) != payload.sample_rate:
+            raise ValueError(
+                "TTS plugin audio sample rate does not match its declared metadata."
+            )
+        wav = wav.mean(axis=1)
+    else:  # pragma: no cover - AudioPayload's Literal protects typed callers
+        raise ValueError(f"Unsupported plugin audio encoding: {payload.encoding!r}")
+    if not wav.size:
+        raise RuntimeError("TTS plugin returned empty audio.")
+    return torch.from_numpy(np.ascontiguousarray(wav)).unsqueeze(0)
+
+
+def _plugin_backend_class(plugin_cls) -> type[TTSBackend]:
+    """Create the production TTSBackend adapter for one registered plugin."""
+
+    class PluginBackend(TTSBackend):
+        id = plugin_cls.id
+        display_name = plugin_cls.display_name
+        is_local = plugin_cls.is_local
+        requires_api_key = plugin_cls.requires_api_key
+        supports_cloning = plugin_cls.supports_cloning
+        supports_voice_design = plugin_cls.supports_voice_design
+        supports_streaming = plugin_cls.supports_streaming
+        supports_provider_batch = plugin_cls.supports_provider_batch
+        models = plugin_cls.models
+        default_voice_id = plugin_cls.default_voice_id
+        default_model_id = plugin_cls.default_model_id
+        gpu_compat = ("cpu",)
+
+        def __init__(self):
+            self._plugin = plugin_cls()
+
+        @property
+        def sample_rate(self) -> int:
+            return self._plugin.get_sample_rate()
+
+        @property
+        def supported_languages(self) -> list[str]:
+            return list(plugin_cls.supported_languages_hint)
+
+        @classmethod
+        def is_available(cls) -> tuple[bool, str]:
+            return plugin_cls.is_available()
+
+        @classmethod
+        def list_voices(cls) -> list[dict]:
+            return plugin_cls().list_voices()
+
+        @classmethod
+        def list_models(cls) -> list[dict]:
+            return plugin_cls.list_models()
+
+        def model_identity(self) -> Optional[str]:
+            return self.default_model_id
+
+        def generate(
+            self,
+            text: str,
+            *,
+            ref_audio: Optional[str] = None,
+            ref_text: Optional[str] = None,
+            instruct: Optional[str] = None,
+            language: Optional[str] = None,
+            duration: Optional[float] = None,
+            description: Optional[str] = None,
+            num_step: int = 16,
+            guidance_scale: float = 2.0,
+            speed: float = 1.0,
+            **extras,
+        ) -> torch.Tensor:
+            if ref_audio and not self.supports_cloning:
+                raise ValueError(f"TTS plugin {self.id!r} does not support voice cloning.")
+            payload = self._plugin.generate(
+                text,
+                voice_id=extras.pop("voice_id", None) or self.default_voice_id,
+                model_id=extras.pop("model_id", None) or self.default_model_id,
+                language=language,
+                instruct=instruct or description,
+                speed=speed,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+                duration=duration,
+                **extras,
+            )
+            return _decode_plugin_audio(payload)
+
+    PluginBackend.__name__ = f"{plugin_cls.__name__}Backend"
+    PluginBackend.__qualname__ = PluginBackend.__name__
+    PluginBackend.__module__ = plugin_cls.__module__
+    return PluginBackend
+
+
+def _register_plugin_backend(plugin_cls) -> None:
+    existing = _REGISTRY.get(plugin_cls.id)
+    if existing is not None:
+        if getattr(existing, "_plugin_class", None) is plugin_cls:
+            return
+        raise ValueError(f"TTS plugin id conflicts with an engine: {plugin_cls.id!r}.")
+    backend_cls = _plugin_backend_class(plugin_cls)
+    backend_cls._plugin_class = plugin_cls
+    _REGISTRY[plugin_cls.id] = backend_cls
+
+
+def _bridge_registered_plugins() -> None:
+    from services.plugin_sdk import PLUGINS, subscribe_to_registrations
+
+    for plugin_cls in tuple(PLUGINS.values()):
+        _register_plugin_backend(plugin_cls)
+    subscribe_to_registrations(_register_plugin_backend)
+
+
+_bridge_registered_plugins()
+
+
 # ── ENGINE-06 last-error cache ─────────────────────────────────────────────
 #
 # Populated by `list_backends()` whenever a backend's `is_available()`
@@ -2452,6 +2611,14 @@ def list_backends() -> list[dict]:
             # Graded-emotion capability (#1208) — drives the Audiobook emotion
             # panel's engine gate. Class attr, defaults False.
             "supports_emotion": bool(getattr(cls, "supports_emotion", False)),
+            "supports_voice_design": bool(getattr(cls, "supports_voice_design", False)),
+            "supports_streaming": bool(getattr(cls, "supports_streaming", False)),
+            "supports_provider_batch": bool(getattr(cls, "supports_provider_batch", False)),
+            "is_local": bool(getattr(cls, "is_local", True)),
+            "requires_api_key": bool(getattr(cls, "requires_api_key", False)),
+            "models": cls.list_models(),
+            "default_model_id": getattr(cls, "default_model_id", None),
+            "default_voice_id": getattr(cls, "default_voice_id", None),
             "install_hint": _INSTALL_HINTS.get(bid),
             # Exact `export VAR=...` line for path-gated opt-in engines, or None.
             "setup_snippet": _SETUP_SNIPPETS.get(bid),

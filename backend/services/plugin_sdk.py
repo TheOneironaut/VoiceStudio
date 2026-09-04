@@ -22,23 +22,57 @@ Example:
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
-from typing import Optional
+from dataclasses import dataclass
+from typing import Callable, Literal, Optional
 
 logger = logging.getLogger("omnivoice.plugins")
 
 # ── Plugin registry ──────────────────────────────────────────────────
 
 PLUGINS: dict[str, type["TTSPlugin"]] = {}
+_REGISTRATION_LISTENERS: list[Callable[[type["TTSPlugin"]], None]] = []
+_PLUGIN_ID_RE = re.compile(r"^[a-z0-9]+(?:[a-z0-9-]*[a-z0-9])?$")
+
+
+@dataclass(frozen=True)
+class AudioPayload:
+    """Provider-neutral audio returned by a plugin.
+
+    Cloud plugins stay independent of torch and local model libraries.  The
+    production TTS adapter owns conversion from this transport-safe payload to
+    VoiceStudio's tensor contract.
+    """
+
+    data: bytes
+    sample_rate: int
+    encoding: Literal["pcm_s16le", "wav", "mp3"] = "pcm_s16le"
+    channels: int = 1
 
 
 def register_plugin(cls: type["TTSPlugin"]) -> type["TTSPlugin"]:
     """Decorator: register a TTS plugin class by its `id`."""
-    if not hasattr(cls, "id") or not cls.id:
-        raise ValueError(f"Plugin class {cls.__name__} must define a non-empty `id`.")
+    if not isinstance(cls, type) or not issubclass(cls, TTSPlugin):
+        raise TypeError("TTS plugins must subclass TTSPlugin.")
+    if not _PLUGIN_ID_RE.fullmatch(cls.id or ""):
+        raise ValueError(
+            f"Plugin class {cls.__name__} must define a lowercase, hyphenated `id`."
+        )
+    existing = PLUGINS.get(cls.id)
+    if existing is not None and existing is not cls:
+        raise ValueError(f"Duplicate TTS plugin id: {cls.id!r}.")
     PLUGINS[cls.id] = cls
+    for listener in tuple(_REGISTRATION_LISTENERS):
+        listener(cls)
     logger.info("Registered TTS plugin: %s (%s)", cls.id, cls.display_name)
     return cls
+
+
+def subscribe_to_registrations(listener: Callable[[type["TTSPlugin"]], None]) -> None:
+    """Notify a production registry when plugins register after import."""
+    if listener not in _REGISTRATION_LISTENERS:
+        _REGISTRATION_LISTENERS.append(listener)
 
 
 def get_plugin(plugin_id: str) -> "TTSPlugin":
@@ -63,6 +97,13 @@ def list_plugins() -> list[dict]:
             "available": ok,
             "availability_message": msg,
             "supported_languages": cls.supported_languages_hint,
+            "supports_cloning": cls.supports_cloning,
+            "supports_voice_design": cls.supports_voice_design,
+            "supports_streaming": cls.supports_streaming,
+            "supports_provider_batch": cls.supports_provider_batch,
+            "models": list(cls.models),
+            "default_model_id": cls.default_model_id,
+            "default_voice_id": cls.default_voice_id,
         })
     return out
 
@@ -92,6 +133,19 @@ class TTSPlugin(ABC):
     #: Hint for the UI — list of commonly supported languages.
     supported_languages_hint: list[str] = ["en"]
 
+    #: Truthful, provider-owned capabilities surfaced through the generic
+    #: production engine catalogue.
+    supports_cloning: bool = False
+    supports_voice_design: bool = False
+    supports_streaming: bool = False
+    supports_provider_batch: bool = False
+
+    #: Static model metadata. Providers whose roster is dynamic may override
+    #: ``list_models`` without forcing a network call during app startup.
+    models: tuple[dict, ...] = ()
+    default_model_id: Optional[str] = None
+    default_voice_id: Optional[str] = None
+
     @classmethod
     @abstractmethod
     def is_available(cls) -> tuple[bool, str]:
@@ -108,10 +162,12 @@ class TTSPlugin(ABC):
         text: str,
         *,
         voice_id: Optional[str] = None,
+        model_id: Optional[str] = None,
         language: Optional[str] = None,
+        instruct: Optional[str] = None,
         speed: float = 1.0,
         **kwargs,
-    ) -> bytes:
+    ) -> AudioPayload:
         """Generate speech from text.
 
         Args:
@@ -121,7 +177,7 @@ class TTSPlugin(ABC):
             speed: Speech speed multiplier.
 
         Returns:
-            Raw audio bytes (WAV or MP3, depending on provider).
+            Audio bytes plus their explicit encoding and format metadata.
         """
 
     @abstractmethod
@@ -135,6 +191,10 @@ class TTSPlugin(ABC):
     def get_sample_rate(self) -> int:
         """Output sample rate. Override if not 24000."""
         return 24000
+
+    @classmethod
+    def list_models(cls) -> list[dict]:
+        return [dict(model) for model in cls.models]
 
 
 # ── Built-in plugin: ElevenLabs (example) ────────────────────────────
@@ -169,7 +229,7 @@ class ElevenLabsPlugin(TTSPlugin):
         except ImportError:
             return False, "pip install elevenlabs"
 
-    def generate(self, text, *, voice_id=None, language=None, speed=1.0, **kw) -> bytes:
+    def generate(self, text, *, voice_id=None, language=None, speed=1.0, **kw) -> AudioPayload:
         import os
         from elevenlabs import ElevenLabs
 
@@ -180,7 +240,9 @@ class ElevenLabsPlugin(TTSPlugin):
             model_id="eleven_multilingual_v2",
             output_format="mp3_44100_128",
         )
-        return b"".join(audio_iter)
+        return AudioPayload(
+            data=b"".join(audio_iter), sample_rate=44100, encoding="mp3"
+        )
 
     def list_voices(self) -> list[dict]:
         import os
@@ -224,7 +286,7 @@ class BarkPlugin(TTSPlugin):
         except ImportError:
             return False, "pip install suno-bark"
 
-    def generate(self, text, *, voice_id=None, language=None, speed=1.0, **kw) -> bytes:
+    def generate(self, text, *, voice_id=None, language=None, speed=1.0, **kw) -> AudioPayload:
         import io
         import numpy as np
         from bark import generate_audio, SAMPLE_RATE
@@ -235,7 +297,7 @@ class BarkPlugin(TTSPlugin):
 
         buf = io.BytesIO()
         scipy.io.wavfile.write(buf, SAMPLE_RATE, (audio_array * 32767).astype(np.int16))
-        return buf.getvalue()
+        return AudioPayload(data=buf.getvalue(), sample_rate=SAMPLE_RATE, encoding="wav")
 
     def list_voices(self) -> list[dict]:
         return [
