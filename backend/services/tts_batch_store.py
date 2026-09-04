@@ -103,7 +103,7 @@ def list_jobs(*, status: str | None = None, limit: int = 100) -> list[dict]:
     params.append(max(1, min(limit, 500)))
     with db_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [_decode(row) for row in rows]
+    return [get_job(row["id"]) for row in rows]
 
 
 def jobs_to_resume() -> list[str]:

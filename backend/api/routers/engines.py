@@ -23,7 +23,7 @@ from time import perf_counter
 from fastapi import APIRouter, Depends, HTTPException
 from huggingface_hub import utils as hf_utils
 from huggingface_hub.errors import HFValidationError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api.dependencies import require_admin, require_admin_action, require_desktop
 from core import prefs
@@ -73,6 +73,69 @@ def list_all_engines():
 @router.get("/engines/tts")
 def list_tts_backends():
     return _family_payload("tts", tts_backend)
+
+
+class TTSProviderConfiguration(BaseModel):
+    voice_id: str | None = Field(default=None, max_length=200)
+    model_id: str | None = Field(default=None, max_length=200)
+    api_key: str | None = Field(default=None, max_length=4096)
+
+
+def _tts_plugin_class(engine_id: str):
+    try:
+        backend_cls = tts_backend.get_backend_class(engine_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Unknown TTS engine") from exc
+    plugin_cls = getattr(backend_cls, "_plugin_class", None)
+    if plugin_cls is None:
+        raise HTTPException(status_code=404, detail="TTS engine is not a plugin provider")
+    return backend_cls, plugin_cls
+
+
+@router.get("/engines/tts/{engine_id}/voices")
+def list_tts_provider_voices(engine_id: str):
+    backend_cls, _plugin_cls = _tts_plugin_class(engine_id)
+    try:
+        voices = backend_cls.list_voices()
+    except Exception as exc:  # noqa: BLE001 - provider diagnostics stay private
+        logger.warning("TTS provider voice listing failed for %s: %s", engine_id, type(exc).__name__)
+        raise HTTPException(status_code=503, detail="TTS provider voices are unavailable.") from exc
+    return {"engine_id": engine_id, "voices": voices}
+
+
+@router.get("/engines/tts/{engine_id}/configuration")
+def get_tts_provider_configuration(engine_id: str):
+    backend_cls, plugin_cls = _tts_plugin_class(engine_id)
+    return {
+        "engine_id": engine_id,
+        "voice_id": tts_backend._plugin_preference(
+            engine_id, "voice", backend_cls.default_voice_id
+        ),
+        "model_id": tts_backend._plugin_preference(
+            engine_id, "model", backend_cls.default_model_id
+        ),
+        "requires_api_key": backend_cls.requires_api_key,
+        "credential_configured": plugin_cls.has_api_key(),
+        "credential_stored": plugin_cls.has_stored_api_key(),
+    }
+
+
+@router.put(
+    "/engines/tts/{engine_id}/configuration",
+    dependencies=[Depends(require_admin_action)],
+)
+def update_tts_provider_configuration(engine_id: str, body: TTSProviderConfiguration):
+    backend_cls, plugin_cls = _tts_plugin_class(engine_id)
+    try:
+        if body.voice_id is not None:
+            tts_backend.set_plugin_preference(engine_id, "voice", body.voice_id or None)
+        if body.model_id is not None:
+            tts_backend.set_plugin_preference(engine_id, "model", body.model_id or None)
+        if body.api_key is not None:
+            plugin_cls.save_api_key(body.api_key)
+    except (ValueError, NotImplementedError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return get_tts_provider_configuration(engine_id)
 
 
 @router.get(
