@@ -7,10 +7,16 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, codex/upstream-clean-baseline]
   push:
     branches: [main]
+  schedule:
+    - cron: "17 3 * * 0"
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -23,6 +29,8 @@ jobs:
   test:
     name: Tests (backend + frontend)
     runs-on: ubuntu-22.04
+    outputs:
+      provider_only: ${{ steps.changes.outputs.provider_only }}
     env:
       # Same restricted-network resilience the smoke matrix already sets. This
       # job resolves the same direct-URL dependency and had none of it, which
@@ -31,6 +39,29 @@ jobs:
       UV_HTTP_RETRIES: "5"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify change scope
+        id: changes
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          provider_only=false
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            provider_only=true
+            while IFS= read -r path; do
+              case "$path" in
+                backend/plugins/*|tests/backend/plugins/*|docs/gemini-tts.md|docs/tts-providers.md|CHANGELOG.md) ;;
+                *) provider_only=false; break ;;
+              esac
+            done < <(git diff --name-only "$BASE_SHA"...HEAD)
+          fi
+          echo "provider_only=$provider_only" >> "$GITHUB_OUTPUT"
+          echo "Provider-only fast path: $provider_only"
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -48,21 +79,25 @@ jobs:
       # Node 22 is needed for --experimental-strip-types so node:test can
       # import .ts files directly from frontend/src/api/*.
       - name: Setup Node 22
+        if: steps.changes.outputs.provider_only != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Setup Bun
+        if: steps.changes.outputs.provider_only != 'true'
         uses: oven-sh/setup-bun@v1
 
       # apt install ffmpeg is ~30 s every run; cache the resolved .debs.
       - name: System deps (ffmpeg)
+        if: steps.changes.outputs.provider_only != 'true'
         uses: awalsh128/cache-apt-pkgs-action@v1.6.3
         with:
           packages: ffmpeg
           version: 1.0
 
       - name: Install Python deps
+        if: steps.changes.outputs.provider_only != 'true'
         # `--all-extras` installs optional engine deps (e.g. `supertonic`)
         # so their tests can exercise the real import path, not the
         # "package not installed" fallback. Smoke job below stays on bare
@@ -84,6 +119,7 @@ jobs:
       # interactions in tests are stubbed; anything that trips this is a
       # test-isolation bug.
       - name: Run pytest
+        if: steps.changes.outputs.provider_only != 'true'
         run: uv run --no-sync pytest tests/ -q --tb=short
         env:
           HF_HUB_OFFLINE: "1"
@@ -94,6 +130,7 @@ jobs:
       # Its own correctness is enforced by tests/scripts/test_validate_install_docs.py
       # (checker B-5) — those tests run in the previous step.
       - name: Validate install docs against desktop-prod.sh
+        if: steps.changes.outputs.provider_only != 'true'
         run: python scripts/validate-install-docs.py
 
       # The AppImage launcher decides which WebKitGTK actually runs — the wrong
@@ -102,6 +139,7 @@ jobs:
       # never been wired into CI, so its cases were a regression test nothing
       # ran. Cheap (pure bash, stubs pkg-config) and it gates the class.
       - name: AppImage launcher (AppRun) unit tests
+        if: steps.changes.outputs.provider_only != 'true'
         run: |
           bash frontend/src-tauri/appimage/AppRun.test.sh
           bash scripts/inject-apprun.test.sh
@@ -112,6 +150,7 @@ jobs:
       # longer stubs sys.modules, so mixed sessions with tests/ are safe;
       # the separate session is kept for cheaper, clearer CI output.
       - name: Run pytest (backend/tests, isolated)
+        if: steps.changes.outputs.provider_only != 'true'
         run: uv run --no-sync pytest backend/tests/ -q --tb=short
         env:
           HF_HUB_OFFLINE: "1"  # same no-silent-downloads guard as tests/
@@ -119,6 +158,7 @@ jobs:
       # Cache ~/.bun/install/cache keyed on bun.lock — `bun install` drops
       # from ~15 s cold to near-instant on warm cache.
       - name: Cache bun deps
+        if: steps.changes.outputs.provider_only != 'true'
         uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
@@ -127,6 +167,7 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install frontend deps
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         # --frozen-lockfile so a frontend/package.json change that forgets to
         # regenerate the root bun.lock fails HERE (fast) instead of only in the
@@ -138,6 +179,7 @@ jobs:
       # Sourced from `typecheck:ci` in frontend/package.json so the release
       # workflow runs an identical command — drift broke v0.3.x release runs.
       - name: Frontend typecheck
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: bun run typecheck:ci
 
@@ -145,12 +187,14 @@ jobs:
       # re-accumulate (warnings, incl. the react-compiler advisories in
       # `lint:hooks`, are non-blocking). See frontend/.oxlintrc.json.
       - name: Frontend lint (oxlint)
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: bun run lint
 
       # oxfmt format gate — JS/TS/JSX only (CSS/JSON/Tauri excluded; see
       # frontend/.oxfmtrc.json). `bun run format` fixes locally.
       - name: Frontend format check (oxfmt)
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: bun run format:check
 
@@ -158,11 +202,13 @@ jobs:
       # resolves by npm package name and can miss workspace-hoisted bins,
       # then falls back to fetching from npm (#962 class).
       - name: Run Vitest (frontend)
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: bun run test
 
       # Legacy node:test runner for tests/frontend/*.test.mjs
       - name: Run frontend node:test (legacy)
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: node --experimental-strip-types --no-warnings --test ../tests/frontend/*.test.mjs
 
@@ -175,11 +221,26 @@ jobs:
       # (The in-app root <ErrorBoundary> in main-app.jsx catches such throws at
       # runtime; this gate stops them reaching a release in the first place.)
       - name: Install Playwright chromium
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: bunx playwright install --with-deps chromium
       - name: Production-bundle smoke — no blank screen
+        if: steps.changes.outputs.provider_only != 'true'
         working-directory: frontend
         run: bun run test:prod-bundle
+
+      - name: Install provider-only test dependencies
+        if: steps.changes.outputs.provider_only == 'true'
+        run: python -m pip install pytest
+
+      - name: Provider-only contract and mocked transport tests
+        if: steps.changes.outputs.provider_only == 'true'
+        env:
+          PYTHONPATH: backend
+          HF_HUB_OFFLINE: "1"
+        run: |
+          python -m compileall -q backend/plugins
+          python -m pytest tests/backend/plugins -q --tb=short
 
   # ── Cross-platform Tauri shell check ────────────────────────────────────
   # Catches platform-specific Rust regressions on PR (cfg(target_os=...)
@@ -191,6 +252,7 @@ jobs:
   tauri-cross-platform:
     name: Tauri shell check (${{ matrix.label }})
     needs: test
+    if: needs.test.outputs.provider_only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -291,6 +353,7 @@ jobs:
   smoke-matrix:
     name: Smoke (${{ matrix.label }})
     needs: test
+    if: needs.test.outputs.provider_only != 'true'
     strategy:
       fail-fast: false
       matrix:

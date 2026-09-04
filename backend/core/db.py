@@ -278,6 +278,50 @@ _BASE_SCHEMA = """
     );
     CREATE INDEX IF NOT EXISTS idx_remote_attempts_task ON remote_task_attempts(task_id);
     CREATE INDEX IF NOT EXISTS idx_remote_attempts_worker ON remote_task_attempts(worker_id, state);
+
+    -- Provider-neutral, crash-resumable TTS batch jobs. Provider settings are
+    -- pinned at creation so changing the active engine cannot alter queued work.
+    CREATE TABLE IF NOT EXISTS tts_batch_jobs (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT,
+        engine_id TEXT NOT NULL,
+        model_id TEXT,
+        voice_id TEXT,
+        settings_json TEXT NOT NULL DEFAULT '{}',
+        execution_mode TEXT NOT NULL DEFAULT 'standard',
+        status TEXT NOT NULL DEFAULT 'queued',
+        provider_batch_id TEXT,
+        output_path TEXT,
+        error_json TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        finished_at REAL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tts_batch_jobs_idem
+        ON tts_batch_jobs(idempotency_key) WHERE idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tts_batch_jobs_status
+        ON tts_batch_jobs(status, created_at);
+
+    CREATE TABLE IF NOT EXISTS tts_batch_items (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        input_text TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        error_json TEXT,
+        output_path TEXT,
+        checksum TEXT,
+        provider_item_id TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL,
+        finished_at REAL,
+        FOREIGN KEY (job_id) REFERENCES tts_batch_jobs(id) ON DELETE CASCADE,
+        UNIQUE (job_id, position)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tts_batch_items_job_status
+        ON tts_batch_items(job_id, status, position);
 """
 
 # Only tables/columns this module is allowed to ALTER. Prevents SQL injection via

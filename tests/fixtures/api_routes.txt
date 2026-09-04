@@ -91,6 +91,8 @@ GET /engines/sidecar/{engine_id}/install/status
 GET /engines/sonitranslate/status
 GET /engines/translation
 GET /engines/tts
+GET /engines/tts/{engine_id}/configuration
+GET /engines/tts/{engine_id}/voices
 GET /engines/{engine_id}/disk-usage
 GET /engines/{engine_id}/health
 GET /export/history
@@ -144,6 +146,8 @@ GET /system/tailscale/status
 GET /tasks/stream/{task_id}
 GET /tools/effects
 GET /tools/plugins
+GET /tts/batches
+GET /tts/batches/{job_id}
 GET /v1/audio/capabilities
 GET /v1/audio/voices
 GET /watermark/status
@@ -257,6 +261,11 @@ POST /tools/probe
 POST /tools/rate-fit
 POST /tools/video-context/{job_id}
 POST /transcribe
+POST /tts/batches
+POST /tts/batches/{job_id}/cancel
+POST /tts/batches/{job_id}/pause
+POST /tts/batches/{job_id}/resume
+POST /tts/batches/{job_id}/retry-failed
 POST /v1/audio/speech
 POST /v1/audio/transcriptions
 POST /watermark/detect
@@ -287,6 +296,7 @@ PUT /api/settings/llm-skills/{skill_id}
 PUT /api/settings/perf/torch-compile-disabled
 PUT /api/settings/storage/models-dir
 PUT /archetypes/previews
+PUT /engines/tts/{engine_id}/configuration
 PUT /glossary/{project_id}/{term_id}
 PUT /history/{history_id}/starred
 PUT /profiles/{profile_id}

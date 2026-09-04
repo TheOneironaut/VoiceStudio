@@ -754,6 +754,7 @@
     "unavailable": "अनुपलब्ध",
     "use": "उपयोग करें",
     "configureProviders": "प्रदाता कॉन्फ़िगर करें",
+    "cloudProviderNotice": "चुने जाने पर {{provider}} आपका टेक्स्ट अपनी क्लाउड API को भेजता है और प्रदाता शुल्क लग सकता है।",
     "loading": "इंजन लोड हो रहे हैं...",
     "refresh": "ताज़ा करें",
     "matrixTitle": "इंजन अनुकूलता मैट्रिक्स",
@@ -1410,6 +1411,7 @@
     "watch_failed": "निगरानी रुक गई — फ़ोल्डर अब पढ़ा नहीं जा सकता (हटाया गया, स्थानांतरित हुआ या अनुमतियाँ बदल गईं)। जारी रखने के लिए उसे फिर से चुनें।",
     "watch_start_failed": "उस फ़ोल्डर की निगरानी शुरू नहीं हो सकी — फिर से कोशिश करने के लिए उसे दोबारा चुनें।"
   },
+  "ttsBatch": {"tab":"टेक्स्ट से आवाज़","inputs":"टेक्स्ट","inputPlaceholder":"हर आइटम के लिए एक अनुच्छेद चिपकाएँ। खाली पंक्तियों से अलग करें।","itemCount":"{{count}} आइटम","execution":"निष्पादन","standard":"मानक API","providerBatch":"प्रदाता Batch API — कम लागत, असिंक्रोनस","instructions":"शैली निर्देश (वैकल्पिक)","create":"बैच बनाएँ","created":"{{count}} आइटम कतार में","jobs":"TTS बैच कार्य","empty":"अभी कोई TTS बैच कार्य नहीं है।","retryFailed":"विफल फिर चलाएँ","download":"डाउनलोड","statusQueued":"कतार में","statusRunning":"चल रहा है","statusPaused":"रुका हुआ","statusCompleted":"पूरा हुआ","statusPartial":"आंशिक रूप से पूरा","statusFailed":"विफल","statusCancelled":"रद्द","statusUnknown":"अज्ञात"},
   "gallery": {
     "title": "VoiceStudio गैलरी",
     "search_placeholder": "यूट्यूब पर खोजें...",

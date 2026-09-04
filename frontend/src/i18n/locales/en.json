@@ -1668,6 +1668,7 @@
     "watch_failed": "Folder watching stopped — the folder is no longer readable (moved, deleted, or permissions changed). Pick it again to resume.",
     "watch_start_failed": "Couldn't start watching that folder — pick it again to retry."
   },
+  "ttsBatch": {"tab":"Text to speech","inputs":"Texts","inputPlaceholder":"Paste one paragraph per item. Separate items with blank lines.","itemCount":"{{count}} items","execution":"Execution","standard":"Standard API","providerBatch":"Provider Batch API — lower cost, asynchronous","instructions":"Style instructions (optional)","create":"Generate batch","created":"Queued {{count}} items","jobs":"TTS batch jobs","empty":"No TTS batch jobs yet.","retryFailed":"Retry failed","download":"Download","statusQueued":"Queued","statusRunning":"Running","statusPaused":"Paused","statusCompleted":"Completed","statusPartial":"Partially completed","statusFailed":"Failed","statusCancelled":"Cancelled","statusUnknown":"Unknown"},
   "gallery": {
     "title": "VoiceStudio Gallery",
     "search_placeholder": "Search YouTube…",
@@ -2082,6 +2083,7 @@
     "unavailable": "Unavailable",
     "use": "Use",
     "configureProviders": "Configure providers",
+    "cloudProviderNotice": "When selected, {{provider}} sends your text to its cloud API and may incur provider charges.",
     "loading": "Loading engines…",
     "refresh": "Refresh",
     "matrixTitle": "Engine Compatibility Matrix",

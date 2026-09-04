@@ -754,6 +754,7 @@
     "unavailable": "недоступний",
     "use": "використання",
     "configureProviders": "Налаштувати постачальників",
+    "cloudProviderNotice": "Після вибору {{provider}} надсилає ваш текст до свого хмарного API; постачальник може стягувати плату.",
     "loading": "Завантаження двигунів…",
     "refresh": "Оновити",
     "matrixTitle": "Матриця сумісності двигуна",
@@ -1410,6 +1411,7 @@
     "watch_failed": "Стеження зупинено — теку більше не можна прочитати (переміщено, видалено або змінено права). Виберіть її знову, щоб продовжити.",
     "watch_start_failed": "Не вдалося почати стеження за цією текою — виберіть її знову, щоб повторити спробу."
   },
+  "ttsBatch": {"tab":"Текст у мовлення","inputs":"Тексти","inputPlaceholder":"Вставте по одному абзацу на елемент. Розділяйте елементи порожніми рядками.","itemCount":"Елементів: {{count}}","execution":"Виконання","standard":"Стандартний API","providerBatch":"Batch API постачальника — дешевше, асинхронно","instructions":"Вказівки щодо стилю (необов’язково)","create":"Створити пакет","created":"У черзі: {{count}}","jobs":"Пакетні завдання TTS","empty":"Пакетних завдань TTS ще немає.","retryFailed":"Повторити невдалі","download":"Завантажити","statusQueued":"У черзі","statusRunning":"Виконується","statusPaused":"Призупинено","statusCompleted":"Завершено","statusPartial":"Частково завершено","statusFailed":"Помилка","statusCancelled":"Скасовано","statusUnknown":"Невідомо"},
   "gallery": {
     "title": "VoiceStudio Галерея",
     "search_placeholder": "Пошук на YouTube…",

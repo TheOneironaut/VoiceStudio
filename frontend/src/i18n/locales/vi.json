@@ -754,6 +754,7 @@
     "unavailable": "không có sẵn",
     "use": "sử dụng",
     "configureProviders": "Cấu hình nhà cung cấp",
+    "cloudProviderNotice": "Khi được chọn, {{provider}} gửi văn bản của bạn đến API đám mây và có thể phát sinh phí từ nhà cung cấp.",
     "loading": "Đang tải động cơ…",
     "refresh": "Làm mới",
     "matrixTitle": "Ma trận tương thích động cơ",
@@ -1410,6 +1411,7 @@
     "watch_failed": "Đã dừng theo dõi — không thể đọc thư mục nữa (đã di chuyển, bị xóa hoặc quyền đã thay đổi). Chọn lại thư mục để tiếp tục.",
     "watch_start_failed": "Không thể bắt đầu theo dõi thư mục đó — hãy chọn lại để thử lại."
   },
+  "ttsBatch": {"tab":"Văn bản thành giọng nói","inputs":"Văn bản","inputPlaceholder":"Dán một đoạn văn cho mỗi mục. Ngăn cách các mục bằng dòng trống.","itemCount":"{{count}} mục","execution":"Cách thực thi","standard":"API tiêu chuẩn","providerBatch":"Batch API của nhà cung cấp — chi phí thấp hơn, bất đồng bộ","instructions":"Chỉ dẫn phong cách (không bắt buộc)","create":"Tạo lô","created":"Đã xếp hàng {{count}} mục","jobs":"Tác vụ TTS theo lô","empty":"Chưa có tác vụ TTS theo lô.","retryFailed":"Thử lại mục lỗi","download":"Tải xuống","statusQueued":"Đang chờ","statusRunning":"Đang chạy","statusPaused":"Đã tạm dừng","statusCompleted":"Hoàn tất","statusPartial":"Hoàn tất một phần","statusFailed":"Thất bại","statusCancelled":"Đã hủy","statusUnknown":"Không xác định"},
   "gallery": {
     "title": "VoiceStudio Thư viện ảnh",
     "search_placeholder": "Tìm kiếm YouTube…",

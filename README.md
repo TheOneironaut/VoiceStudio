@@ -9,6 +9,8 @@
   <p>16 TTS engines · 11 ASR engines · 646-language catalogue · macOS, Windows, Linux, and Docker</p>
   <p>No account, API key, subscription, or usage meter for the local workflow.</p>
 
+  <p><strong><a href="https://github.com/TheOneironaut/VoiceStudio/releases/download/gemini-windows/VoiceStudio-Gemini-Windows-x64.msi">Download the verified Gemini-enabled Windows MSI</a></strong></p>
+
   <p>
     <a href="#install">Install</a> ·
     <a href="#features">Features</a> ·

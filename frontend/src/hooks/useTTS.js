@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { useAppStore } from '../store';
 import { generateSpeech, TtsGenerationBusyError } from '../api/generate';
 import { pickDesignSeed } from '../utils/seed';
@@ -20,6 +20,7 @@ import {
 import { toast } from 'react-hot-toast';
 import { toastErrorWithReport } from '../utils/errorToast';
 import { modelNotDownloadedPayload, toastModelNotDownloaded } from '../utils/modelNotDownloaded';
+import { activeTtsBackend, TTS_ENGINE_SELECTED_EVENT } from '../utils/generatePreflight';
 import { addBreadcrumb } from '../utils/breadcrumbs';
 import i18next from 'i18next';
 const t = i18next.t.bind(i18next);
@@ -72,6 +73,25 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
   const [generationTime, setGenerationTime] = useState(0);
   const timerRef = useRef(null);
   const textAreaRef = useRef(null);
+  const activeBackendRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      activeBackendRef.current = null;
+      activeTtsBackend()
+        .then((backend) => {
+          if (!cancelled) activeBackendRef.current = backend;
+        })
+        .catch(() => {});
+    };
+    refresh();
+    window.addEventListener(TTS_ENGINE_SELECTED_EVENT, refresh);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(TTS_ENGINE_SELECTED_EVENT, refresh);
+    };
+  }, []);
 
   const ingestRefAudio = useCallback(
     async (file) => {
@@ -121,7 +141,8 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
 
   const handleGenerate = useCallback(async () => {
     if (!text.trim()) return toast.error(t('tts_errors.enter_text'));
-    if (defineMethod === 'audio' && !refAudio && !selectedProfile)
+    const supportsCloning = activeBackendRef.current?.supports_cloning !== false;
+    if (supportsCloning && defineMethod === 'audio' && !refAudio && !selectedProfile)
       return toast.error(t('tts_errors.upload_or_select'));
     addBreadcrumb(`generate:start (${defineMethod})`);
     setIsGenerating(true);
@@ -151,9 +172,9 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
       if (duration) formData.append('duration', parseFloat(duration));
 
       if (defineMethod === 'audio') {
-        if (selectedProfile) {
+        if (supportsCloning && selectedProfile) {
           formData.append('profile_id', selectedProfile);
-        } else if (refAudio) {
+        } else if (supportsCloning && refAudio) {
           const arrBuf = await refAudio.arrayBuffer();
           const safeBlob = new Blob([arrBuf], { type: refAudio.type });
           formData.append('ref_audio', safeBlob, refAudio.name || 'audio.wav');
@@ -231,7 +252,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
         // voice would override the design attributes (e.g. "Male" has no effect).
         // Design profiles still pass through (re-render a designed voice).
         const designProfileId = designModeProfileId(selectedProfile, profiles);
-        if (designProfileId) {
+        if (supportsCloning && designProfileId) {
           formData.append('profile_id', designProfileId);
         }
       }

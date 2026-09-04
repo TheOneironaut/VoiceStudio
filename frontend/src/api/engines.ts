@@ -6,6 +6,8 @@ import type {
   EngineHealthResponse,
   EngineSelfTestResponse,
   SelectEngineResponse,
+  TTSProviderConfiguration,
+  TTSProviderVoice,
 } from './types';
 
 interface TranslationEngine {
@@ -42,6 +44,29 @@ export interface InstallEngineResponse {
 
 export async function listEngines(): Promise<AllEnginesResponse> {
   return apiJson<AllEnginesResponse>('/engines');
+}
+
+export async function listTTSProviderVoices(
+  engineId: string,
+): Promise<{ engine_id: string; voices: TTSProviderVoice[] }> {
+  return apiJson(`/engines/tts/${encodeURIComponent(engineId)}/voices`);
+}
+
+export async function getTTSProviderConfiguration(
+  engineId: string,
+): Promise<TTSProviderConfiguration> {
+  return apiJson(`/engines/tts/${encodeURIComponent(engineId)}/configuration`);
+}
+
+export async function updateTTSProviderConfiguration(
+  engineId: string,
+  update: { voice_id?: string; model_id?: string; api_key?: string },
+): Promise<TTSProviderConfiguration> {
+  return apiJson(`/engines/tts/${encodeURIComponent(engineId)}/configuration`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
 }
 
 export async function selectEngine(
