@@ -29,6 +29,7 @@ import { toastErrorWithReport } from '../utils/errorToast';
 import { asrMissingPayload, toastAsrModelMissing } from '../utils/asrModelMissing';
 import { recordValueMoment } from '../utils/donationMoments';
 import { absoluteTime, timeAgo } from '../utils/relativeTime';
+import TTSBatchPanel from '../components/TTSBatchPanel';
 
 /**
  * BatchQueue — UI for the /batch/* dubbing pipeline.
@@ -74,6 +75,14 @@ export default function BatchQueue({ onBack }) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [workload, setWorkload] = useState('tts');
+  const WORKLOAD_TABS = useMemo(
+    () => [
+      { id: 'tts', label: t('ttsBatch.tab'), icon: Activity },
+      { id: 'dubbing', label: t('batch.title'), icon: Film },
+    ],
+    [t],
+  );
 
   // Settings the watch-folder ingest reuses: the last Add-to-queue submission,
   // or the dialog's own defaults before any manual enqueue this session.
@@ -120,15 +129,15 @@ export default function BatchQueue({ onBack }) {
   }, [tab, resolveFinishedJob]);
 
   useEffect(() => {
-    reload();
-  }, [reload]);
+    if (workload === 'dubbing') reload();
+  }, [reload, workload]);
 
   // Poll active tab every 3s for live progress
   useEffect(() => {
-    if (tab !== 'active') return;
+    if (workload !== 'dubbing' || tab !== 'active') return;
     const iv = setInterval(reload, 3000);
     return () => clearInterval(iv);
-  }, [tab, reload]);
+  }, [tab, reload, workload]);
 
   const handleEnqueue = useCallback(
     async (files, settings) => {
@@ -216,55 +225,75 @@ export default function BatchQueue({ onBack }) {
           aria-level={1}
           className="m-0 inline-flex items-center gap-[var(--space-3)] [font-family:var(--font-display)] [font-size:var(--text-xl)] [font-weight:var(--weight-bold)] text-fg"
         >
-          <Activity size={15} /> {t('batch.title')}
+          <Activity size={15} /> {workload === 'tts' ? t('ttsBatch.jobs') : t('batch.title')}
         </div>
         <div className="batch-queue__bar-spacer flex-1" />
-        <WatchFolderBar onIngest={handleWatchIngest} />
-        <Button
-          variant="subtle"
-          size="sm"
-          onClick={reload}
-          loading={loading}
-          leading={<RefreshCw size={11} />}
-        >
-          {t('batch.refresh')}
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          onClick={() => setAddOpen(true)}
-          leading={<PlusIcon size={11} />}
-        >
-          {t('batch.add_videos')}
-        </Button>
+        {workload === 'dubbing' && <WatchFolderBar onIngest={handleWatchIngest} />}
+        {workload === 'dubbing' && (
+          <>
+            <Button
+              variant="subtle"
+              size="sm"
+              onClick={reload}
+              loading={loading}
+              leading={<RefreshCw size={11} />}
+            >
+              {t('batch.refresh')}
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => setAddOpen(true)}
+              leading={<PlusIcon size={11} />}
+            >
+              {t('batch.add_videos')}
+            </Button>
+          </>
+        )}
       </div>
 
-      <Tabs items={TABS} value={tab} onChange={setTab} className="batch-queue__tabs shrink-0" />
+      <Tabs items={WORKLOAD_TABS} value={workload} onChange={setWorkload} />
 
-      {jobs.length === 0 && !loading && (
-        <Panel variant="flat" padding="lg" className="batch-queue__empty text-center text-fg-muted">
-          <div>
-            <p>
-              {tab === 'active' && t('batch.no_active')}
-              {tab === 'done' && t('batch.no_completed')}
-              {tab === 'failed' && t('batch.no_failed')}
-            </p>
-            <p className="batch-queue__empty-sub text-[var(--text-sm)] text-fg-subtle">
-              {tab === 'active' && t('batch.drop_hint')}
-              {tab === 'done' && 'Nothing has completed recently.'}
-              {tab === 'failed' && 'No failed jobs — enjoy the silence.'}
-            </p>
+      {workload === 'tts' ? (
+        <TTSBatchPanel />
+      ) : (
+        <>
+          <Tabs items={TABS} value={tab} onChange={setTab} className="batch-queue__tabs shrink-0" />
+
+          {jobs.length === 0 && !loading && (
+            <Panel
+              variant="flat"
+              padding="lg"
+              className="batch-queue__empty text-center text-fg-muted"
+            >
+              <div>
+                <p>
+                  {tab === 'active' && t('batch.no_active')}
+                  {tab === 'done' && t('batch.no_completed')}
+                  {tab === 'failed' && t('batch.no_failed')}
+                </p>
+                <p className="batch-queue__empty-sub text-[var(--text-sm)] text-fg-subtle">
+                  {tab === 'active' && t('batch.drop_hint')}
+                  {tab === 'done' && 'Nothing has completed recently.'}
+                  {tab === 'failed' && 'No failed jobs — enjoy the silence.'}
+                </p>
+              </div>
+            </Panel>
+          )}
+
+          <div className="batch-queue__list flex flex-1 flex-col gap-[var(--space-3)] min-h-0">
+            {jobs.map((j) => (
+              <JobCard key={j.id} job={j} onCancel={handleCancel} onDelete={handleDelete} t={t} />
+            ))}
           </div>
-        </Panel>
+
+          <BatchAddDialog
+            open={addOpen}
+            onClose={() => setAddOpen(false)}
+            onEnqueue={handleEnqueue}
+          />
+        </>
       )}
-
-      <div className="batch-queue__list flex flex-1 flex-col gap-[var(--space-3)] min-h-0">
-        {jobs.map((j) => (
-          <JobCard key={j.id} job={j} onCancel={handleCancel} onDelete={handleDelete} t={t} />
-        ))}
-      </div>
-
-      <BatchAddDialog open={addOpen} onClose={() => setAddOpen(false)} onEnqueue={handleEnqueue} />
     </div>
   );
 }

@@ -1001,6 +1001,7 @@
     "unavailable": "이용할 수 없음",
     "use": "사용",
     "configureProviders": "제공업체 설정",
+    "cloudProviderNotice": "선택하면 {{provider}}가 텍스트를 클라우드 API로 전송하며 공급자 요금이 발생할 수 있습니다.",
     "loading": "엔진 로드 중…",
     "refresh": "새로고침",
     "matrixTitle": "엔진 호환성 매트릭스",
@@ -1725,6 +1726,7 @@
     "watch_failed": "감시가 중지되었습니다 — 폴더를 더 이상 읽을 수 없습니다(이동, 삭제 또는 권한 변경). 다시 시작하려면 폴더를 다시 선택하세요.",
     "watch_start_failed": "해당 폴더 감시를 시작할 수 없습니다 — 다시 시도하려면 폴더를 다시 선택하세요."
   },
+  "ttsBatch": {"tab":"텍스트 음성 변환","inputs":"텍스트","inputPlaceholder":"항목마다 한 문단을 붙여넣고 빈 줄로 구분하세요.","itemCount":"{{count}}개 항목","execution":"실행 방식","standard":"표준 API","providerBatch":"공급자 Batch API — 저렴한 비동기 처리","instructions":"스타일 지시(선택 사항)","create":"배치 생성","created":"{{count}}개 항목을 대기열에 추가함","jobs":"TTS 배치 작업","empty":"아직 TTS 배치 작업이 없습니다.","retryFailed":"실패 항목 재시도","download":"다운로드"},
   "gallery": {
     "title": "VoiceStudio 갤러리",
     "search_placeholder": "유튜브 검색…",

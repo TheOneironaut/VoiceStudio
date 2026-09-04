@@ -41,6 +41,15 @@ export interface EngineBackend {
   // emotion controls only when the active engine sets this. Absent on legacy
   // payloads (treated as false).
   supports_emotion?: boolean;
+  supports_voice_design?: boolean;
+  supports_streaming?: boolean;
+  supports_provider_batch?: boolean;
+  is_local?: boolean;
+  requires_api_key?: boolean;
+  models?: Array<{ id: string; name: string; preview?: boolean }>;
+  default_model_id?: string | null;
+  default_voice_id?: string | null;
+  active_voice_id?: string | null;
   install_hint?: string | null;
   // Copy-paste-ready `export VAR=...` line for a path-gated opt-in engine
   // (IndexTTS / MOSS-v1.5 / dots.tts / Confucius4), else null/absent.
@@ -67,6 +76,22 @@ export interface EngineBackend {
   curated_models?: CuratedModel[];
   active_model_id?: string;
   disk_usage?: EngineDiskUsage;
+}
+
+export interface TTSProviderVoice {
+  id: string;
+  name: string;
+  description?: string;
+  language?: string;
+}
+
+export interface TTSProviderConfiguration {
+  engine_id: string;
+  voice_id: string | null;
+  model_id: string | null;
+  requires_api_key: boolean;
+  credential_configured: boolean;
+  credential_stored: boolean;
 }
 
 export interface EngineDiskEstimate {

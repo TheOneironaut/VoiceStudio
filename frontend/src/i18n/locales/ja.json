@@ -754,6 +754,7 @@
     "unavailable": "利用不可",
     "use": "使用する",
     "configureProviders": "プロバイダーを設定",
+    "cloudProviderNotice": "選択すると、{{provider}} はテキストをクラウド API に送信し、プロバイダー料金が発生する場合があります。",
     "loading": "エンジンをロード中…",
     "refresh": "リフレッシュ",
     "matrixTitle": "エンジン互換性マトリックス",
@@ -1410,6 +1411,7 @@
     "watch_failed": "フォルダー監視を停止しました — フォルダーを読み取れません（移動・削除・権限変更の可能性）。再開するにはフォルダーを選び直してください。",
     "watch_start_failed": "そのフォルダーの監視を開始できませんでした。フォルダーを選び直して再試行してください。"
   },
+  "ttsBatch": {"tab":"テキスト読み上げ","inputs":"テキスト","inputPlaceholder":"項目ごとに1つの段落を貼り付け、空行で区切ります。","itemCount":"{{count}} 件","execution":"実行方法","standard":"標準 API","providerBatch":"プロバイダー Batch API — 低コスト・非同期","instructions":"スタイル指示（任意）","create":"バッチを生成","created":"{{count}} 件をキューに追加しました","jobs":"TTS バッチジョブ","empty":"TTS バッチジョブはまだありません。","retryFailed":"失敗項目を再試行","download":"ダウンロード"},
   "gallery": {
     "title": "VoiceStudio ギャラリー",
     "search_placeholder": "YouTube を検索…",

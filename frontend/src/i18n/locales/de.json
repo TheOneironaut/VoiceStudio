@@ -754,6 +754,7 @@
     "unavailable": "nicht verfügbar",
     "use": "Benutzen",
     "configureProviders": "Anbieter konfigurieren",
+    "cloudProviderNotice": "Wenn ausgewählt, sendet {{provider}} deinen Text an seine Cloud-API; dabei können Anbietergebühren anfallen.",
     "loading": "Motoren werden geladen…",
     "refresh": "Aktualisieren",
     "matrixTitle": "Engine-Kompatibilitätsmatrix",
@@ -1410,6 +1411,7 @@
     "watch_failed": "Ordnerüberwachung gestoppt — der Ordner ist nicht mehr lesbar (verschoben, gelöscht oder Berechtigungen geändert). Wähle ihn erneut aus, um fortzufahren.",
     "watch_start_failed": "Die Überwachung dieses Ordners konnte nicht gestartet werden — wähle ihn erneut aus, um es noch einmal zu versuchen."
   },
+  "ttsBatch": {"tab":"Text zu Sprache","inputs":"Texte","inputPlaceholder":"Pro Element einen Absatz einfügen. Elemente durch Leerzeilen trennen.","itemCount":"{{count}} Elemente","execution":"Ausführung","standard":"Standard-API","providerBatch":"Batch-API des Anbieters — günstiger, asynchron","instructions":"Stilanweisungen (optional)","create":"Batch erzeugen","created":"{{count}} Elemente eingereiht","jobs":"TTS-Batchaufträge","empty":"Noch keine TTS-Batchaufträge.","retryFailed":"Fehlgeschlagene wiederholen","download":"Herunterladen"},
   "gallery": {
     "title": "VoiceStudio Galerie",
     "search_placeholder": "YouTube durchsuchen…",

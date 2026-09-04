@@ -32,6 +32,7 @@ import { cn } from '@/lib/utils';
 import EngineMark from './EngineMark';
 import SupertonicLicenseDialog from './SupertonicLicenseDialog';
 import PocketTTSLicenseDialog from './PocketTTSLicenseDialog';
+import TTSProviderConfigPanel from './TTSProviderConfigPanel';
 
 /** Engines that gate first use behind an in-app license acceptance dialog.
  *  Phase 3 Plan 03-01 ‑‑ Supertonic-3 today; future OpenRAIL-M engines
@@ -856,8 +857,11 @@ export default function EngineCompatibilityMatrix({
             // One-click-installable rows always have a panel — it hosts the
             // install progress and the demoted manual-install fallback.
             const hasDiskDetails = activeFamily === 'tts' && !!b.disk_usage;
+            const hasProviderDetails =
+              activeFamily === 'tts' && (!!b.requires_api_key || !!b.default_voice_id);
             const hasDetails =
               hasDiskDetails ||
+              hasProviderDetails ||
               (!b.available &&
                 !!(
                   b.reason ||
@@ -1139,7 +1143,11 @@ export default function EngineCompatibilityMatrix({
                               expanded && 'rotate-90',
                             )}
                           />
-                          {b.available ? t('engines.diskDetails') : t('engines.whyUnavailable')}
+                          {hasProviderDetails
+                            ? t('engines.configureProviders')
+                            : b.available
+                              ? t('engines.diskDetails')
+                              : t('engines.whyUnavailable')}
                         </button>
                       )}
                     </span>
@@ -1470,6 +1478,7 @@ export default function EngineCompatibilityMatrix({
                       role="cell"
                       className="engine-matrix__why-body ml-[24px] flex flex-col gap-[3px] pl-[12px] text-[11px] [border-left:2px_solid_var(--chrome-border,rgba(255,255,255,0.08))]"
                     >
+                      {hasProviderDetails && <TTSProviderConfigPanel engine={b} onSaved={reload} />}
                       {b.reason && (
                         <span className="engine-matrix__reason block text-[12px] text-[color:var(--chrome-severity-warn,#d79921)]">
                           {b.reason}

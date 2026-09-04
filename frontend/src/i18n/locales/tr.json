@@ -754,6 +754,7 @@
     "unavailable": "müsait değil",
     "use": "Kullanım",
     "configureProviders": "Sağlayıcıları yapılandır",
+    "cloudProviderNotice": "Seçildiğinde {{provider}} metninizi bulut API’sine gönderir ve sağlayıcı ücretleri oluşabilir.",
     "loading": "Motorlar yükleniyor…",
     "refresh": "Yenile",
     "matrixTitle": "Motor Uyumluluk Matrisi",
@@ -1410,6 +1411,7 @@
     "watch_failed": "İzleme durdu — klasör artık okunamıyor (taşındı, silindi veya izinler değişti). Devam etmek için klasörü yeniden seçin.",
     "watch_start_failed": "Bu klasör izlenemedi — yeniden denemek için klasörü tekrar seçin."
   },
+  "ttsBatch": {"tab":"Metinden sese","inputs":"Metinler","inputPlaceholder":"Her öğe için bir paragraf yapıştırın. Öğeleri boş satırlarla ayırın.","itemCount":"{{count}} öğe","execution":"Çalıştırma","standard":"Standart API","providerBatch":"Sağlayıcı Batch API — daha düşük maliyetli, eşzamansız","instructions":"Stil talimatları (isteğe bağlı)","create":"Toplu üret","created":"{{count}} öğe kuyruğa alındı","jobs":"TTS toplu işleri","empty":"Henüz TTS toplu işi yok.","retryFailed":"Başarısızları yeniden dene","download":"İndir"},
   "gallery": {
     "title": "VoiceStudio Galeri",
     "search_placeholder": "YouTube'da ara…",

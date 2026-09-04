@@ -711,6 +711,7 @@
     "unavailable": "不可用",
     "use": "使用",
     "configureProviders": "配置提供商",
+    "cloudProviderNotice": "选择后，{{provider}} 会将您的文本发送到其云端 API，并可能产生服务商费用。",
     "loading": "加载引擎中…",
     "refresh": "刷新",
     "matrixTitle": "引擎兼容性矩阵",
@@ -1369,6 +1370,7 @@
     "watch_failed": "监视已停止 — 文件夹无法再读取（已移动、删除或权限更改）。请重新选择该文件夹以继续。",
     "watch_start_failed": "无法开始监视该文件夹 — 请重新选择以重试。"
   },
+  "ttsBatch": {"tab":"文字转语音","inputs":"文本","inputPlaceholder":"每个项目粘贴一个段落，并用空行分隔。","itemCount":"{{count}} 个项目","execution":"执行方式","standard":"标准 API","providerBatch":"服务商 Batch API — 成本更低、异步执行","instructions":"风格指令（可选）","create":"生成批次","created":"已将 {{count}} 个项目加入队列","jobs":"TTS 批处理任务","empty":"尚无 TTS 批处理任务。","retryFailed":"重试失败项目","download":"下载"},
   "gallery": {
     "title": "VoiceStudio 音色库",
     "search_placeholder": "搜索 YouTube…",

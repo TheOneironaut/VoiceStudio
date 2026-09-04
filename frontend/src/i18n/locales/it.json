@@ -754,6 +754,7 @@
     "unavailable": "non disponibile",
     "use": "Utilizzare",
     "configureProviders": "Configura i provider",
+    "cloudProviderNotice": "Quando è selezionato, {{provider}} invia il testo alla propria API cloud e può comportare costi del provider.",
     "loading": "Caricamento motori…",
     "refresh": "Aggiorna",
     "matrixTitle": "Matrice di compatibilità del motore",
@@ -1410,6 +1411,7 @@
     "watch_failed": "Sorveglianza interrotta — la cartella non è più leggibile (spostata, eliminata o permessi cambiati). Selezionala di nuovo per riprendere.",
     "watch_start_failed": "Impossibile avviare la sorveglianza di quella cartella — selezionala di nuovo per riprovare."
   },
+  "ttsBatch": {"tab":"Da testo a voce","inputs":"Testi","inputPlaceholder":"Incolla un paragrafo per elemento. Separa gli elementi con righe vuote.","itemCount":"{{count}} elementi","execution":"Esecuzione","standard":"API standard","providerBatch":"API Batch del provider — più economica, asincrona","instructions":"Istruzioni di stile (facoltative)","create":"Genera batch","created":"{{count}} elementi in coda","jobs":"Processi batch TTS","empty":"Nessun processo batch TTS.","retryFailed":"Riprova non riusciti","download":"Scarica"},
   "gallery": {
     "title": "VoiceStudio Galleria",
     "search_placeholder": "Cerca su YouTube...",

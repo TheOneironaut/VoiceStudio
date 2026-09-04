@@ -20,6 +20,7 @@ import {
 import { toast } from 'react-hot-toast';
 import { toastErrorWithReport } from '../utils/errorToast';
 import { modelNotDownloadedPayload, toastModelNotDownloaded } from '../utils/modelNotDownloaded';
+import { activeTtsBackend } from '../utils/generatePreflight';
 import { addBreadcrumb } from '../utils/breadcrumbs';
 import i18next from 'i18next';
 const t = i18next.t.bind(i18next);
@@ -121,7 +122,14 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
 
   const handleGenerate = useCallback(async () => {
     if (!text.trim()) return toast.error(t('tts_errors.enter_text'));
-    if (defineMethod === 'audio' && !refAudio && !selectedProfile)
+    let activeBackend = null;
+    try {
+      activeBackend = await activeTtsBackend();
+    } catch {
+      // Preserve the local-engine validation when the capability probe fails.
+    }
+    const supportsCloning = activeBackend?.supports_cloning !== false;
+    if (supportsCloning && defineMethod === 'audio' && !refAudio && !selectedProfile)
       return toast.error(t('tts_errors.upload_or_select'));
     addBreadcrumb(`generate:start (${defineMethod})`);
     setIsGenerating(true);
@@ -151,9 +159,9 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
       if (duration) formData.append('duration', parseFloat(duration));
 
       if (defineMethod === 'audio') {
-        if (selectedProfile) {
+        if (supportsCloning && selectedProfile) {
           formData.append('profile_id', selectedProfile);
-        } else if (refAudio) {
+        } else if (supportsCloning && refAudio) {
           const arrBuf = await refAudio.arrayBuffer();
           const safeBlob = new Blob([arrBuf], { type: refAudio.type });
           formData.append('ref_audio', safeBlob, refAudio.name || 'audio.wav');
@@ -231,7 +239,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
         // voice would override the design attributes (e.g. "Male" has no effect).
         // Design profiles still pass through (re-render a designed voice).
         const designProfileId = designModeProfileId(selectedProfile, profiles);
-        if (designProfileId) {
+        if (supportsCloning && designProfileId) {
           formData.append('profile_id', designProfileId);
         }
       }

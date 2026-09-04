@@ -51,6 +51,13 @@ function enginesCached() {
   return cache.promise;
 }
 
+/** Current TTS catalogue row, shared by generation UI capability gates. */
+export async function activeTtsBackend() {
+  const data = await enginesCached();
+  const tts = data?.tts;
+  return (tts?.backends || []).find((backend) => backend.id === tts?.active) || null;
+}
+
 /**
  * Called after an engine pick. The cached /engines response now describes the
  * PREVIOUS engine, and with a 60s TTL a user who switches engines and
