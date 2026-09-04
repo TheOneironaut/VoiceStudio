@@ -10,13 +10,31 @@ the frozen-backend fallback mirror it for their toolchains.
 
 **Highlights**
 
+- Generate speech with Google Gemini 3.1 Flash TTS through the normal engine picker, with encrypted credentials and no local Gemini checkpoint download (#11)
+- Run resumable text-to-speech batches through one provider-neutral queue, including Google's lower-cost asynchronous Batch API (#11)
+
 ### Changed
+
+- TTS plugins now register once into the production engine catalogue and share one canonical audio adapter across normal, long-form, story and batch workflows (#11)
 
 ### Added
 
+- Optional Gemini TTS provider with 30 built-in voices, multilingual style control, bounded retries and a deliberately opt-in live smoke test (#11)
+- Durable TTS batch jobs with pinned engine/model/voice/settings, restart resume, pause/cancel, retry-failed, checksummed partial outputs and generic WAV joining (#11)
+- Generic provider and TTS batch controls in the existing engine catalogue and Batch workspace (#11)
+
 ### Docs
 
+- Document Gemini setup, cloud-data disclosure, capabilities, limitations and the reusable provider/batch extension contracts (#11)
+
 ### Fixed
+
+- Cloud TTS engines no longer require or forward a local reference voice when the selected provider cannot clone voices (#11)
+
+### CI
+
+- Provider-only changes use a small Linux contract test while generic foundations retain full scheduled cross-platform validation (#11)
+- The Gemini Windows workflow builds one MSI, installs and launches that exact artifact, verifies health and provider isolation, uninstalls it, then publishes it (#11)
 
 
 ## [0.5.2] — 2026-09-02
