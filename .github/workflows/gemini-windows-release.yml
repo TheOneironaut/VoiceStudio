@@ -34,10 +34,6 @@ jobs:
         working-directory: frontend
         run: bun install --frozen-lockfile
 
-      - name: Build frontend
-        working-directory: frontend
-        run: bun run build
-
       - name: Bundle uv, ffmpeg, and ffprobe
         shell: pwsh
         run: |
@@ -149,7 +145,19 @@ jobs:
           "$sha  VoiceStudio-Gemini-Windows-x64.msi" | Set-Content "$msi.sha256"
           gh release view gemini-windows *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create gemini-windows --title 'VoiceStudio Gemini for Windows' `
+            gh release create gemini-windows --target "$env:GITHUB_SHA" `
+              --title 'VoiceStudio Gemini for Windows' `
+              --notes 'Verified Windows installer for the clean Gemini TTS provider build.'
+          } else {
+            # The stable download tag may already point at a previous build.
+            # Move it only after this exact artifact passed install/launch/
+            # uninstall, so the release source and MSI always describe the
+            # same commit.
+            gh api --method PATCH `
+              "repos/$env:GITHUB_REPOSITORY/git/refs/tags/gemini-windows" `
+              -f sha="$env:GITHUB_SHA" -F force=true *> $null
+            gh release edit gemini-windows --target "$env:GITHUB_SHA" `
+              --title 'VoiceStudio Gemini for Windows' `
               --notes 'Verified Windows installer for the clean Gemini TTS provider build.'
           }
           gh release upload gemini-windows $msi "$msi.sha256" --clobber
@@ -163,4 +171,3 @@ jobs:
             ${{ runner.temp }}/voicestudio-data/*.log
             ${{ runner.temp }}/voicestudio-data/**/*.log
           if-no-files-found: ignore
-
