@@ -3878,6 +3878,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+bundled-providers = [
+    { name = "google-genai" },
+]
 eval = [
     { name = "funasr" },
     { name = "jiwer" },
@@ -3924,6 +3927,7 @@ requires-dist = [
     { name = "fastapi", specifier = "<0.137" },
     { name = "faster-whisper", specifier = ">=1.0.0" },
     { name = "funasr", marker = "extra == 'eval'" },
+    { name = "google-genai", marker = "extra == 'bundled-providers'", specifier = ">=1.0" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0" },
     { name = "gradio", specifier = ">=6.15.1" },
     { name = "gradio", marker = "extra == 'ui'", specifier = ">=6.15.1" },
@@ -3981,7 +3985,7 @@ requires-dist = [
     { name = "zhconv", marker = "extra == 'eval'" },
     { name = "zhon", marker = "extra == 'eval'" },
 ]
-provides-extras = ["eval", "ui", "supertonic", "pockettts", "gemini"]
+provides-extras = ["eval", "ui", "supertonic", "pockettts", "gemini", "bundled-providers"]
 
 [package.metadata.requires-dev]
 dev = [

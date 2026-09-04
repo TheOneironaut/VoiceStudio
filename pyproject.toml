@@ -250,6 +250,11 @@ pockettts = [
 gemini = [
     "google-genai>=1.0",
 ]
+# Provider SDKs bundled by the desktop installer. Runtime bootstrap depends on
+# this generic aggregate rather than knowing individual provider names.
+bundled-providers = [
+    "google-genai>=1.0",
+]
 
 [project.scripts]
 omnivoice-infer = "omnivoice.cli.infer:main"

@@ -32,7 +32,7 @@ pub enum BootstrapStage {
     DownloadingUv { percent: Option<u8> },
     /// Creating the Python 3.11 venv.
     CreatingVenv,
-    /// Running `uv sync --frozen --extra gemini --no-dev`. Biggest time sink on first run
+    /// Running `uv sync --frozen --extra bundled-providers --no-dev`. Biggest time sink on first run
     /// (~5-10 min to pull torch + whisperx + faster-whisper + demucs).
     InstallingDeps,
     /// Venv ready, spawning uvicorn. Should be <5 s.
@@ -1857,16 +1857,16 @@ const ROCM_TORCH_INDEX: &str = "https://download.pytorch.org/whl/rocm6.4";
 /// included-out. An engine lost to a repair is re-installable; a venv that
 /// repair can't actually repair is a support thread.
 const DRIFT_SYNC_ARGS: [&str; 7] = [
-    "sync", "--frozen", "--inexact", "--extra", "gemini", "--no-dev", "--verbose",
+    "sync", "--frozen", "--inexact", "--extra", "bundled-providers", "--no-dev", "--verbose",
 ];
 
 /// Exact-sync args for the venv-repair path — see `DRIFT_SYNC_ARGS` for why
 /// repair stays exact while the update-drift sync preserves user extras.
 const REPAIR_SYNC_ARGS_LOCKED: [&str; 6] = [
-    "sync", "--frozen", "--extra", "gemini", "--no-dev", "--verbose",
+    "sync", "--frozen", "--extra", "bundled-providers", "--no-dev", "--verbose",
 ];
 const REPAIR_SYNC_ARGS_UNLOCKED: [&str; 5] = [
-    "sync", "--extra", "gemini", "--no-dev", "--verbose",
+    "sync", "--extra", "bundled-providers", "--no-dev", "--verbose",
 ];
 
 /// `uv pip install` args that replace the default CUDA torch build with the AMD
@@ -3008,12 +3008,12 @@ the existing venv; newly added dependencies may be missing (#307)",
     let has_lockfile = project_dir.join("uv.lock").is_file();
     if has_lockfile {
         sync_cmd
-            .args(["sync", "--frozen", "--extra", "gemini", "--no-dev", "--verbose"])
+            .args(["sync", "--frozen", "--extra", "bundled-providers", "--no-dev", "--verbose"])
             .current_dir(&project_dir);
     } else {
         log::info!("No uv.lock present, running uv sync without --frozen");
         sync_cmd
-            .args(["sync", "--extra", "gemini", "--no-dev", "--verbose"])
+            .args(["sync", "--extra", "bundled-providers", "--no-dev", "--verbose"])
             .current_dir(&project_dir);
     }
     // PyPI index precedence: explicit setup-screen mirror > region preset.
@@ -3052,7 +3052,7 @@ the existing venv; newly added dependencies may be missing (#307)",
                 retry.env("UV_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/");
             }
             retry
-                .args(["sync", "--extra", "gemini", "--no-dev", "--verbose"])
+                .args(["sync", "--extra", "bundled-providers", "--no-dev", "--verbose"])
                 .current_dir(&project_dir);
             sync_ok = matches!(run_streaming(app, "installing_deps", &mut retry), Ok(ref s) if s.success());
         }
@@ -3298,15 +3298,15 @@ mod tests {
     }
 
     #[test]
-    fn packaged_syncs_enable_the_bundled_gemini_provider() {
+    fn packaged_syncs_enable_bundled_providers_generically() {
         for args in [
             DRIFT_SYNC_ARGS.as_slice(),
             REPAIR_SYNC_ARGS_LOCKED.as_slice(),
             REPAIR_SYNC_ARGS_UNLOCKED.as_slice(),
         ] {
             assert!(
-                args.windows(2).any(|pair| pair == ["--extra", "gemini"]),
-                "packaged sync must install the Gemini provider SDK"
+                args.windows(2).any(|pair| pair == ["--extra", "bundled-providers"]),
+                "packaged sync must install the generic bundled-provider SDK set"
             );
         }
     }

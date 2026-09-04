@@ -332,7 +332,8 @@ jobs:
       # latest.json with per-platform download URLs & signatures. The
       # installer ships the repo's pyproject.toml + uv.lock + backend/
       # tree as Tauri resources; lib.rs::ensure_venv_ready recreates the
-      # venv on first launch via `uv sync --frozen --extra gemini --no-dev`.
+      # venv on first launch via
+      # `uv sync --frozen --extra bundled-providers --no-dev`.
       # Fetch the standalone `uv` binary for the current matrix target and
       # drop it at `binaries/uv-<rust-target-triple>{ext}`. tauri.conf.json
       # references `binaries/uv` via `bundle.externalBin`, and tauri-bundler
