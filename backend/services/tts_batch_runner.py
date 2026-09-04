@@ -183,6 +183,8 @@ async def _run_standard(job: dict, backend) -> None:
 async def _run_provider_batch(job: dict, backend) -> None:
     provider_batch_id = job.get("provider_batch_id")
     pending = [item for item in job["items"] if not _valid_completed_item(item)]
+    if not pending:
+        return
     if not provider_batch_id:
         request_items = [ProviderBatchItem(id=item["id"], text=item["input_text"]) for item in pending]
         provider_batch_id = await asyncio.to_thread(
@@ -197,6 +199,8 @@ async def _run_provider_batch(job: dict, backend) -> None:
             store.set_item_running(item["id"])
 
     poll_interval = max(1.0, min(float((job.get("settings") or {}).get("provider_poll_interval_s", 10)), 300.0))
+    poll_failures = 0
+    max_poll_failures = min(item["max_attempts"] for item in pending)
     while True:
         current = store.get_job(job["id"])
         if current["status"] == "paused":
@@ -204,11 +208,23 @@ async def _run_provider_batch(job: dict, backend) -> None:
         if current["status"] == "cancelled":
             await asyncio.to_thread(backend.cancel_provider_batch, provider_batch_id)
             return
-        poll = await asyncio.to_thread(
-            backend.poll_provider_batch,
-            provider_batch_id,
-            item_ids=tuple(item["id"] for item in pending),
-        )
+        try:
+            poll = await asyncio.to_thread(
+                backend.poll_provider_batch,
+                provider_batch_id,
+                item_ids=tuple(item["id"] for item in pending),
+            )
+            poll_failures = 0
+        except Exception as exc:  # noqa: BLE001 - provider errors are normalized below
+            error = _normalized_error(exc)
+            poll_failures += 1
+            if not error["retryable"] or poll_failures >= max_poll_failures:
+                raise
+            delay = error["retry_after_s"]
+            if delay is None:
+                delay = min(30.0, 2 ** (poll_failures - 1))
+            await asyncio.sleep(max(0.0, float(delay)))
+            continue
         if poll.status in {"queued", "running"}:
             await asyncio.sleep(poll_interval)
             continue

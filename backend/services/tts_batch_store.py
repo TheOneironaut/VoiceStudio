@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Iterable, Optional
@@ -10,6 +11,24 @@ from core.db import db_conn
 
 JOB_STATES = frozenset({"queued", "running", "paused", "completed", "partial", "failed", "cancelled"})
 ITEM_STATES = frozenset({"queued", "running", "completed", "failed", "cancelled"})
+_SECRET_KEY = re.compile(r"(?:api[_-]?key|token|secret|password|credential)", re.IGNORECASE)
+
+
+def _validate_settings(settings: dict) -> None:
+    def visit(value, path: str = "settings") -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if _SECRET_KEY.search(str(key)):
+                    raise ValueError(f"Secrets are not allowed in TTS batch {path}.")
+                visit(child, f"{path}.{key}")
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child, path)
+
+    visit(settings)
+    encoded = json.dumps(settings, sort_keys=True)
+    if len(encoded.encode("utf-8")) > 64 * 1024:
+        raise ValueError("TTS batch settings exceed 64 KiB.")
 
 
 def _decode(row) -> Optional[dict]:
@@ -40,6 +59,8 @@ def create_job(
     normalized = [text.strip() for text in texts]
     if not normalized or any(not text for text in normalized):
         raise ValueError("A TTS batch requires one or more non-empty items.")
+    settings = settings or {}
+    _validate_settings(settings)
 
     now = time.time()
     job_id = uuid.uuid4().hex
@@ -58,7 +79,7 @@ def create_job(
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
             (
                 job_id, idempotency_key, engine_id, model_id, voice_id,
-                json.dumps(settings or {}, sort_keys=True), execution_mode, now, now,
+                json.dumps(settings, sort_keys=True), execution_mode, now, now,
             ),
         )
         conn.executemany(

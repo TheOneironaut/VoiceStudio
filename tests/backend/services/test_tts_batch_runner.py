@@ -6,7 +6,12 @@ import wave
 
 from core import db
 from services import tts_backend, tts_batch_runner as runner, tts_batch_store as store
-from services.plugin_sdk import AudioPayload, ProviderBatchPoll, ProviderBatchResult
+from services.plugin_sdk import (
+    AudioPayload,
+    ProviderBatchPoll,
+    ProviderBatchResult,
+    TTSProviderError,
+)
 from services.tts_backend import TTSBackend
 
 
@@ -60,6 +65,17 @@ class FakeNativeBatchBackend(FakeBatchBackend):
         self.cancelled.append(provider_batch_id)
 
 
+class FlakyPollBatchBackend(FakeNativeBatchBackend):
+    id = "flaky-native-batch"
+    poll_calls = 0
+
+    def poll_provider_batch(self, provider_batch_id, **context):
+        type(self).poll_calls += 1
+        if type(self).poll_calls == 1:
+            raise TTSProviderError("temporary", code="provider_5xx", retryable=True)
+        return super().poll_provider_batch(provider_batch_id, **context)
+
+
 @pytest.fixture
 def runner_env(monkeypatch, tmp_path):
     def save_wav(path, audio, sample_rate):
@@ -93,8 +109,11 @@ def runner_env(monkeypatch, tmp_path):
     FakeBatchBackend.calls = []
     FakeNativeBatchBackend.submitted = []
     FakeNativeBatchBackend.cancelled = []
+    FlakyPollBatchBackend.submitted = []
+    FlakyPollBatchBackend.poll_calls = 0
     tts_backend._REGISTRY[FakeBatchBackend.id] = FakeBatchBackend
     tts_backend._REGISTRY[FakeNativeBatchBackend.id] = FakeNativeBatchBackend
+    tts_backend._REGISTRY[FlakyPollBatchBackend.id] = FlakyPollBatchBackend
     tts_backend._ENGINE_INSTANCES.clear()
     try:
         yield tmp_path
@@ -166,3 +185,21 @@ async def test_provider_native_batch_uses_same_store_and_outputs(runner_env):
     assert [item.text for item in submitted_items] == ["one", "two"]
     assert settings["voice_id"] == "voice-a"
     assert settings["model_id"] == "model-a"
+
+
+@pytest.mark.asyncio
+async def test_provider_batch_poll_retries_transient_failures(runner_env, monkeypatch):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr(runner.asyncio, "sleep", no_delay)
+    job = store.create_job(
+        engine_id=FlakyPollBatchBackend.id,
+        texts=["one"],
+        execution_mode="provider_batch",
+    )
+
+    await runner.run_job(job["id"])
+
+    assert store.get_job(job["id"])["status"] == "completed"
+    assert FlakyPollBatchBackend.poll_calls == 2

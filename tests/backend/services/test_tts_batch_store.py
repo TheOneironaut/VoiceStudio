@@ -91,3 +91,12 @@ def test_pause_resume_and_cancel_are_durable(batch_db):
 def test_empty_batch_items_are_rejected(batch_db, texts):
     with pytest.raises(ValueError, match="non-empty"):
         store.create_job(engine_id="fake", texts=texts)
+
+
+def test_credentials_cannot_be_persisted_in_batch_settings(batch_db):
+    with pytest.raises(ValueError, match="Secrets are not allowed"):
+        store.create_job(
+            engine_id="fake",
+            texts=["hello"],
+            settings={"provider": {"api_key": "must-not-be-stored"}},
+        )
