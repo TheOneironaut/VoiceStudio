@@ -63,6 +63,7 @@ env:
 
 jobs:
   build-and-push:
+    if: github.repository == 'debpalash/VoiceStudio'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -174,6 +175,7 @@ jobs:
   # build step — so it gets a full runner disk to itself: the ROCm base alone
   # is ~10 GB compressed / ~25 GB unpacked.
   build-and-push-rocm:
+    if: github.repository == 'debpalash/VoiceStudio'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
