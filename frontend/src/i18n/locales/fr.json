@@ -1411,7 +1411,7 @@
     "watch_failed": "Surveillance arrêtée — le dossier n'est plus lisible (déplacé, supprimé ou permissions modifiées). Sélectionnez-le à nouveau pour reprendre.",
     "watch_start_failed": "Impossible de commencer à surveiller ce dossier — sélectionnez-le à nouveau pour réessayer."
   },
-  "ttsBatch": {"tab":"Synthèse vocale","inputs":"Textes","inputPlaceholder":"Collez un paragraphe par élément. Séparez-les par des lignes vides.","itemCount":"{{count}} éléments","execution":"Exécution","standard":"API standard","providerBatch":"API Batch du fournisseur — moins chère, asynchrone","instructions":"Instructions de style (facultatif)","create":"Générer le lot","created":"{{count}} éléments mis en file","jobs":"Tâches TTS par lot","empty":"Aucune tâche TTS par lot.","retryFailed":"Réessayer les échecs","download":"Télécharger"},
+  "ttsBatch": {"tab":"Synthèse vocale","inputs":"Textes","inputPlaceholder":"Collez un paragraphe par élément. Séparez-les par des lignes vides.","itemCount":"{{count}} éléments","execution":"Exécution","standard":"API standard","providerBatch":"API Batch du fournisseur — moins chère, asynchrone","instructions":"Instructions de style (facultatif)","create":"Générer le lot","created":"{{count}} éléments mis en file","jobs":"Tâches TTS par lot","empty":"Aucune tâche TTS par lot.","retryFailed":"Réessayer les échecs","download":"Télécharger","statusQueued":"En attente","statusRunning":"En cours","statusPaused":"En pause","statusCompleted":"Terminé","statusPartial":"Partiellement terminé","statusFailed":"Échec","statusCancelled":"Annulé","statusUnknown":"Inconnu"},
   "gallery": {
     "title": "VoiceStudio Galerie",
     "search_placeholder": "Rechercher sur YouTube…",

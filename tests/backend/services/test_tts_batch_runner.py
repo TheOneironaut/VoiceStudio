@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 import torch
 import wave
 
 from core import db
-from services import tts_backend, tts_batch_runner as runner, tts_batch_store as store
+from services import (
+    tts_backend,
+    tts_batch_runner as runner,
+    tts_batch_store as store,
+    watermark,
+)
 from services.plugin_sdk import (
     AudioPayload,
     ProviderBatchPoll,
@@ -65,6 +71,11 @@ class FakeNativeBatchBackend(FakeBatchBackend):
         self.cancelled.append(provider_batch_id)
 
 
+class FakeLocalBatchBackend(FakeBatchBackend):
+    id = "fake-local-batch"
+    is_local = True
+
+
 class FlakyPollBatchBackend(FakeNativeBatchBackend):
     id = "flaky-native-batch"
     poll_calls = 0
@@ -78,6 +89,12 @@ class FlakyPollBatchBackend(FakeNativeBatchBackend):
 
 @pytest.fixture
 def runner_env(monkeypatch, tmp_path):
+    watermark_calls = []
+
+    async def mark_synthetic(audio, sample_rate, *, context, **_kwargs):
+        watermark_calls.append((sample_rate, context))
+        return audio
+
     def save_wav(path, audio, sample_rate):
         samples = (
             audio.detach().cpu().clamp(-1, 1).mul(32767).to(torch.int16).numpy()
@@ -103,6 +120,7 @@ def runner_env(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_get_engine_instance", tts_backend.get_engine_instance_for)
     monkeypatch.setattr(runner, "_save_wav", save_wav)
     monkeypatch.setattr(runner, "_load_wav", load_wav)
+    monkeypatch.setattr(watermark, "mark_synthetic_async", mark_synthetic)
     db.ensure_schema()
     saved_registry = dict(tts_backend._REGISTRY)
     saved_instances = dict(tts_backend._ENGINE_INSTANCES)
@@ -113,10 +131,11 @@ def runner_env(monkeypatch, tmp_path):
     FlakyPollBatchBackend.poll_calls = 0
     tts_backend._REGISTRY[FakeBatchBackend.id] = FakeBatchBackend
     tts_backend._REGISTRY[FakeNativeBatchBackend.id] = FakeNativeBatchBackend
+    tts_backend._REGISTRY[FakeLocalBatchBackend.id] = FakeLocalBatchBackend
     tts_backend._REGISTRY[FlakyPollBatchBackend.id] = FlakyPollBatchBackend
     tts_backend._ENGINE_INSTANCES.clear()
     try:
-        yield tmp_path
+        yield tmp_path, watermark_calls
     finally:
         tts_backend._REGISTRY.clear()
         tts_backend._REGISTRY.update(saved_registry)
@@ -126,6 +145,7 @@ def runner_env(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_standard_batch_persists_items_and_joined_output(runner_env):
+    tmp_path, watermark_calls = runner_env
     job = store.create_job(
         engine_id=FakeBatchBackend.id,
         texts=["one", "two"],
@@ -140,8 +160,9 @@ async def test_standard_batch_persists_items_and_joined_output(runner_env):
     assert completed["status"] == "completed"
     assert completed["progress"] == {"completed": 2, "total": 2, "fraction": 1.0}
     assert all(item["checksum"] for item in completed["items"])
-    assert (runner_env / "outputs" / completed["output_path"]).is_file()
+    assert (tmp_path / "outputs" / completed["output_path"]).is_file()
     assert FakeBatchBackend.calls == ["one", "two"]
+    assert watermark_calls == [(8000, "tts_batch.item")] * 2
 
     await runner.run_job(job["id"])
     assert FakeBatchBackend.calls == ["one", "two"]
@@ -203,3 +224,35 @@ async def test_provider_batch_poll_retries_transient_failures(runner_env, monkey
 
     assert store.get_job(job["id"])["status"] == "completed"
     assert FlakyPollBatchBackend.poll_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_local_batch_uses_shared_gpu_guard_and_drains_on_shutdown(
+    runner_env, monkeypatch
+):
+    from services import model_manager
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def guarded(fn, **kwargs):
+        calls.append(kwargs)
+        started.set()
+        await release.wait()
+        return fn()
+
+    monkeypatch.setattr(model_manager, "run_on_gpu_pool_guarded", guarded)
+    monkeypatch.setattr(model_manager, "generate_timeout_s", lambda *_args, **_kwargs: 12.0)
+    job = store.create_job(engine_id=FakeLocalBatchBackend.id, texts=["one"])
+    runner.schedule(job["id"])
+    await started.wait()
+
+    stopping = asyncio.create_task(runner.shutdown())
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    release.set()
+    await stopping
+
+    assert calls == [{"what": "TTS batch generate", "timeout": 12.0}]
+    assert store.get_job(job["id"])["items"][0]["status"] == "queued"

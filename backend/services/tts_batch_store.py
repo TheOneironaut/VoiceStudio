@@ -114,17 +114,33 @@ def get_job(job_id: str, *, include_items: bool = True) -> Optional[dict]:
 
 def list_jobs(*, status: str | None = None, limit: int = 100) -> list[dict]:
     params: list[object] = []
-    sql = "SELECT * FROM tts_batch_jobs"
+    sql = (
+        "SELECT j.*, COUNT(i.id) AS item_total, "
+        "COALESCE(SUM(CASE WHEN i.status='completed' THEN 1 ELSE 0 END), 0) "
+        "AS item_completed FROM tts_batch_jobs j "
+        "LEFT JOIN tts_batch_items i ON i.job_id=j.id"
+    )
     if status:
         if status not in JOB_STATES:
             raise ValueError(f"Unknown TTS batch status: {status!r}.")
-        sql += " WHERE status = ?"
+        sql += " WHERE j.status = ?"
         params.append(status)
-    sql += " ORDER BY created_at DESC LIMIT ?"
+    sql += " GROUP BY j.id ORDER BY j.created_at DESC LIMIT ?"
     params.append(max(1, min(limit, 500)))
     with db_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [get_job(row["id"]) for row in rows]
+    jobs = []
+    for row in rows:
+        job = _decode(row)
+        total = job.pop("item_total")
+        completed = job.pop("item_completed")
+        job["progress"] = {
+            "completed": completed,
+            "total": total,
+            "fraction": completed / total if total else 0,
+        }
+        jobs.append(job)
+    return jobs
 
 
 def jobs_to_resume() -> list[str]:
@@ -240,14 +256,15 @@ def retry_failed(job_id: str) -> int:
     with db_conn() as conn:
         cur = conn.execute(
             "UPDATE tts_batch_items SET status='queued', error_json=NULL, updated_at=?, "
-            "finished_at=NULL WHERE job_id=? AND status='failed' AND attempt_count < max_attempts",
+            "finished_at=NULL, provider_item_id=NULL WHERE job_id=? AND status='failed' "
+            "AND attempt_count < max_attempts",
             (now, job_id),
         )
         count = cur.rowcount
         if count:
             conn.execute(
                 "UPDATE tts_batch_jobs SET status='queued', error_json=NULL, "
-                "updated_at=?, finished_at=NULL WHERE id=?",
+                "provider_batch_id=NULL, updated_at=?, finished_at=NULL WHERE id=?",
                 (now, job_id),
             )
     return count

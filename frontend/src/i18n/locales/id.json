@@ -1411,7 +1411,7 @@
     "watch_failed": "Pemantauan berhenti — folder tidak lagi dapat dibaca (dipindahkan, dihapus, atau izin berubah). Pilih lagi foldernya untuk melanjutkan.",
     "watch_start_failed": "Tidak dapat mulai memantau folder itu — pilih lagi untuk mencoba ulang."
   },
-  "ttsBatch": {"tab":"Teks ke suara","inputs":"Teks","inputPlaceholder":"Tempel satu paragraf per item. Pisahkan dengan baris kosong.","itemCount":"{{count}} item","execution":"Eksekusi","standard":"API standar","providerBatch":"API Batch penyedia — lebih murah, asinkron","instructions":"Petunjuk gaya (opsional)","create":"Buat batch","created":"{{count}} item masuk antrean","jobs":"Pekerjaan batch TTS","empty":"Belum ada pekerjaan batch TTS.","retryFailed":"Coba ulang yang gagal","download":"Unduh"},
+  "ttsBatch": {"tab":"Teks ke suara","inputs":"Teks","inputPlaceholder":"Tempel satu paragraf per item. Pisahkan dengan baris kosong.","itemCount":"{{count}} item","execution":"Eksekusi","standard":"API standar","providerBatch":"API Batch penyedia — lebih murah, asinkron","instructions":"Petunjuk gaya (opsional)","create":"Buat batch","created":"{{count}} item masuk antrean","jobs":"Pekerjaan batch TTS","empty":"Belum ada pekerjaan batch TTS.","retryFailed":"Coba ulang yang gagal","download":"Unduh","statusQueued":"Dalam antrean","statusRunning":"Berjalan","statusPaused":"Dijeda","statusCompleted":"Selesai","statusPartial":"Selesai sebagian","statusFailed":"Gagal","statusCancelled":"Dibatalkan","statusUnknown":"Tidak diketahui"},
   "gallery": {
     "title": "VoiceStudio Galeri",
     "search_placeholder": "Telusuri YouTube…",

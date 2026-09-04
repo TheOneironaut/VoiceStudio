@@ -1411,7 +1411,7 @@
     "watch_failed": "Monitoramento interrompido — a pasta não pode mais ser lida (movida, excluída ou permissões alteradas). Selecione-a novamente para retomar.",
     "watch_start_failed": "Não foi possível começar a monitorar essa pasta — selecione-a novamente para tentar de novo."
   },
-  "ttsBatch": {"tab":"Texto para fala","inputs":"Textos","inputPlaceholder":"Cole um parágrafo por item. Separe os itens com linhas em branco.","itemCount":"{{count}} itens","execution":"Execução","standard":"API padrão","providerBatch":"API Batch do provedor — menor custo, assíncrona","instructions":"Instruções de estilo (opcional)","create":"Gerar lote","created":"{{count}} itens na fila","jobs":"Tarefas TTS em lote","empty":"Ainda não há tarefas TTS em lote.","retryFailed":"Tentar falhas novamente","download":"Baixar"},
+  "ttsBatch": {"tab":"Texto para fala","inputs":"Textos","inputPlaceholder":"Cole um parágrafo por item. Separe os itens com linhas em branco.","itemCount":"{{count}} itens","execution":"Execução","standard":"API padrão","providerBatch":"API Batch do provedor — menor custo, assíncrona","instructions":"Instruções de estilo (opcional)","create":"Gerar lote","created":"{{count}} itens na fila","jobs":"Tarefas TTS em lote","empty":"Ainda não há tarefas TTS em lote.","retryFailed":"Tentar falhas novamente","download":"Baixar","statusQueued":"Na fila","statusRunning":"Em execução","statusPaused":"Pausado","statusCompleted":"Concluído","statusPartial":"Parcialmente concluído","statusFailed":"Falhou","statusCancelled":"Cancelado","statusUnknown":"Desconhecido"},
   "gallery": {
     "title": "VoiceStudio Galeria",
     "search_placeholder": "Pesquisar no YouTube…",

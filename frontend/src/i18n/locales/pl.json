@@ -1411,7 +1411,7 @@
     "watch_failed": "Obserwowanie zatrzymane — folder nie jest już czytelny (przeniesiony, usunięty lub zmieniono uprawnienia). Wybierz go ponownie, aby wznowić.",
     "watch_start_failed": "Nie udało się rozpocząć obserwowania tego folderu — wybierz go ponownie, aby spróbować jeszcze raz."
   },
-  "ttsBatch": {"tab":"Tekst na mowę","inputs":"Teksty","inputPlaceholder":"Wklej jeden akapit na element. Oddziel elementy pustymi wierszami.","itemCount":"{{count}} elementów","execution":"Wykonanie","standard":"Standardowe API","providerBatch":"Batch API dostawcy — taniej, asynchronicznie","instructions":"Instrukcje stylu (opcjonalnie)","create":"Generuj partię","created":"Dodano do kolejki: {{count}}","jobs":"Zadania wsadowe TTS","empty":"Brak zadań wsadowych TTS.","retryFailed":"Ponów nieudane","download":"Pobierz"},
+  "ttsBatch": {"tab":"Tekst na mowę","inputs":"Teksty","inputPlaceholder":"Wklej jeden akapit na element. Oddziel elementy pustymi wierszami.","itemCount":"{{count}} elementów","execution":"Wykonanie","standard":"Standardowe API","providerBatch":"Batch API dostawcy — taniej, asynchronicznie","instructions":"Instrukcje stylu (opcjonalnie)","create":"Generuj partię","created":"Dodano do kolejki: {{count}}","jobs":"Zadania wsadowe TTS","empty":"Brak zadań wsadowych TTS.","retryFailed":"Ponów nieudane","download":"Pobierz","statusQueued":"W kolejce","statusRunning":"W toku","statusPaused":"Wstrzymano","statusCompleted":"Ukończono","statusPartial":"Ukończono częściowo","statusFailed":"Niepowodzenie","statusCancelled":"Anulowano","statusUnknown":"Nieznany"},
   "gallery": {
     "title": "VoiceStudio Galeria",
     "search_placeholder": "Wyszukaj w YouTube…",

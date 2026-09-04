@@ -75,6 +75,46 @@ def test_retry_failed_only_requeues_items_with_attempts_remaining(batch_db):
     assert refreshed["status"] == "queued"
 
 
+def test_retry_failed_starts_a_fresh_provider_batch(batch_db):
+    job = store.create_job(
+        engine_id="fake",
+        texts=["retry"],
+        execution_mode="provider_batch",
+        max_attempts=2,
+    )
+    item = job["items"][0]
+    store.set_item_running(item["id"])
+    store.set_item_result(
+        item["id"],
+        "failed",
+        error={"code": "provider_error"},
+        provider_item_id="old-item",
+    )
+    store.set_job_status(job["id"], "failed", provider_batch_id="old-batch")
+
+    assert store.retry_failed(job["id"]) == 1
+    refreshed = store.get_job(job["id"])
+    assert refreshed["provider_batch_id"] is None
+    assert refreshed["items"][0]["provider_item_id"] is None
+
+
+def test_list_jobs_returns_progress_summaries_without_item_text(batch_db):
+    job = store.create_job(engine_id="fake", texts=["secret-sized input", "two"])
+    store.set_item_result(
+        job["items"][0]["id"],
+        "completed",
+        output_path="one.wav",
+        checksum="abc",
+    )
+
+    listed = store.list_jobs()
+
+    assert len(listed) == 1
+    assert "items" not in listed[0]
+    assert "input_text" not in repr(listed[0])
+    assert listed[0]["progress"] == {"completed": 1, "total": 2, "fraction": 0.5}
+
+
 def test_pause_resume_and_cancel_are_durable(batch_db):
     job = store.create_job(engine_id="fake", texts=["one", "two"])
     store.pause_job(job["id"])

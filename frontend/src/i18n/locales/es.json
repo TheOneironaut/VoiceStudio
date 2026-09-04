@@ -1411,7 +1411,7 @@
     "watch_failed": "La vigilancia se detuvo: la carpeta ya no se puede leer (movida, eliminada o con permisos cambiados). Selecciónala de nuevo para continuar.",
     "watch_start_failed": "No se pudo empezar a vigilar esa carpeta — selecciónala de nuevo para reintentar."
   },
-  "ttsBatch": {"tab":"Texto a voz","inputs":"Textos","inputPlaceholder":"Pega un párrafo por elemento. Separa los elementos con líneas en blanco.","itemCount":"{{count}} elementos","execution":"Ejecución","standard":"API estándar","providerBatch":"API Batch del proveedor — menor coste, asíncrona","instructions":"Instrucciones de estilo (opcional)","create":"Generar lote","created":"{{count}} elementos en cola","jobs":"Trabajos TTS por lotes","empty":"Aún no hay trabajos TTS por lotes.","retryFailed":"Reintentar fallidos","download":"Descargar"},
+  "ttsBatch": {"tab":"Texto a voz","inputs":"Textos","inputPlaceholder":"Pega un párrafo por elemento. Separa los elementos con líneas en blanco.","itemCount":"{{count}} elementos","execution":"Ejecución","standard":"API estándar","providerBatch":"API Batch del proveedor — menor coste, asíncrona","instructions":"Instrucciones de estilo (opcional)","create":"Generar lote","created":"{{count}} elementos en cola","jobs":"Trabajos TTS por lotes","empty":"Aún no hay trabajos TTS por lotes.","retryFailed":"Reintentar fallidos","download":"Descargar","statusQueued":"En cola","statusRunning":"En curso","statusPaused":"En pausa","statusCompleted":"Completado","statusPartial":"Completado parcialmente","statusFailed":"Fallido","statusCancelled":"Cancelado","statusUnknown":"Desconocido"},
   "gallery": {
     "title": "VoiceStudio Galería",
     "search_placeholder": "Buscar en YouTube…",

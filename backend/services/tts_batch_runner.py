@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
-import os
 import random
 import re
 from pathlib import Path
@@ -116,11 +116,19 @@ def _load_backend(job: dict):
 
 
 async def _write_audio(item: dict, audio, sample_rate: int) -> None:
+    from services.watermark import mark_synthetic_async
+    from worker.async_utils import to_thread_and_drain_on_cancel
+
+    audio = await mark_synthetic_async(
+        audio,
+        sample_rate,
+        context="tts_batch.item",
+    )
     relative = _relative_item_path(item["job_id"], item["position"])
     output = _absolute_output(relative)
     output.parent.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread(_save_wav, str(output), audio, sample_rate)
-    checksum = await asyncio.to_thread(_sha256, output)
+    await to_thread_and_drain_on_cancel(_save_wav, str(output), audio, sample_rate)
+    checksum = await to_thread_and_drain_on_cancel(_sha256, output)
     store.set_item_result(
         item["id"], "completed", output_path=relative, checksum=checksum
     )
@@ -141,13 +149,41 @@ async def _generate_standard_item(job: dict, backend, item: dict) -> None:
 
         store.set_item_running(latest["id"])
         try:
-            audio = await asyncio.to_thread(
+            generate = functools.partial(
                 backend.generate,
                 latest["input_text"],
                 voice_id=job.get("voice_id"),
                 model_id=job.get("model_id"),
                 **_generation_settings(job),
             )
+            if backend.is_local:
+                from services.model_manager import (
+                    generate_timeout_s,
+                    run_on_gpu_pool_guarded,
+                )
+                from worker.async_utils import drain_task
+
+                generation_task = asyncio.create_task(
+                    run_on_gpu_pool_guarded(
+                        generate,
+                        what="TTS batch generate",
+                        timeout=generate_timeout_s(
+                            latest["input_text"], engine=backend
+                        ),
+                    )
+                )
+                try:
+                    audio = await asyncio.shield(generation_task)
+                except asyncio.CancelledError:
+                    # Local inference cannot be stopped safely once it owns the
+                    # shared GPU worker. Drain it before shutdown unloads the
+                    # model; the item is requeued by the outer handler.
+                    await drain_task(generation_task)
+                    raise
+            else:
+                from worker.async_utils import to_thread_and_drain_on_cancel
+
+                audio = await to_thread_and_drain_on_cancel(generate)
             await _write_audio(latest, audio, backend.sample_rate)
             return
         except asyncio.CancelledError:
@@ -181,19 +217,22 @@ async def _run_standard(job: dict, backend) -> None:
 
 
 async def _run_provider_batch(job: dict, backend) -> None:
+    from worker.async_utils import to_thread_and_drain_on_cancel
+
     provider_batch_id = job.get("provider_batch_id")
     pending = [item for item in job["items"] if not _valid_completed_item(item)]
     if not pending:
         return
     if not provider_batch_id:
         request_items = [ProviderBatchItem(id=item["id"], text=item["input_text"]) for item in pending]
-        provider_batch_id = await asyncio.to_thread(
+        submit = functools.partial(
             backend.submit_provider_batch,
             request_items,
             voice_id=job.get("voice_id"),
             model_id=job.get("model_id"),
             **_generation_settings(job),
         )
+        provider_batch_id = await to_thread_and_drain_on_cancel(submit)
         store.set_job_status(job["id"], "running", provider_batch_id=provider_batch_id)
         for item in pending:
             store.set_item_running(item["id"])
@@ -206,14 +245,17 @@ async def _run_provider_batch(job: dict, backend) -> None:
         if current["status"] == "paused":
             return
         if current["status"] == "cancelled":
-            await asyncio.to_thread(backend.cancel_provider_batch, provider_batch_id)
+            await to_thread_and_drain_on_cancel(
+                backend.cancel_provider_batch, provider_batch_id
+            )
             return
         try:
-            poll = await asyncio.to_thread(
+            poll_request = functools.partial(
                 backend.poll_provider_batch,
                 provider_batch_id,
                 item_ids=tuple(item["id"] for item in pending),
             )
+            poll = await to_thread_and_drain_on_cancel(poll_request)
             poll_failures = 0
         except Exception as exc:  # noqa: BLE001 - provider errors are normalized below
             error = _normalized_error(exc)
@@ -255,6 +297,8 @@ async def _run_provider_batch(job: dict, backend) -> None:
 
 
 async def _join_completed(job: dict, backend) -> str | None:
+    from worker.async_utils import to_thread_and_drain_on_cancel
+
     completed = [item for item in job["items"] if _valid_completed_item(item)]
     if not completed:
         return None
@@ -262,7 +306,9 @@ async def _join_completed(job: dict, backend) -> str | None:
     pieces = []
     gap_ms = max(0, min(int((job.get("settings") or {}).get("join_gap_ms", 0)), 60_000))
     for index, item in enumerate(completed):
-        audio, sample_rate = await asyncio.to_thread(_load_wav, str(_absolute_output(item["output_path"])))
+        audio, sample_rate = await to_thread_and_drain_on_cancel(
+            _load_wav, str(_absolute_output(item["output_path"]))
+        )
         if sample_rate != backend.sample_rate:
             audio = _resample(audio, sample_rate, backend.sample_rate)
         pieces.append(audio)
@@ -271,7 +317,9 @@ async def _join_completed(job: dict, backend) -> str | None:
     joined = torch.cat(pieces, dim=-1)
     relative = f"tts_batches/{job['id']}/joined.wav"
     output = _absolute_output(relative)
-    await asyncio.to_thread(_save_wav, str(output), joined, backend.sample_rate)
+    await to_thread_and_drain_on_cancel(
+        _save_wav, str(output), joined, backend.sample_rate
+    )
     return relative
 
 

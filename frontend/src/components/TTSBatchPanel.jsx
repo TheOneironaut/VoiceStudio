@@ -25,6 +25,16 @@ const TONE = {
   cancelled: 'neutral',
 };
 
+const STATUS_KEY = {
+  queued: 'statusQueued',
+  running: 'statusRunning',
+  paused: 'statusPaused',
+  completed: 'statusCompleted',
+  partial: 'statusPartial',
+  failed: 'statusFailed',
+  cancelled: 'statusCancelled',
+};
+
 function splitInputs(value) {
   const paragraphs = value
     .split(/\n\s*\n/)
@@ -219,7 +229,7 @@ export default function TTSBatchPanel() {
               <div className="flex items-center gap-[6px]">
                 <strong>{job.engine_id}</strong>
                 <Badge tone={TONE[job.status] || 'neutral'} size="xs">
-                  {job.status}
+                  {t(`ttsBatch.${STATUS_KEY[job.status] || 'statusUnknown'}`)}
                 </Badge>
               </div>
               <div className="mt-[4px] h-[4px] overflow-hidden rounded bg-[var(--chrome-bg-inset,rgba(255,255,255,0.04))]">

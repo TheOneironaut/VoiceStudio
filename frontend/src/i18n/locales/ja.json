@@ -1411,7 +1411,7 @@
     "watch_failed": "フォルダー監視を停止しました — フォルダーを読み取れません（移動・削除・権限変更の可能性）。再開するにはフォルダーを選び直してください。",
     "watch_start_failed": "そのフォルダーの監視を開始できませんでした。フォルダーを選び直して再試行してください。"
   },
-  "ttsBatch": {"tab":"テキスト読み上げ","inputs":"テキスト","inputPlaceholder":"項目ごとに1つの段落を貼り付け、空行で区切ります。","itemCount":"{{count}} 件","execution":"実行方法","standard":"標準 API","providerBatch":"プロバイダー Batch API — 低コスト・非同期","instructions":"スタイル指示（任意）","create":"バッチを生成","created":"{{count}} 件をキューに追加しました","jobs":"TTS バッチジョブ","empty":"TTS バッチジョブはまだありません。","retryFailed":"失敗項目を再試行","download":"ダウンロード"},
+  "ttsBatch": {"tab":"テキスト読み上げ","inputs":"テキスト","inputPlaceholder":"項目ごとに1つの段落を貼り付け、空行で区切ります。","itemCount":"{{count}} 件","execution":"実行方法","standard":"標準 API","providerBatch":"プロバイダー Batch API — 低コスト・非同期","instructions":"スタイル指示（任意）","create":"バッチを生成","created":"{{count}} 件をキューに追加しました","jobs":"TTS バッチジョブ","empty":"TTS バッチジョブはまだありません。","retryFailed":"失敗項目を再試行","download":"ダウンロード","statusQueued":"待機中","statusRunning":"実行中","statusPaused":"一時停止","statusCompleted":"完了","statusPartial":"一部完了","statusFailed":"失敗","statusCancelled":"キャンセル済み","statusUnknown":"不明"},
   "gallery": {
     "title": "VoiceStudio ギャラリー",
     "search_placeholder": "YouTube を検索…",

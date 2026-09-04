@@ -81,4 +81,20 @@ describe('TTSBatchPanel', () => {
       }),
     );
   });
+
+  it('renders a localized label instead of the backend status enum', async () => {
+    mocks.listBatches.mockResolvedValue([
+      {
+        id: 'job-1',
+        engine_id: 'gemini-tts',
+        status: 'failed',
+        progress: { completed: 0, total: 1, fraction: 0 },
+      },
+    ]);
+
+    render(<TTSBatchPanel />);
+
+    expect(await screen.findByText('Failed')).toBeInTheDocument();
+    expect(screen.queryByText('failed')).not.toBeInTheDocument();
+  });
 });

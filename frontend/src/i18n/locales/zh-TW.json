@@ -1411,7 +1411,7 @@
     "watch_failed": "監看已停止 — 資料夾已無法讀取（已移動、刪除或權限變更）。請重新選擇資料夾以繼續。",
     "watch_start_failed": "無法開始監看該資料夾 — 請重新選擇以重試。"
   },
-  "ttsBatch": {"tab":"文字轉語音","inputs":"文字","inputPlaceholder":"每個項目貼上一個段落，並以空白行分隔。","itemCount":"{{count}} 個項目","execution":"執行方式","standard":"標準 API","providerBatch":"供應商 Batch API — 成本較低、非同步執行","instructions":"風格指示（選填）","create":"產生批次","created":"已將 {{count}} 個項目加入佇列","jobs":"TTS 批次工作","empty":"尚無 TTS 批次工作。","retryFailed":"重試失敗項目","download":"下載"},
+  "ttsBatch": {"tab":"文字轉語音","inputs":"文字","inputPlaceholder":"每個項目貼上一個段落，並以空白行分隔。","itemCount":"{{count}} 個項目","execution":"執行方式","standard":"標準 API","providerBatch":"供應商 Batch API — 成本較低、非同步執行","instructions":"風格指示（選填）","create":"產生批次","created":"已將 {{count}} 個項目加入佇列","jobs":"TTS 批次工作","empty":"尚無 TTS 批次工作。","retryFailed":"重試失敗項目","download":"下載","statusQueued":"已排入佇列","statusRunning":"執行中","statusPaused":"已暫停","statusCompleted":"已完成","statusPartial":"部分完成","statusFailed":"失敗","statusCancelled":"已取消","statusUnknown":"未知"},
   "gallery": {
     "title": "VoiceStudio 畫廊",
     "search_placeholder": "搜尋 YouTube...",

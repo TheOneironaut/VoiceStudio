@@ -1411,7 +1411,7 @@
     "watch_failed": "Bevakningen stoppades — mappen kan inte längre läsas (flyttad, borttagen eller ändrade behörigheter). Välj den igen för att fortsätta.",
     "watch_start_failed": "Kunde inte börja bevaka mappen — välj den igen för att försöka på nytt."
   },
-  "ttsBatch": {"tab":"Text till tal","inputs":"Texter","inputPlaceholder":"Klistra in ett stycke per objekt. Separera med tomma rader.","itemCount":"{{count}} objekt","execution":"Körning","standard":"Standard-API","providerBatch":"Leverantörens Batch-API — billigare, asynkron","instructions":"Stilinstruktioner (valfritt)","create":"Generera batch","created":"{{count}} objekt köade","jobs":"TTS-batchjobb","empty":"Inga TTS-batchjobb ännu.","retryFailed":"Försök misslyckade igen","download":"Hämta"},
+  "ttsBatch": {"tab":"Text till tal","inputs":"Texter","inputPlaceholder":"Klistra in ett stycke per objekt. Separera med tomma rader.","itemCount":"{{count}} objekt","execution":"Körning","standard":"Standard-API","providerBatch":"Leverantörens Batch-API — billigare, asynkron","instructions":"Stilinstruktioner (valfritt)","create":"Generera batch","created":"{{count}} objekt köade","jobs":"TTS-batchjobb","empty":"Inga TTS-batchjobb ännu.","retryFailed":"Försök misslyckade igen","download":"Hämta","statusQueued":"I kö","statusRunning":"Körs","statusPaused":"Pausad","statusCompleted":"Slutförd","statusPartial":"Delvis slutförd","statusFailed":"Misslyckad","statusCancelled":"Avbruten","statusUnknown":"Okänd"},
   "gallery": {
     "title": "VoiceStudio Galleri",
     "search_placeholder": "Sök på YouTube...",
