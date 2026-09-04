@@ -45,6 +45,16 @@ def _save_wav(path: str, audio, sample_rate: int) -> None:
     atomic_save_wav(path, audio, sample_rate)
 
 
+async def _mark_audio(audio, sample_rate: int):
+    from services.watermark import mark_synthetic_async
+
+    return await mark_synthetic_async(
+        audio,
+        sample_rate,
+        context="tts_batch.item",
+    )
+
+
 def _load_wav(path: str):
     import torchaudio
 
@@ -116,14 +126,9 @@ def _load_backend(job: dict):
 
 
 async def _write_audio(item: dict, audio, sample_rate: int) -> None:
-    from services.watermark import mark_synthetic_async
     from worker.async_utils import to_thread_and_drain_on_cancel
 
-    audio = await mark_synthetic_async(
-        audio,
-        sample_rate,
-        context="tts_batch.item",
-    )
+    audio = await _mark_audio(audio, sample_rate)
     relative = _relative_item_path(item["job_id"], item["position"])
     output = _absolute_output(relative)
     output.parent.mkdir(parents=True, exist_ok=True)

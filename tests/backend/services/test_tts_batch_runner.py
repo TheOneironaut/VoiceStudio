@@ -10,7 +10,6 @@ from services import (
     tts_backend,
     tts_batch_runner as runner,
     tts_batch_store as store,
-    watermark,
 )
 from services.plugin_sdk import (
     AudioPayload,
@@ -91,8 +90,8 @@ class FlakyPollBatchBackend(FakeNativeBatchBackend):
 def runner_env(monkeypatch, tmp_path):
     watermark_calls = []
 
-    async def mark_synthetic(audio, sample_rate, *, context, **_kwargs):
-        watermark_calls.append((sample_rate, context))
+    async def mark_synthetic(audio, sample_rate):
+        watermark_calls.append((sample_rate, "tts_batch.item"))
         return audio
 
     def save_wav(path, audio, sample_rate):
@@ -120,7 +119,7 @@ def runner_env(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_get_engine_instance", tts_backend.get_engine_instance_for)
     monkeypatch.setattr(runner, "_save_wav", save_wav)
     monkeypatch.setattr(runner, "_load_wav", load_wav)
-    monkeypatch.setattr(watermark, "mark_synthetic_async", mark_synthetic)
+    monkeypatch.setattr(runner, "_mark_audio", mark_synthetic)
     db.ensure_schema()
     saved_registry = dict(tts_backend._REGISTRY)
     saved_instances = dict(tts_backend._ENGINE_INSTANCES)
