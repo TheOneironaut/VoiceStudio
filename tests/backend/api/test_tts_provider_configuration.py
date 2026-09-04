@@ -17,7 +17,7 @@ def client(monkeypatch, tmp_path):
         ):
             del sys.modules[module_name]
 
-    from api.dependencies import require_admin_action
+    from api.dependencies import require_admin
     from api.routers import engines
     from core import config, db
     from plugins import gemini_tts  # noqa: F401 - registers the provider
@@ -25,7 +25,7 @@ def client(monkeypatch, tmp_path):
     db.init_db()
     app = FastAPI()
     app.include_router(engines.router)
-    app.dependency_overrides[require_admin_action] = lambda: None
+    app.dependency_overrides[require_admin] = lambda: None
     with TestClient(app) as test_client:
         yield test_client, config.DB_PATH
 
