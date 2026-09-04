@@ -1,30 +1,38 @@
 from __future__ import annotations
 
 import pytest
+import sys
+import sqlite3
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from api.dependencies import require_admin_action
-from api.routers import engines
-from core import db
-from plugins import gemini_tts  # noqa: F401 - registers the provider
-
-
 @pytest.fixture
 def client(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "provider.db"))
-    db.ensure_schema()
+    monkeypatch.setenv("OMNIVOICE_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    for module_name in list(sys.modules):
+        if module_name in {"core", "services", "api", "plugins"} or module_name.startswith(
+            ("core.", "services.", "api.", "plugins.")
+        ):
+            del sys.modules[module_name]
+
+    from api.dependencies import require_admin_action
+    from api.routers import engines
+    from core import config, db
+    from plugins import gemini_tts  # noqa: F401 - registers the provider
+
+    db.init_db()
     app = FastAPI()
     app.include_router(engines.router)
     app.dependency_overrides[require_admin_action] = lambda: None
     with TestClient(app) as test_client:
-        yield test_client
+        yield test_client, config.DB_PATH
 
 
 def test_provider_configuration_encrypts_key_and_persists_voice(client):
-    response = client.put(
+    test_client, database_path = client
+    response = test_client.put(
         "/engines/tts/gemini-tts/configuration",
         json={
             "voice_id": "Puck",
@@ -40,18 +48,19 @@ def test_provider_configuration_encrypts_key_and_persists_voice(client):
     assert body["credential_stored"] is True
     assert "test-secret-value" not in response.text
 
-    with db.db_conn() as connection:
+    with sqlite3.connect(database_path) as connection:
         rows = connection.execute("SELECT key, value FROM settings").fetchall()
     serialized = " ".join(str(value) for row in rows for value in row)
     assert "test-secret-value" not in serialized
 
 
 def test_provider_voice_catalogue_and_validation(client):
-    voices = client.get("/engines/tts/gemini-tts/voices")
+    test_client, _database_path = client
+    voices = test_client.get("/engines/tts/gemini-tts/voices")
     assert voices.status_code == 200
     assert len(voices.json()["voices"]) == 30
 
-    invalid = client.put(
+    invalid = test_client.put(
         "/engines/tts/gemini-tts/configuration",
         json={"voice_id": "not-a-real-voice"},
     )

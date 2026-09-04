@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -152,3 +153,15 @@ def test_provider_batch_submit_poll_and_cancel(monkeypatch):
 
     plugin.cancel_provider_batch(batch_id)
     assert client.batches.cancelled == [{"name": batch_id}]
+
+
+def test_live_gemini_tts_only_when_explicitly_enabled():
+    if os.environ.get("GEMINI_TTS_LIVE_TEST") != "1":
+        pytest.skip("set GEMINI_TTS_LIVE_TEST=1 to authorize a paid live request")
+    if not gemini_tts.resolve_api_key():
+        pytest.skip("GEMINI_API_KEY is not configured")
+    audio = gemini_tts.GeminiTTSPlugin().generate(
+        "VoiceStudio live Gemini TTS smoke test.", voice_id="Kore", language="en"
+    )
+    assert audio.data
+    assert audio.sample_rate == 24_000
