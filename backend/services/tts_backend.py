@@ -2343,6 +2343,7 @@ def _plugin_backend_class(plugin_cls) -> type[TTSBackend]:
         models = plugin_cls.models
         default_voice_id = plugin_cls.default_voice_id
         default_model_id = plugin_cls.default_model_id
+        install_hint = plugin_cls.install_hint
         gpu_compat = ("cpu",)
 
         def __init__(self):
@@ -2656,7 +2657,7 @@ def list_backends() -> list[dict]:
             "models": cls.list_models(),
             "default_model_id": getattr(cls, "default_model_id", None),
             "default_voice_id": getattr(cls, "default_voice_id", None),
-            "install_hint": _INSTALL_HINTS.get(bid),
+            "install_hint": getattr(cls, "install_hint", None) or _INSTALL_HINTS.get(bid),
             # Exact `export VAR=...` line for path-gated opt-in engines, or None.
             "setup_snippet": _SETUP_SNIPPETS.get(bid),
             # True when services.sidecar_install can provision this engine

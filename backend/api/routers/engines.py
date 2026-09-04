@@ -122,7 +122,7 @@ def get_tts_provider_configuration(engine_id: str):
 
 @router.put(
     "/engines/tts/{engine_id}/configuration",
-    dependencies=[Depends(require_admin_action)],
+    dependencies=[Depends(require_admin)],
 )
 def update_tts_provider_configuration(engine_id: str, body: TTSProviderConfiguration):
     backend_cls, plugin_cls = _tts_plugin_class(engine_id)

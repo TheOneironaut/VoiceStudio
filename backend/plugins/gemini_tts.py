@@ -212,6 +212,7 @@ class GeminiTTSPlugin(TTSPlugin):
     supported_languages_hint = _LANGUAGES
     default_voice_id = "Kore"
     default_model_id = MODEL_ID
+    install_hint = "uv sync --extra gemini"
     models = ({"id": MODEL_ID, "name": "Gemini 3.1 Flash TTS Preview", "preview": True},)
 
     @classmethod

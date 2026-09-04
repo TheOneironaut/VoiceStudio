@@ -182,6 +182,7 @@ class TTSPlugin(ABC):
     models: tuple[dict, ...] = ()
     default_model_id: Optional[str] = None
     default_voice_id: Optional[str] = None
+    install_hint: Optional[str] = None
 
     @classmethod
     @abstractmethod
@@ -284,6 +285,7 @@ class ElevenLabsPlugin(TTSPlugin):
     display_name = "ElevenLabs"
     requires_api_key = True
     is_local = False
+    install_hint = "uv pip install elevenlabs"
     supported_languages_hint = [
         "en", "es", "fr", "de", "it", "pt", "pl", "hi", "ar", "zh",
         "ja", "ko", "nl", "tr", "ru", "sv", "id", "fil", "ms", "ro",
@@ -348,6 +350,7 @@ class BarkPlugin(TTSPlugin):
     display_name = "Bark (Suno)"
     requires_api_key = False
     is_local = True
+    install_hint = "uv pip install suno-bark"
     supported_languages_hint = ["en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko"]
 
     @classmethod
