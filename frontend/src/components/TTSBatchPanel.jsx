@@ -130,7 +130,7 @@ export default function TTSBatchPanel() {
               value={text}
               onChange={(event) => setText(event.target.value)}
               placeholder={t('ttsBatch.inputPlaceholder')}
-              className="min-h-[170px] resize-y rounded-[var(--chrome-radius-control)] border border-[var(--chrome-border)] bg-[var(--chrome-bg-inset)] p-[10px] text-[13px] text-fg outline-none focus:border-[var(--chrome-accent)]"
+              className="min-h-[170px] resize-y rounded-[var(--radius-lg)] border border-[var(--chrome-border)] bg-[var(--chrome-bg-inset,rgba(255,255,255,0.04))] p-[10px] text-[13px] text-fg outline-none focus:border-[var(--chrome-accent)]"
             />
           </label>
           <span className="font-mono text-[11px] text-fg-muted">
@@ -222,7 +222,7 @@ export default function TTSBatchPanel() {
                   {job.status}
                 </Badge>
               </div>
-              <div className="mt-[4px] h-[4px] overflow-hidden rounded bg-[var(--chrome-bg-inset)]">
+              <div className="mt-[4px] h-[4px] overflow-hidden rounded bg-[var(--chrome-bg-inset,rgba(255,255,255,0.04))]">
                 <div
                   className="h-full bg-[var(--chrome-accent)]"
                   style={{ width: `${(job.progress?.fraction || 0) * 100}%` }}
@@ -277,7 +277,7 @@ export default function TTSBatchPanel() {
               <a
                 href={`${API}/audio/${job.output_path}`}
                 download
-                className="inline-flex h-[28px] items-center gap-[5px] rounded-[var(--chrome-radius-control)] border border-[var(--chrome-border)] px-[9px] text-[11px] text-fg no-underline hover:bg-[var(--chrome-hover-bg)]"
+                className="inline-flex h-[28px] items-center gap-[5px] rounded-[var(--radius-lg)] border border-[var(--chrome-border)] px-[9px] text-[11px] text-fg no-underline hover:bg-[var(--chrome-hover-bg)]"
               >
                 <Download size={11} /> {t('ttsBatch.download')}
               </a>

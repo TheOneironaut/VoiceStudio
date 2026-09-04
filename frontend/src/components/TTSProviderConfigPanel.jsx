@@ -61,7 +61,7 @@ export default function TTSProviderConfigPanel({ engine, onSaved }) {
   }
 
   return (
-    <section className="mt-[4px] max-w-[720px] rounded-[var(--chrome-radius-control)] border border-[color-mix(in_srgb,var(--chrome-accent)_18%,transparent)] bg-[color-mix(in_srgb,var(--chrome-accent)_5%,transparent)] p-[10px]">
+    <section className="mt-[4px] max-w-[720px] rounded-[var(--radius-lg)] border border-[color-mix(in_srgb,var(--chrome-accent)_18%,transparent)] bg-[color-mix(in_srgb,var(--chrome-accent)_5%,transparent)] p-[10px]">
       <p className="mb-[8px] flex items-start gap-[6px] text-[11px] text-[color:var(--chrome-fg-muted)]">
         <Cloud size={14} className="mt-[1px] shrink-0 text-[color:var(--chrome-accent)]" />
         {t('engines.cloudProviderNotice', { provider: engine.display_name })}

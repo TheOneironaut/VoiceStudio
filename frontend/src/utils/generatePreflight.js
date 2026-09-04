@@ -32,6 +32,7 @@ const warned = new Set();
 // rare and hardware does not change mid-session; a short TTL keeps a fresh
 // install's just-installed engine from being judged on stale data.
 const TTL_MS = 60_000;
+export const TTS_ENGINE_SELECTED_EVENT = 'omnivoice:tts-engine-selected';
 let cache = null; // { at: number, promise: Promise }
 
 function enginesCached() {
@@ -71,6 +72,7 @@ export async function activeTtsBackend() {
 export function onEngineSelected(engineId, alreadyWarnedFor = null) {
   cache = null;
   if (engineId && alreadyWarnedFor) warned.add(`${engineId}|${alreadyWarnedFor}`);
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(TTS_ENGINE_SELECTED_EVENT));
 }
 
 /** Test seam — drop the memoized /engines response and the warned-once set. */

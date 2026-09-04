@@ -67,7 +67,7 @@ describe('TTSBatchPanel', () => {
     fireEvent.change(screen.getByDisplayValue('Standard API'), {
       target: { value: 'provider_batch' },
     });
-    fireEvent.change(screen.getByDisplayValue('Kore'), { target: { value: 'Puck' } });
+    fireEvent.change(await screen.findByDisplayValue('Kore'), { target: { value: 'Puck' } });
     fireEvent.click(screen.getByRole('button', { name: 'Generate batch' }));
 
     await waitFor(() => expect(mocks.createBatch).toHaveBeenCalledTimes(1));
