@@ -7,8 +7,10 @@ a generation.
 
 ## Enable and configure
 
-The Windows Gemini installer enables the small `google-genai` SDK extra during
-its normal dependency setup. A source checkout can enable it with:
+The Windows installer enables the generic `bundled-providers` dependency set
+during its normal dependency setup; that set currently includes the small
+`google-genai` SDK. The desktop bootstrap does not name Gemini or any other
+individual provider. A source checkout can enable only Gemini with:
 
 ```bash
 uv sync --extra gemini
@@ -69,4 +71,3 @@ not a Gemini-specific database or endpoint.
 - [Gemini 3.1 Flash TTS model](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-tts-preview)
 - [Gemini Batch API](https://ai.google.dev/gemini-api/docs/batch-api)
 - [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)
-
