@@ -88,6 +88,18 @@ hiddenimports = [
     'omnivoice', 'omnivoice.models', 'omnivoice.models.omnivoice',
 ]
 
+# Provider plugins are discovered dynamically from backend/plugins, so static
+# analysis cannot see them. Gemini's SDK is an installer-enabled optional extra
+# and is likewise imported only when that provider is selected.
+hiddenimports += collect_submodules('plugins')
+try:
+    _gemini_datas, _gemini_bins, _gemini_hidden = collect_all('google.genai')
+    datas += _gemini_datas
+    binaries += _gemini_bins
+    hiddenimports += _gemini_hidden
+except Exception as e:  # source installs may intentionally omit the extra
+    print(f"[backend.spec] optional Gemini SDK collection skipped: {e}")
+
 if IS_MAC_ARM:
     # MLX Whisper on Apple Silicon (optional speedup path). mlx's pure-Python
     # submodules (nn, utils, …) are imported lazily by mlx_whisper at
@@ -171,6 +183,7 @@ datas += [
     ('backend/api', 'api'),
     ('backend/core', 'core'),
     ('backend/services', 'services'),
+    ('backend/plugins', 'plugins'),
     ('backend/schemas', 'schemas'),
     ('backend/migrations', 'migrations'),
 ]

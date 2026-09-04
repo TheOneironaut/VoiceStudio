@@ -1,0 +1,166 @@
+name: Gemini Windows MSI
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified MSI to the gemini-windows release
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gemini-windows-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-test-publish:
+    name: Build, install, launch, publish
+    runs-on: windows-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: frontend
+        run: bun run build
+
+      - name: Bundle uv, ffmpeg, and ffprobe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $triple = 'x86_64-pc-windows-msvc'
+          $bin = Join-Path $PWD 'frontend/src-tauri/binaries'
+          $work = Join-Path $env:RUNNER_TEMP 'voicestudio-sidecars'
+          New-Item -ItemType Directory -Force -Path $bin, $work | Out-Null
+
+          Invoke-WebRequest `
+            "https://github.com/astral-sh/uv/releases/download/0.11.7/uv-$triple.zip" `
+            -OutFile (Join-Path $work 'uv.zip')
+          Expand-Archive (Join-Path $work 'uv.zip') (Join-Path $work 'uv') -Force
+          $uv = Get-ChildItem (Join-Path $work 'uv') -Filter uv.exe -Recurse | Select-Object -First 1
+          Copy-Item $uv.FullName (Join-Path $bin "uv-$triple.exe")
+
+          Invoke-WebRequest `
+            'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' `
+            -OutFile (Join-Path $work 'ffmpeg.zip')
+          Expand-Archive (Join-Path $work 'ffmpeg.zip') (Join-Path $work 'ffmpeg') -Force
+          foreach ($tool in 'ffmpeg', 'ffprobe') {
+            $source = Get-ChildItem (Join-Path $work 'ffmpeg') -Filter "$tool.exe" -Recurse | Select-Object -First 1
+            Copy-Item $source.FullName (Join-Path $bin "$tool-$triple.exe")
+          }
+
+      - name: Build Windows MSI once
+        working-directory: frontend
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: bunx tauri build --target x86_64-pc-windows-msvc --bundles msi
+
+      - name: Name and structurally verify MSI
+        id: artifact
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $built = Get-ChildItem 'frontend/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi' `
+            -Filter '*.msi' | Select-Object -First 1
+          if (-not $built) { throw 'MSI build produced no artifact.' }
+          $artifact = Join-Path $env:RUNNER_TEMP 'VoiceStudio-Gemini-Windows-x64.msi'
+          Copy-Item $built.FullName $artifact
+          & "$PWD/scripts/verify-windows-msi.ps1" -MsiPath $artifact
+          "path=$artifact" >> $env:GITHUB_OUTPUT
+
+      - name: Install and launch the exact MSI
+        id: smoke
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = '${{ steps.artifact.outputs.path }}'
+          $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', "`"$msi`"", '/qn', '/norestart', 'AUTOLAUNCHAPP=0'
+          )
+          if ($install.ExitCode -ne 0) { throw "msiexec install exited $($install.ExitCode)" }
+
+          $exe = 'C:\Program Files\VoiceStudio\omnivoice-studio.exe'
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Installed shell is missing: $exe" }
+          $env:OMNIVOICE_DATA_DIR = Join-Path $env:RUNNER_TEMP 'voicestudio-data'
+          $env:HF_HUB_CACHE = Join-Path $env:RUNNER_TEMP 'empty-hf-cache'
+          $env:HF_HUB_OFFLINE = '1'
+          New-Item -ItemType Directory -Force -Path $env:OMNIVOICE_DATA_DIR, $env:HF_HUB_CACHE | Out-Null
+          $app = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+
+          $deadline = (Get-Date).AddMinutes(35)
+          $health = $null
+          while ((Get-Date) -lt $deadline) {
+            try {
+              $health = Invoke-RestMethod 'http://127.0.0.1:3900/health' -TimeoutSec 5
+              if ($health.status -eq 'ok') { break }
+            } catch {}
+            Start-Sleep -Seconds 5
+          }
+          if (-not $health -or $health.status -ne 'ok') { throw 'Installed backend did not become healthy.' }
+
+          $catalogue = Invoke-RestMethod 'http://127.0.0.1:3900/engines/tts' -TimeoutSec 20
+          $gemini = $catalogue.backends | Where-Object id -eq 'gemini-tts'
+          if (-not $gemini) { throw 'Gemini plugin is absent from the production engine catalogue.' }
+          if ($catalogue.active -ne 'omnivoice') { throw "Fresh-install default changed to $($catalogue.active)." }
+          if ($gemini.available) { throw 'Gemini unexpectedly became available without an API key.' }
+
+          $checkpointFiles = Get-ChildItem $env:HF_HUB_CACHE -File -Recurse -ErrorAction SilentlyContinue
+          if ($checkpointFiles) { throw 'Startup downloaded a model checkpoint into the empty HF cache.' }
+          "app_pid=$($app.Id)" >> $env:GITHUB_OUTPUT
+
+      - name: Stop and uninstall cleanly
+        if: always() && steps.artifact.outcome == 'success'
+        shell: pwsh
+        run: |
+          $pidValue = '${{ steps.smoke.outputs.app_pid }}'
+          if ($pidValue) { Stop-Process -Id ([int]$pidValue) -Force -ErrorAction SilentlyContinue }
+          $msi = '${{ steps.artifact.outputs.path }}'
+          $uninstall = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/x', "`"$msi`"", '/qn', '/norestart'
+          )
+          if ($uninstall.ExitCode -ne 0) { throw "msiexec uninstall exited $($uninstall.ExitCode)" }
+          if (Test-Path 'C:\Program Files\VoiceStudio\omnivoice-studio.exe') {
+            throw 'VoiceStudio shell remains after uninstall.'
+          }
+
+      - name: Publish only the verified MSI
+        if: inputs.publish && success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $msi = '${{ steps.artifact.outputs.path }}'
+          $sha = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant()
+          "$sha  VoiceStudio-Gemini-Windows-x64.msi" | Set-Content "$msi.sha256"
+          gh release view gemini-windows *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create gemini-windows --title 'VoiceStudio Gemini for Windows' `
+              --notes 'Verified Windows installer for the clean Gemini TTS provider build.'
+          }
+          gh release upload gemini-windows $msi "$msi.sha256" --clobber
+
+      - name: Upload focused failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-windows-failure-logs
+          path: |
+            ${{ runner.temp }}/voicestudio-data/*.log
+            ${{ runner.temp }}/voicestudio-data/**/*.log
+          if-no-files-found: ignore
+
