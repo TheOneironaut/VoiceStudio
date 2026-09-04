@@ -29,6 +29,23 @@ from typing import Callable, Literal, Optional
 
 logger = logging.getLogger("omnivoice.plugins")
 
+
+class TTSProviderError(RuntimeError):
+    """Normalized provider failure used by generic retry and batch layers."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "provider_error",
+        retryable: bool = False,
+        retry_after_s: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+        self.retry_after_s = retry_after_s
+
 # ── Plugin registry ──────────────────────────────────────────────────
 
 PLUGINS: dict[str, type["TTSPlugin"]] = {}
@@ -49,6 +66,26 @@ class AudioPayload:
     sample_rate: int
     encoding: Literal["pcm_s16le", "wav", "mp3"] = "pcm_s16le"
     channels: int = 1
+
+
+@dataclass(frozen=True)
+class ProviderBatchItem:
+    id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class ProviderBatchResult:
+    id: str
+    audio: Optional[AudioPayload] = None
+    error: Optional[dict] = None
+
+
+@dataclass(frozen=True)
+class ProviderBatchPoll:
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
+    results: tuple[ProviderBatchResult, ...] = ()
+    error: Optional[dict] = None
 
 
 def register_plugin(cls: type["TTSPlugin"]) -> type["TTSPlugin"]:
@@ -195,6 +232,41 @@ class TTSPlugin(ABC):
     @classmethod
     def list_models(cls) -> list[dict]:
         return [dict(model) for model in cls.models]
+
+    @classmethod
+    def save_api_key(cls, api_key: str) -> None:
+        raise NotImplementedError(f"TTS plugin {cls.id!r} does not support stored credentials.")
+
+    @classmethod
+    def has_stored_api_key(cls) -> bool:
+        return False
+
+    @classmethod
+    def has_api_key(cls) -> bool:
+        return cls.has_stored_api_key()
+
+    def submit_provider_batch(
+        self,
+        items: list[ProviderBatchItem],
+        *,
+        voice_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        language: Optional[str] = None,
+        instruct: Optional[str] = None,
+        **settings,
+    ) -> str:
+        raise NotImplementedError(f"TTS plugin {self.id!r} has no provider batch support.")
+
+    def poll_provider_batch(
+        self,
+        provider_batch_id: str,
+        *,
+        item_ids: tuple[str, ...] = (),
+    ) -> ProviderBatchPoll:
+        raise NotImplementedError(f"TTS plugin {self.id!r} has no provider batch support.")
+
+    def cancel_provider_batch(self, provider_batch_id: str) -> None:
+        raise NotImplementedError(f"TTS plugin {self.id!r} has no provider batch support.")
 
 
 # ── Built-in plugin: ElevenLabs (example) ────────────────────────────

@@ -2296,9 +2296,10 @@ def _decode_plugin_audio(payload) -> torch.Tensor:
 
     import numpy as np
 
-    from services.plugin_sdk import AudioPayload
-
-    if not isinstance(payload, AudioPayload):
+    # Tests and plugin reload tooling may purge ``services`` from sys.modules,
+    # producing a second AudioPayload class object. Validate the public
+    # contract structurally instead of rejecting an otherwise identical value.
+    if not all(hasattr(payload, field) for field in ("data", "sample_rate", "encoding", "channels")):
         raise TypeError("TTS plugins must return services.plugin_sdk.AudioPayload.")
     if not payload.data:
         raise RuntimeError("TTS plugin returned empty audio.")
@@ -2368,7 +2369,7 @@ def _plugin_backend_class(plugin_cls) -> type[TTSBackend]:
             return plugin_cls.list_models()
 
         def model_identity(self) -> Optional[str]:
-            return self.default_model_id
+            return _plugin_preference(self.id, "model", self.default_model_id)
 
         def generate(
             self,
@@ -2389,8 +2390,10 @@ def _plugin_backend_class(plugin_cls) -> type[TTSBackend]:
                 raise ValueError(f"TTS plugin {self.id!r} does not support voice cloning.")
             payload = self._plugin.generate(
                 text,
-                voice_id=extras.pop("voice_id", None) or self.default_voice_id,
-                model_id=extras.pop("model_id", None) or self.default_model_id,
+                voice_id=extras.pop("voice_id", None)
+                or _plugin_preference(self.id, "voice", self.default_voice_id),
+                model_id=extras.pop("model_id", None)
+                or _plugin_preference(self.id, "model", self.default_model_id),
                 language=language,
                 instruct=instruct or description,
                 speed=speed,
@@ -2401,10 +2404,44 @@ def _plugin_backend_class(plugin_cls) -> type[TTSBackend]:
             )
             return _decode_plugin_audio(payload)
 
+        def submit_provider_batch(self, items, **settings) -> str:
+            return self._plugin.submit_provider_batch(items, **settings)
+
+        def poll_provider_batch(self, provider_batch_id: str, **context):
+            return self._plugin.poll_provider_batch(provider_batch_id, **context)
+
+        def cancel_provider_batch(self, provider_batch_id: str) -> None:
+            self._plugin.cancel_provider_batch(provider_batch_id)
+
     PluginBackend.__name__ = f"{plugin_cls.__name__}Backend"
     PluginBackend.__qualname__ = PluginBackend.__name__
     PluginBackend.__module__ = plugin_cls.__module__
     return PluginBackend
+
+
+def _plugin_preference(plugin_id: str, kind: str, default: Optional[str]) -> Optional[str]:
+    from services import settings_store
+
+    return settings_store.get_text(f"tts_provider.{plugin_id}.{kind}") or default
+
+
+def set_plugin_preference(plugin_id: str, kind: str, value: Optional[str]) -> None:
+    if kind not in {"voice", "model"}:
+        raise ValueError(f"Unknown TTS plugin preference: {kind!r}.")
+    cls = get_backend_class(plugin_id)
+    if getattr(cls, "_plugin_class", None) is None:
+        raise ValueError(f"TTS engine {plugin_id!r} is not a plugin provider.")
+    choices = cls.list_voices() if kind == "voice" else cls.list_models()
+    ids = {str(item.get("id")) for item in choices}
+    if value is not None and value not in ids:
+        raise ValueError(f"Unknown {kind} {value!r} for TTS provider {plugin_id!r}.")
+    from services import settings_store
+
+    key = f"tts_provider.{plugin_id}.{kind}"
+    if value is None:
+        settings_store.clear_text(key)
+    else:
+        settings_store.set_text(key, value)
 
 
 def _register_plugin_backend(plugin_cls) -> None:
@@ -2659,6 +2696,13 @@ def list_backends() -> list[dict]:
                 for key, repo_id in cls.CURATED_MODELS.items()
             ]
             out[-1]["active_model_id"] = active_model
+        elif getattr(cls, "_plugin_class", None) is not None:
+            out[-1]["active_model_id"] = _plugin_preference(
+                bid, "model", getattr(cls, "default_model_id", None)
+            )
+            out[-1]["active_voice_id"] = _plugin_preference(
+                bid, "voice", getattr(cls, "default_voice_id", None)
+            )
     return out
 
 

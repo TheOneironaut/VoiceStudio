@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 # tests/conftest.py prepends ./backend to sys.path so `services.*` resolves.
-from services import tts_backend
+from services import plugin_sdk, tts_backend
 from services.subprocess_backend import SubprocessBackend
 from services.tts_backend import TTSBackend, list_backends
 
@@ -184,8 +184,14 @@ def test_list_backends_shape(registry_sandbox):
         "execution_evidence",
     }
     mlx_audio_extra = {"curated_models", "active_model_id"}
+    plugin_extra = {"active_model_id", "active_voice_id"}
     for entry in out:
-        expected = required | mlx_audio_extra if entry["id"] == "mlx-audio" else required
+        if entry["id"] == "mlx-audio":
+            expected = required | mlx_audio_extra
+        elif entry["id"] in plugin_sdk.PLUGINS:
+            expected = required | plugin_extra
+        else:
+            expected = required
         assert set(entry.keys()) == expected, (
             f"entry {entry.get('id')} has wrong keys: "
             f"missing {expected - entry.keys()}, "
@@ -227,7 +233,8 @@ def test_curated_models_not_present_on_other_backends(registry_sandbox):
         if entry["id"] == "mlx-audio":
             continue
         assert "curated_models" not in entry
-        assert "active_model_id" not in entry
+        if entry["id"] not in plugin_sdk.PLUGINS:
+            assert "active_model_id" not in entry
 
 
 def test_isolation_mode_in_process_vs_subprocess(registry_sandbox):

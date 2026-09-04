@@ -682,6 +682,7 @@ def _phase_a_build_inner() -> None:
         sonitranslate,
         audiobook,
         longform_jobs,
+        tts_batches,
         pronunciation,  # Expressive-TTS Spec 01: user pronunciation dictionary
         settings as settings_router,  # Phase 1 AUTH-03: HF token save/clear/state
         media_tools as media_tools_router,  # Audio tools: ffmpeg/ffprobe/yt-dlp
@@ -696,7 +697,7 @@ def _phase_a_build_inner() -> None:
         stories, setup, gallery, archetypes, describe_voice, community,
         batch, watermark, events, capture, capture_ws, speech_platform, dictation,
         openai_compat, tts_stream, marketplace, personas, sonitranslate,
-        audiobook, longform_jobs, pronunciation, settings_router,
+        audiobook, longform_jobs, tts_batches, pronunciation, settings_router,
         media_tools_router, auth_router, _mcp_bindings_router, workers_router,
     ])
     # Download-acceleration state, once, for triage-from-logs (FDL-03).
@@ -863,6 +864,14 @@ async def _phase_b(app: FastAPI) -> None:
             logger.info("Startup: marked %d orphaned job(s) as failed.", swept)
     except Exception:
         logger.exception("Startup job-sweep failed (non-fatal).")
+    try:
+        from services import tts_batch_runner
+
+        resumed = tts_batch_runner.resume_pending()
+        if resumed:
+            logger.info("Startup: resumed %d durable TTS batch job(s).", len(resumed))
+    except Exception:
+        logger.exception("TTS batch recovery failed (non-fatal).")
 
     _startup_progress.begin_step("services_start")
     # Phase 1 Wave 3 — macOS Gatekeeper quarantine probe (#54). Informational
@@ -1118,6 +1127,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Remote worker shutdown failed")
     logger.info("Shutdown: cleaning up…")
+    try:
+        from services import tts_batch_runner
+
+        await tts_batch_runner.shutdown()
+    except Exception:
+        logger.exception("TTS batch shutdown failed")
     # Flip model_manager into shutdown mode, so a model load in flight (or
     # still queued) on a GPU-pool thread classifies executor rejections as a
     # benign cancelled-load instead of a crash-shaped failure (#1174). None
