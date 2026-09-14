@@ -404,7 +404,23 @@ _CONFIGURED_GPU_JOB_TIMEOUT_S = GPU_JOB_TIMEOUT_S
 # CPU synthesis is healthy but substantially slower than accelerated inference.
 # Keep a separate, bounded floor so a short render on CPU is not abandoned at
 # the GPU-oriented five-minute deadline (#1588).
+#
+# #1787 review fix: an explicit OMNIVOICE_CPU_GENERATE_TIMEOUT_S must ALWAYS
+# govern CPU dispatches, even when OMNIVOICE_GENERATE_TIMEOUT_S is ALSO
+# explicit. Before this flag existed, `universal_override` below treated any
+# explicit GENERATE_TIMEOUT_S as authoritative for CPU too, so the Settings
+# panel's "CPU budget" row could be saved and silently never apply whenever
+# the "Accelerated" row was also set — the exact defect (a control that looks
+# like it works and doesn't) issue #1787 exists to remove. Setting ONLY
+# OMNIVOICE_GENERATE_TIMEOUT_S keeps its historical "universal" behavior
+# unchanged (test_explicit_universal_generate_timeout_wins_on_cpu) — nobody
+# who already relies on that single-var override loses it. The only case that
+# changes is the previously-undocumented, previously-broken combination of
+# setting BOTH: the more specific (CPU) value now wins for CPU jobs, matching
+# what a user who filled in both Settings rows was told would happen.
+_CPU_GENERATE_TIMEOUT_EXPLICIT = "OMNIVOICE_CPU_GENERATE_TIMEOUT_S" in os.environ
 CPU_JOB_TIMEOUT_S = float(os.environ.get("OMNIVOICE_CPU_GENERATE_TIMEOUT_S", "600.0"))
+_CONFIGURED_CPU_JOB_TIMEOUT_S = CPU_JOB_TIMEOUT_S
 
 # Queue-wait budget — a SEPARATE, deliberately generous clock (#1190/#1202).
 # The execution bound above must never be spent waiting in line: a job queued
@@ -509,6 +525,8 @@ class GpuPoolBusyError(TimeoutError):
 
 def generate_timeout_s(
     text: "str | None", *, engine: object = None, execution_device: "str | None" = None,
+    min_vram_gb: float = 0.0, hardware_family: "str | None" = None,
+    vram_gb: "float | None" = None,
 ) -> float:
     """THE wall-clock execution budget for one synthesis job, scaled to input.
 
@@ -520,33 +538,74 @@ def generate_timeout_s(
     on long inputs. Lives here (not in a router) so every router shares it
     without importing generation.py.
 
-    Policy: floor at the configured OMNIVOICE_GENERATE_TIMEOUT_S, plus 1s per
-    40 characters past a 1200-character free allowance — generous enough for
+    Policy: floor at the configured OMNIVOICE_GENERATE_TIMEOUT_S (accelerated
+    hosts) or OMNIVOICE_CPU_GENERATE_TIMEOUT_S (CPU hosts — the latter wins
+    for CPU whenever it is itself explicit, even if the former also is; see
+    the #1787 comment on the module-level constants), plus 1s per 40
+    characters past a 1200-character free allowance — generous enough for
     CPU-class hardware, still bounded (a wedged job is caught in minutes, not
     hours).
+
+    #1804: "accelerated" is not one performance class. A card with less VRAM
+    than the engine declares it needs pages to system RAM over PCIe and renders
+    SLOWER than the same machine's CPU would — yet, judged by device family
+    alone, it was handed HALF the CPU budget. That inversion is what three 4 GB
+    reporters hit (#1226 GTX 1650 Ti, #1222 Quadro P2000, #1804 GTX 1650), all
+    on the engine that declares a 6 GB floor. Every layer already knew: routing
+    raises a caveat, the preflight toast warns, and the timeout message names
+    the card. Only the budget ignored it. So an under-provisioned accelerator
+    now floors at the CPU budget — the class of hardware it actually performs
+    like. ``min_vram_gb`` is the engine's declared floor; callers that pass
+    ``engine`` get it read off the engine automatically. Native runtimes pass
+    an explicit ``vram_gb=0`` when their dedicated-memory probe failed; that
+    unknown capacity gets the same conservative CPU-class budget without
+    claiming the card is under-provisioned in user-facing diagnostics.
     """
     base = GPU_JOB_TIMEOUT_S
     try:
         from core.device_caps import detect_host_caps
-        family = execution_device or detect_host_caps().family
+        caps = detect_host_caps()
+        family = execution_device or caps.family
+        if not min_vram_gb and engine is not None:
+            min_vram_gb = float(getattr(engine, "min_vram_gb", 0.0) or 0.0)
         if execution_device is None and engine is not None:
-            from services.engine_routing import resolve_routing
-            compat = getattr(engine, "gpu_compat", None)
-            if compat is None:
-                compat = getattr(type(engine), "gpu_compat", (family, "cpu"))
-            if tuple(compat) == ("cpu",):
-                family = "cpu"
-            else:
-                family = resolve_routing(
-                    compat, detect_host_caps(),
-                    float(getattr(engine, "min_vram_gb", 0.0) or 0.0),
-                )["effective_device"]
+            from services.engine_routing import runtime_compute_profile
+            profile = runtime_compute_profile(engine, caps)
+            family = profile["effective_device"]
+            min_vram_gb = profile["min_vram_gb"]
+            hardware_family = profile.get("runtime_hardware_family")
+            vram_gb = profile.get("runtime_vram_gb")
         universal_override = (
             _GENERATE_TIMEOUT_EXPLICIT
             or GPU_JOB_TIMEOUT_S != _CONFIGURED_GPU_JOB_TIMEOUT_S
         )
-        if family == "cpu" and not universal_override:
+        # An explicit (env-set, or runtime-changed the same way tests do)
+        # CPU budget is more specific than the universal override and always
+        # wins for CPU dispatches — see the #1787 comment above.
+        cpu_explicit = (
+            _CPU_GENERATE_TIMEOUT_EXPLICIT
+            or CPU_JOB_TIMEOUT_S != _CONFIGURED_CPU_JOB_TIMEOUT_S
+        )
+        if family == "cpu" and (cpu_explicit or not universal_override):
             base = CPU_JOB_TIMEOUT_S
+        elif not universal_override and family in (
+            "cuda", "rocm", "vulkan", "xpu",
+        ):
+            from services.engine_routing import under_provisioned_vram
+
+            runtime_family = hardware_family or family
+            unknown_dedicated_vram = (
+                min_vram_gb > 0
+                and runtime_family in ("cuda", "rocm", "xpu", "vulkan")
+                and vram_gb is not None
+                and float(vram_gb or 0.0) <= 0
+            )
+            if unknown_dedicated_vram or under_provisioned_vram(
+                caps, min_vram_gb, family=hardware_family, vram_gb=vram_gb,
+            ):
+                # `max`, never a plain assignment: an operator who raised the
+                # accelerated budget above the CPU one must not have it cut.
+                base = max(base, CPU_JOB_TIMEOUT_S)
     except Exception:
         # Device probing is advisory here; the configured universal bound is
         # still safe when a platform probe is unavailable during startup.
@@ -1050,6 +1109,7 @@ def _timeout_guidance(
     """
     family = "cuda"  # conservative default: GPU wording if the probe fails
     device_name, vram_gb = "", 0.0
+    _caps = None  # a failed probe stays None; under_provisioned_vram() reads it safely
     try:
         from core.device_caps import detect_host_caps
         _caps = detect_host_caps()
@@ -1085,7 +1145,7 @@ def _timeout_guidance(
             "compute-bound. For a durable fix try shorter text or a lighter "
             "engine (OmniVoice GGUF and Supertonic-3 are CPU-tuned). If you "
             "expect very long single generations, raise "
-            "OMNIVOICE_GENERATE_TIMEOUT_S."
+            "the compute-time budget in Settings → Performance & Device."
         )
     # #1226/#1222: two users on 4 GB cards were told, generically, that the GPU
     # "is VRAM-starved" — true, but it read as a transient contention problem
@@ -1097,11 +1157,9 @@ def _timeout_guidance(
     # a threshold applied without knowing whose job it is would confidently
     # misdiagnose most of them. And on MPS `vram_gb` is a unified-memory
     # heuristic (RAM/2), not a dedicated pool to compare against.
-    if (
-        min_vram_gb > 0
-        and family in ("cuda", "rocm")
-        and 0 < vram_gb < min_vram_gb
-    ):
+    from services.engine_routing import under_provisioned_vram
+
+    if under_provisioned_vram(_caps, min_vram_gb):
         return common + (
             f"{device_name or 'this GPU'} has {vram_gb:.1f} GB of VRAM and "
             f"this engine wants about {min_vram_gb:.0f} GB — generations here "
@@ -1109,16 +1167,18 @@ def _timeout_guidance(
             f"The durable fix is a lighter engine (OmniVoice GGUF and "
             f"Supertonic-3 are tuned for small/no GPU) or shorter text; "
             f"Flush caches / Unload the resident model (top toolbar or "
-            f"Model Catalogue → Models) frees what little headroom there is. (Raise "
-            f"OMNIVOICE_GENERATE_TIMEOUT_S if you'd rather let long "
+            f"Model Catalogue) frees what little headroom there is. (Raise "
+            f"the compute-time budget in Settings → Performance & Device if "
+            f"you'd rather let long "
             f"generations run.)"
         )
     return common + (
         "most often the GPU is VRAM-starved (a resident model and this job "
         "contend for memory). For a durable fix, Flush caches / Unload the "
-        "resident model (top toolbar or Model Catalogue → Models) before retrying, "
+        "resident model (top toolbar or Model Catalogue) before retrying, "
         "try shorter text, a lighter engine, or set the engine to CPU in "
-        "Model Catalogue → Models. (Raise OMNIVOICE_GENERATE_TIMEOUT_S for very "
+        "Model Catalogue. (Raise the compute-time budget in "
+        "Settings → Performance & Device for very "
         "long single generations.)"
     )
 
@@ -1480,14 +1540,17 @@ def get_best_device():
     # ── DirectML — universal Windows GPU (probe reports this as "cpu") ─
     # Reached only when no torch family was detected (family == "cpu"), which is
     # exactly the DirectML case — the probe classifies DirectML hosts as cpu.
-    try:
-        import torch_directml
-        if torch_directml.device_count() > 0:
-            logger.info("Using DirectML device (GPU %d)", 0)
-            return str(torch_directml.device(0))
-    except ImportError:
-        pass
+    if family == "cpu":
+        try:
+            import torch_directml
+            if torch_directml.device_count() > 0:
+                logger.info("Using DirectML device (GPU %d)", 0)
+                return str(torch_directml.device(0))
+        except ImportError:
+            # DirectML is optional; an absent package leaves CPU available.
+            pass
 
+    # Other families need an explicitly compatible loader (e.g. NPU sidecars).
     return "cpu"
 
 _COMPILE_ERR_MODULE_PREFIXES = ("torch._dynamo", "torch._inductor", "torch.fx", "triton")
@@ -2296,7 +2359,7 @@ def _load_model_sync():
                 # gigabytes for the same result, once per generate request.
                 raise RuntimeError(
                     f"The {asset_label} files for {repair_checkpoint} are damaged and a "
-                    "re-download did not fix them. Open Model Catalogue → Models, "
+                    "re-download did not fix them. Open the engine's Weights list in Model Catalogue, "
                     "delete the VoiceStudio TTS model, and install it again."
                     f"{_manual_cache_delete_hint(repair_checkpoint)}"
                 ) from exc
@@ -2327,7 +2390,7 @@ def _load_model_sync():
                     raise
                 raise RuntimeError(
                     f"The {asset_label} files for {repair_checkpoint} are still damaged "
-                    "after being re-downloaded. Open Model Catalogue → Models, "
+                    "after being re-downloaded. Open the engine's Weights list in Model Catalogue, "
                     "delete the VoiceStudio TTS model, and install it again."
                     f"{_manual_cache_delete_hint(repair_checkpoint)}"
                 ) from exc2
@@ -2383,7 +2446,7 @@ def _load_model_sync():
                             f"The TTS model cache for {checkpoint} is incomplete "
                             "(weights missing — usually an interrupted download)."
                             f"{_repair_failure_detail()} "
-                            "Open Model Catalogue → Models, delete the VoiceStudio TTS model, "
+                            "Open the engine's Weights list in Model Catalogue, delete the VoiceStudio TTS model, "
                             f"and install it again.{_manual_cache_delete_hint(checkpoint)}"
                         ) from e
                     _set_loading("loading_weights", f"Loading TTS weights on {device}…")
@@ -2417,13 +2480,13 @@ def _load_model_sync():
                                 raise RuntimeError(
                                     f"The TTS model cache for {checkpoint} is incomplete and "
                                     f"could not be auto-repaired.{_repair_failure_detail()} "
-                                    "Open Model Catalogue → Models, delete the VoiceStudio TTS model, "
+                                    "Open the engine's Weights list in Model Catalogue, delete the VoiceStudio TTS model, "
                                     f"and install it again.{_manual_cache_delete_hint(checkpoint)}"
                                 ) from e2
                         else:
                             raise RuntimeError(
                                 f"The TTS model cache for {checkpoint} is incomplete and "
-                                "could not be auto-repaired. Open Model Catalogue → Models, delete "
+                                "could not be auto-repaired. Open the engine's Weights list in Model Catalogue, delete "
                                 "the VoiceStudio TTS model, and install it again."
                                 f"{_manual_cache_delete_hint(checkpoint)}"
                             ) from e2
@@ -2449,7 +2512,7 @@ def _load_model_sync():
                     raise
                 raise RuntimeError(
                     "The transcription model's files are damaged. Open "
-                    "Model Catalogue → Models, delete the transcription (ASR) model, "
+                    "the engine's Weights list in Model Catalogue, delete the transcription (ASR) model, "
                     "and install it again; or set OMNIVOICE_PRELOAD_TTS_ASR=0 "
                     "to stop preloading it alongside TTS."
                 ) from asr_exc

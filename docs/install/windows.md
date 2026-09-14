@@ -300,3 +300,35 @@ See [docs/setup/huggingface-token.md](../setup/huggingface-token.md).
 ## Troubleshooting
 
 Hit a wall? See [docs/install/troubleshooting.md](troubleshooting.md).
+
+### Building the current-user MSI
+
+Build the system MSI first. `scripts/render-per-user-wix.py` requires
+`--system-wxs` pointing to its fully rendered `release/wix/x64/main.wxs`,
+in addition to the canonical `--source` template and `--output` destination.
+The renderer preserves Tauri resource destinations while assigning distinct,
+stable per-user component identities, HKCU registry keypaths, and uninstall
+cleanup for nested resource folders. Missing or unrendered resources fail the
+build. The canonical system installer retains its per-machine authoring.
+
+The per-user build reuses the system build's frontend output: its config clears
+`beforeBuildCommand` so a second Vite build cannot replace the hashed files
+referenced by the rendered WiX template. Keep using `tauri build` for the
+per-user stage; it still recompiles the shell with its own product configuration.
+
+CI builds both scopes with a tiny executable, an external helper, and nested
+resources using the CLI version locked in `bun.lock`. Its frontend-like build
+hook rotates resource filenames, verifying the per-user build preserves the
+system build's resource snapshot. The Windows MSI authoring
+job runs after the test suite and preserves verbose WiX logs and rendered XML.
+For focused diagnosis, dispatch CI with `windows_wix_diagnostic=true`; it skips
+the other jobs and never signs, publishes, or installs the fixture bundles.
+
+The release smoke installs and removes the current-user MSI using a standard
+Windows account. On disposable GitHub-hosted Windows Server runners, it explicitly
+allows unmanaged MSI installations for the duration of this test, then restores
+the previous Installer policy value and type (or its absence), even on failure.
+This test-host preparation does not change installer privileges or user machines.
+Verbose MSI logs are printed if installation or removal fails. The Windows CI
+job also rejects an invalid MSI and verifies policy absence, value types, account
+cleanup, and verbose failure logs using Windows PowerShell 5.1.

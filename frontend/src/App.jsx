@@ -1,3 +1,4 @@
+import { firstSoundRequest } from './utils/firstSound';
 import React, {
   useState,
   useRef,
@@ -44,7 +45,7 @@ import NavRail from './components/NavRail';
 import TitleTabs from './components/TitleTabs';
 import WorkspaceHistory from './components/WorkspaceHistory';
 import WorkspaceVoices from './components/WorkspaceVoices';
-import WorkspaceProjects from './components/WorkspaceProjects';
+import DubWorkspaceSidebar from './components/DubWorkspaceSidebar';
 import ErrorBoundary from './components/ErrorBoundary';
 import FloatingPill from './components/FloatingPill';
 import GlobalAudioPlayer from './components/GlobalAudioPlayer';
@@ -121,7 +122,11 @@ function App() {
   // publishes progress via the `bootstrap_status` Tauri command. Hook below
   // polls every 1 s; until `ready`, we render BootstrapSplash instead of the
   // normal app shell, so the user sees real progress instead of a hung UI.
-  const { stage: bootstrapStage, message: bootstrapMessage } = useBootstrapStage();
+  const {
+    stage: bootstrapStage,
+    message: bootstrapMessage,
+    attempt: bootstrapAttempt,
+  } = useBootstrapStage();
   // Read once, like api/client.ts. Saving or disabling a remote backend reloads
   // the app, so this value and API's module-level base always move together.
   const [remoteBackend] = useState(() => configuredRemoteBackend());
@@ -187,6 +192,7 @@ function App() {
 
   const locale = useAppStore((s) => s.locale);
   const font = useAppStore((s) => s.font);
+  const reduceMotion = useAppStore((s) => s.reduceMotion);
 
   // Hydrate the theme, locale & font so persisted preferences take effect after
   // zustand persist rehydrates (async from localStorage) and when the user
@@ -197,6 +203,14 @@ function App() {
     } else {
       document.documentElement.removeAttribute('data-theme');
     }
+    // Same reason as the theme above: a persisted preference has to be
+    // re-applied after zustand rehydrates, or the toggle reads as on while
+    // the app animates (#1857).
+    if (reduceMotion) {
+      document.documentElement.setAttribute('data-motion', 'reduce');
+    } else {
+      document.documentElement.removeAttribute('data-motion');
+    }
     if (locale) {
       i18n.changeLanguage(locale);
     }
@@ -205,7 +219,7 @@ function App() {
     const fontStack = FONT_STACKS[font];
     if (fontStack) document.documentElement.style.setProperty('--font-sans', fontStack);
     else document.documentElement.style.removeProperty('--font-sans');
-  }, [locale, theme, font]);
+  }, [locale, theme, font, reduceMotion]);
   const mode = useAppStore((s) => s.mode);
   const setMode = useAppStore((s) => s.setMode);
   // "Define voice" method inside the Voice (studio) workspace — replaces the
@@ -300,7 +314,7 @@ function App() {
     mode === 'settings' ||
     mode === 'voice' ||
     mode === 'donate' ||
-    mode === 'queue' ||
+    mode === 'batch' ||
     mode === 'tools' ||
     mode === 'projects' ||
     mode === 'gallery' ||
@@ -398,6 +412,7 @@ function App() {
     setPendingTrimFile,
     isGenerating,
     generationTime,
+    generationProgress,
     textAreaRef,
     ingestRefAudio,
     insertTag,
@@ -453,6 +468,7 @@ function App() {
   // ═══ MIC RECORDING ═══
   const {
     isRecording,
+    isStartingRecording,
     isCleaning,
     recordingTime,
     audioInputs,
@@ -698,16 +714,10 @@ function App() {
     if (!pending) return;
     (async () => {
       try {
-        const fd = new FormData();
-        fd.append('text', i18n.t('firstrun.first_sound_text'));
-        // Functional model prompt (not user-facing copy) — keeps the demo
-        // voice warm without depending on seeded profiles.
-        fd.append('instruct', 'A warm, friendly narrator voice, medium pace');
-        fd.append('num_step', '16');
-        const res = await apiFetch(`${API}/generate`, {
-          method: 'POST',
-          body: fd,
-        });
+        const res = await apiFetch(
+          `${API}/generate`,
+          firstSoundRequest(i18n.t('firstrun.first_sound_text')),
+        );
         const blob = await res.blob();
         await playBlobAudio(blob, { label: i18n.t('player.generated_audio') });
         toast.success(i18n.t('firstrun.first_sound_done'), { duration: 7000 });
@@ -1258,7 +1268,11 @@ function App() {
   if (!remoteBackend && bootstrapStage === 'awaiting_setup') {
     return (
       <div className="app-bootstrap-scale" style={{ '--ui-scale': effectiveUiScale }}>
-        <BootstrapSplash stage={bootstrapStage} message={bootstrapMessage} />
+        <BootstrapSplash
+          stage={bootstrapStage}
+          message={bootstrapMessage}
+          attempt={bootstrapAttempt}
+        />
       </div>
     );
   }
@@ -1271,22 +1285,27 @@ function App() {
   if (!setupChecked || !storeHydrated) {
     return (
       <div className="app-bootstrap-scale" style={{ '--ui-scale': effectiveUiScale }}>
-        <BootstrapSplash stage={bootstrapStage} message={bootstrapMessage} />
-      </div>
-    );
-  }
-  if (remoteFailure) {
-    return (
-      <div className="app-bootstrap-scale" style={{ '--ui-scale': effectiveUiScale }}>
-        <RemoteBackendRecovery
-          failure={remoteFailure}
-          onRetry={retryRemoteBackend}
-          onOpenSettings={openRemoteBackendSettings}
+        <BootstrapSplash
+          stage={bootstrapStage}
+          message={bootstrapMessage}
+          attempt={bootstrapAttempt}
         />
       </div>
     );
   }
-  if (!uiScaleConfigured && backendReady) {
+
+  // Legibility comes before everything the backend gates. UiScaleSetup makes
+  // no backend calls at all — it is a client-side zoom — but it used to wait
+  // for `backendReady`, so on a clean first run the user watched the entire
+  // bootstrap (and answered the macOS Accessibility prompt) at whatever size
+  // the app guessed, and was offered the size control only once all of that
+  // had finished (#1849). Asking first costs one screen and makes the rest of
+  // first-run readable.
+  //
+  // Still after the hydration guard above: `uiScaleConfigured` lives in the
+  // store, and reading it before hydration would flash this screen at someone
+  // who had already set their scale.
+  if (!uiScaleConfigured) {
     return (
       <div className="app-wizard-wrap" style={{ '--ui-scale': effectiveUiScale }}>
         <div data-tauri-drag-region className="app-wizard-dragstrip" />
@@ -1298,6 +1317,17 @@ function App() {
             setUiScalePreviewed={setUiScalePreviewed}
           />
         </Suspense>
+      </div>
+    );
+  }
+  if (remoteFailure) {
+    return (
+      <div className="app-bootstrap-scale" style={{ '--ui-scale': effectiveUiScale }}>
+        <RemoteBackendRecovery
+          failure={remoteFailure}
+          onRetry={retryRemoteBackend}
+          onOpenSettings={openRemoteBackendSettings}
+        />
       </div>
     );
   }
@@ -1347,7 +1377,11 @@ function App() {
   if (!backendReady) {
     return (
       <div className="app-bootstrap-scale" style={{ '--ui-scale': effectiveUiScale }}>
-        <BootstrapSplash stage={bootstrapStage} message={bootstrapMessage} />
+        <BootstrapSplash
+          stage={bootstrapStage}
+          message={bootstrapMessage}
+          attempt={bootstrapAttempt}
+        />
       </div>
     );
   }
@@ -1474,7 +1508,7 @@ function App() {
               />
             </Suspense>
           </ErrorBoundary>
-        ) : mode === 'queue' ? (
+        ) : mode === 'batch' ? (
           <ErrorBoundary name="batch-queue">
             <Suspense fallback={<LazyFallback />}>
               <BatchQueue onBack={() => setMode('launchpad')} />
@@ -1581,19 +1615,6 @@ function App() {
           <div
             className={`studio-with-history ${dubStep === 'idle' ? '' : 'studio-with-history--editing'}`}
           >
-            {dubStep === 'idle' && (
-              <div className="studio-projects">
-                <WorkspaceProjects
-                  projects={studioProjects}
-                  activeProjectId={activeProjectId}
-                  canSave={false}
-                  saveProject={saveProject}
-                  loadProject={loadProject}
-                  deleteProject={deleteProject}
-                  renameProject={renameProject}
-                />
-              </div>
-            )}
             <div className="studio-with-history__main">
               <ErrorBoundary name="dub">
                 <Suspense fallback={<LazyFallback />}>
@@ -1657,13 +1678,11 @@ function App() {
                 </Suspense>
               </ErrorBoundary>
             </div>
-            {/* Dub home: the Projects + History landing shows only when no project
-              is being edited. Opening/creating one switches to the full-width
-              editor (dubStep !== 'idle'). */}
-            {dubStep === 'idle' && (
+            {/* Keep the start screen focused after a source or project is selected.
+                The combined library rail is only part of the pristine Dub landing. */}
+            {dubStep === 'idle' && !dubVideoFile && !dubJobId && !activeProjectId && (
               <div className="studio-right">
-                <WorkspaceHistory
-                  variant="dub"
+                <DubWorkspaceSidebar
                   dubHistory={dubHistory}
                   restoreDubHistory={restoreDubHistory}
                   deleteHistory={deleteHistory}
@@ -1686,6 +1705,7 @@ function App() {
                 handlePreviewVoice={handlePreviewVoice}
                 handleUnlockProfile={handleUnlockProfile}
                 openVoiceProfile={openVoiceProfile}
+                selectionDisabled={isStartingRecording || isRecording}
                 onOpenVoicePreview={(profileId) => {
                   setVoicePreviewProfileId(profileId || '');
                   setIsVoicePreviewOpen(true);
@@ -1738,6 +1758,7 @@ function App() {
                     showSaveProfile={showSaveProfile}
                     setShowSaveProfile={setShowSaveProfile}
                     isRecording={isRecording}
+                    isStartingRecording={isStartingRecording}
                     isCleaning={isCleaning}
                     recordingTime={recordingTime}
                     audioInputs={audioInputs}
@@ -1750,6 +1771,7 @@ function App() {
                     setVdStates={setVdStates}
                     isGenerating={isGenerating}
                     generationTime={generationTime}
+                    generationProgress={generationProgress}
                     applyPreset={applyPreset}
                     insertTag={insertTag}
                     handleSelectProfile={handleSelectProfile}
@@ -1800,6 +1822,7 @@ function App() {
           saveProject={saveProject}
           loadProject={loadProject}
           deleteProject={deleteProject}
+          renameProject={renameProject}
           handleSelectProfile={handleSelectProfile}
           handleDeleteProfile={handleDeleteProfile}
           handleOpenVoiceProfile={openVoiceProfile}

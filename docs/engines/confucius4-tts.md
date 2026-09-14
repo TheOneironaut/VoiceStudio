@@ -25,6 +25,18 @@ is an LLM-based multilingual / cross-lingual zero-shot voice-cloning TTS.
 Like IndexTTS-2 / MOSS-TTS-v1.5 / dots.tts, it runs in its **own subprocess venv**
 so its dependency stack never touches the default VoiceStudio interpreter.
 
+## One-click install
+
+**Model Catalogue → Confucius4-TTS → Install** does the steps below
+for you, on Windows, Linux and macOS. It installs into its own folder under VoiceStudio's data directory, with its own Python environment. Nothing it installs touches VoiceStudio itself or any other engine, so you can switch to it and back without breaking what already worked. **Uninstall** in the same row removes only that folder. On an NVIDIA machine it installs
+the CUDA build of PyTorch; elsewhere it installs the CPU build. The ~5 GB of
+weights still download on first synthesis.
+
+The first synthesis downloads the weights, which takes a while on a slow
+connection. The generation stays alive while the download makes progress;
+if a stalled download runs out of time, raise the compute-time budget in
+**Settings → Performance & Device** and try again.
+
 ## Install
 
 ```bash
@@ -56,7 +68,7 @@ Then point VoiceStudio at the clone and restart:
 - **macOS/Linux:** `export OMNIVOICE_CONFUCIUS4_TTS_DIR=/path/to/Confucius4-TTS`
 - **Windows (PowerShell):** `[Environment]::SetEnvironmentVariable("OMNIVOICE_CONFUCIUS4_TTS_DIR","C:\path\to\Confucius4-TTS","User")`
 
-Select **Confucius4-TTS** in Model Catalogue → Engines. The first synthesize triggers
+Select **Confucius4-TTS** in Model Catalogue (TTS tab → **Use**). The first synthesis triggers
 the weight downloads above, then generates.
 
 ### Optional overrides
@@ -88,3 +100,13 @@ sr = model.sample_rate  # 22050
 - ✅ **Sidecar logic unit-tested** (`tests/test_confucius4_sidecar.py`):
   language normalization, tensor→PCM (mono/stereo/clip), config-path
   resolution, clone sys.path injection, wire framing, synthesize dispatch.
+
+## Accelerator routing
+
+The sidecar passes a runtime-available CUDA/ROCm, XPU, or registered NPU
+through upstream's device-aware model loading. The engine venv needs a matching
+PyTorch/vendor runtime, also noted in the catalogue install hint. XPU/NPU selection is covered by mocked loader and routing
+tests; this change does not certify synthesis on physical XPU/NPU hardware.
+MPS keeps the existing CPU fallback described in the validation record above.
+If modern accelerator detection or the legacy CUDA probe raises, loading falls
+back to CPU instead of aborting before model construction.

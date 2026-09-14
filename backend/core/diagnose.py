@@ -28,6 +28,7 @@ import shutil
 import sys
 
 from core.config import DATA_DIR
+from core.device_caps import KERNEL_RISK_MARKER
 from core.scrub import scrub_text
 from core.version import APP_VERSION
 
@@ -189,7 +190,7 @@ def _check_ram() -> dict:
 def _check_engines() -> dict:
     try:
         from services.tts_backend import list_backends, active_backend_id
-        backends = list_backends()
+        backends = list_backends(include_hidden=True)
         active = active_backend_id()
     except Exception as e:
         return _check("engines", "TTS engines", WARN, f"could not enumerate: {e}")
@@ -230,11 +231,16 @@ def _check_gpu_routing() -> dict:
     host = v.get("host_family", "cpu")
 
     if status == "accelerated":
-        if reason:  # driver/arch caveat — accelerated but at risk
+        if reason and KERNEL_RISK_MARKER in reason:  # driver/arch caveat — at risk
             return _check("gpu_routing", "GPU routing", WARN,
                           f"{engine} -> {dev}: {reason}",
                           "The GPU is selected but may fail at kernel launch — "
                           "update drivers / reinstall torch for this GPU arch.")
+        if reason:  # low-VRAM caveat — not a driver/arch issue
+            return _check("gpu_routing", "GPU routing", WARN,
+                          f"{engine} -> {dev}: {reason}",
+                          "Unload other models before generating, keep the text "
+                          "short, or pick a lighter engine.")
         return _check("gpu_routing", "GPU routing", OK, f"{engine} -> {dev} (accelerated)")
     if status == "cpu_fallback":
         return _check("gpu_routing", "GPU routing", WARN,
@@ -374,7 +380,12 @@ def run_diagnostics(include_network: bool = True, deep: bool = False) -> dict:
         try:
             module = importlib.import_module(f"services.{family}_backend")
             active = module.active_backend_id()
-            row = next((item for item in module.list_backends() if item.get("id") == active), None)
+            rows = (
+                module.list_backends(include_hidden=True)
+                if family == "tts"
+                else module.list_backends()
+            )
+            row = next((item for item in rows if item.get("id") == active), None)
             if row is not None:
                 engine_execution.append({
                     "family": family,

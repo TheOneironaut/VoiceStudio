@@ -12,7 +12,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::config::{load_config, save_config};
 use crate::dictation_shortcut::{update_tray_hint, DictationShortcutManager, ShortcutInfo};
-use crate::{AppFlags, TrayHandle};
+use crate::{AppFlags, CaptureAcceptanceTimeout, CaptureReceiptCancellation, TrayHandle};
 use crate::{TRAY_ICON_DEFAULT, TRAY_ICON_RECORDING};
 
 // ── Native host-path authorization ───────────────────────────────────────
@@ -30,9 +30,41 @@ pub struct AuthorizedPathSelection {
     path: String,
 }
 
+/// Directory for one-shot host-path capability files (and the
+/// paired `revealed-paths` ledger) — must agree with what the *running
+/// backend* resolves in `backend/core/path_authorization.py`, since the
+/// backend is what reads these tokens back over loopback HTTP.
+///
+/// Prefers the backend's own advertised `data_dir` (`GET /system/info`, see
+/// `backend::backend_data_dir`) so the two processes cannot disagree; falls
+/// back to Tauri's own resolution (`setup::resolved_data_dir` / historical
+/// behavior) when the backend isn't reachable yet, e.g. very early startup.
+/// See #1781 for the split this closes: a dev backend spawned without
+/// `OMNIVOICE_*` env, or a custom data folder / portable mode applied after
+/// the backend already started, previously left Tauri writing capability
+/// files the backend could never find, 403ing every export.
 pub fn path_authorization_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
-    crate::setup::resolved_data_dir(app)
-        .unwrap_or_else(crate::setup::default_data_dir)
+    authorization_dir_from(crate::backend::backend_data_dir(crate::backend_port()), || {
+        crate::setup::resolved_data_dir(app).unwrap_or_else(crate::setup::default_data_dir)
+    })
+}
+
+/// The resolution rule itself, with the two inputs passed in rather than
+/// fetched, so it is unit-testable without an `AppHandle`.
+///
+/// Constructing one in a test (`tauri::test::mock_builder`) aborts the whole
+/// test binary on the Windows CI runner — it exits before the harness prints
+/// a single line — and nothing else in this crate builds a Tauri app in a
+/// unit test. Keeping the decision in a plain function means the branch that
+/// matters for #1781 is covered on every platform, and the wrapper above is
+/// left as two argument expressions with no logic of its own.
+fn authorization_dir_from(
+    advertised: Option<String>,
+    tauri_fallback: impl FnOnce() -> PathBuf,
+) -> PathBuf {
+    advertised
+        .map(PathBuf::from)
+        .unwrap_or_else(tauri_fallback)
         .join(".path-authorizations")
 }
 
@@ -260,6 +292,54 @@ mod host_path_authorization_tests {
         assert!(
             validate_host_path("dub_export", parent.join("missing-directory/export.wav"),).is_err()
         );
+    }
+
+    /// Regression for #1781: a native save dialog succeeded and Tauri wrote
+    /// the one-shot capability file, but the backend 403'd every export
+    /// because it scanned a DIFFERENT `.path-authorizations` directory (its
+    /// own `DATA_DIR`, resolved independently — e.g. the dev backend spawned
+    /// without `OMNIVOICE_*` env, or a custom data folder / portable mode
+    /// applied after the backend already started). When a backend is
+    /// reachable, its advertised `data_dir` must win so the two processes
+    /// are structurally unable to disagree.
+    ///
+    /// Exercised through `authorization_dir_from` rather than
+    /// `path_authorization_dir`: the wrapper needs an `AppHandle`, and
+    /// building one in a unit test aborts the entire test binary on the
+    /// Windows runner. The HTTP side (`backend::backend_data_dir`, including
+    /// its absolute-path filter) has its own tests in `backend.rs`.
+    #[test]
+    fn prefers_the_running_backends_advertised_data_dir() {
+        // Platform-appropriate absolute fixture: a Unix-style path is NOT
+        // absolute on Windows (no drive prefix), and `PathBuf::join`
+        // normalizes separators per platform.
+        #[cfg(windows)]
+        let advertised = r"C:\backend\advertised\data";
+        #[cfg(not(windows))]
+        let advertised = "/backend/advertised/data";
+
+        let dir = super::authorization_dir_from(Some(advertised.to_string()), || {
+            panic!("must not fall back to Tauri's resolution while a backend advertises a dir")
+        });
+
+        assert_eq!(
+            dir,
+            PathBuf::from(advertised).join(".path-authorizations"),
+            "must write into the backend's own data_dir, not Tauri's independent resolution"
+        );
+    }
+
+    /// When no backend answers (unreachable, not started yet, or advertising
+    /// something unusable), the resolver must fall back to Tauri's own
+    /// resolution — the pre-#1781 behavior — rather than erroring or writing
+    /// somewhere unpredictable.
+    #[test]
+    fn falls_back_to_tauris_own_resolution_when_the_backend_is_unreachable() {
+        let fallback = std::env::temp_dir().join("voicestudio-fallback-fixture");
+
+        let dir = super::authorization_dir_from(None, || fallback.clone());
+
+        assert_eq!(dir, fallback.join(".path-authorizations"));
     }
 }
 
@@ -926,12 +1006,145 @@ pub fn get_effective_dictation_shortcut(
 }
 
 #[tauri::command]
-pub fn request_dictation_capture(app: tauri::AppHandle, action: String) -> Result<(), String> {
+pub async fn request_dictation_capture(
+    app: tauri::AppHandle,
+    action: String,
+) -> Result<(), String> {
     if action != "start" && action != "stop" && action != "toggle" {
         return Err("capture action must be start, stop, or toggle".into());
     }
-    crate::dispatch_dictation_capture(&app, &action);
-    Ok(())
+    let delivery_id = crate::request_dictation_capture_delivery(&app, &action)
+        .ok_or_else(|| "capture request could not be queued".to_string())?;
+    let wait_app = app.clone();
+    let mut acknowledged = tauri::async_runtime::spawn_blocking(move || {
+        wait_for_capture_delivery(
+            || {
+                let flags = wait_app.state::<AppFlags>();
+                let capture = flags
+                    .capture
+                    .lock()
+                    .map_err(|_| "Dictation capture state lock poisoned".to_string())?;
+                Ok(capture.delivery_pending(delivery_id))
+            },
+            CAPTURE_DELIVERY_TIMEOUT,
+        )
+    })
+    .await
+    .map_err(|error| format!("capture acknowledgement worker failed: {error}"))??;
+    if !acknowledged {
+        let flags = app.state::<AppFlags>();
+        let timeout_outcome = flags
+            .capture
+            .lock()
+            .map_err(|_| "Dictation capture state lock poisoned".to_string())?
+            .cancel_unreceived_delivery(delivery_id);
+        match timeout_outcome {
+            CaptureReceiptCancellation::Received => acknowledged = true,
+            CaptureReceiptCancellation::Cancelled(event) => {
+                if event.name == "tray-dictate" {
+                    flags.output.finish_session(event.payload.session_id);
+                }
+                return Err("capture window did not acknowledge the request".into());
+            }
+            CaptureReceiptCancellation::Missing => {
+                return Err("capture request disappeared before acknowledgement".into());
+            }
+        }
+    }
+    debug_assert!(acknowledged);
+
+    let outcome_app = app.clone();
+    let completed = tauri::async_runtime::spawn_blocking(move || {
+        wait_for_capture_delivery(
+            || {
+                let flags = outcome_app.state::<AppFlags>();
+                let capture = flags
+                    .capture
+                    .lock()
+                    .map_err(|_| "Dictation capture state lock poisoned".to_string())?;
+                Ok(!capture.completion_ready(delivery_id))
+            },
+            CAPTURE_ACCEPTANCE_TIMEOUT,
+        )
+    })
+    .await
+    .map_err(|error| format!("capture acceptance worker failed: {error}"))??;
+
+    let flags = app.state::<AppFlags>();
+    if completed {
+        let completion = flags
+            .capture
+            .lock()
+            .map_err(|_| "Dictation capture state lock poisoned".to_string())?
+            .take_completion(delivery_id);
+        return completion
+            .unwrap_or_else(|| Err("capture request completed without an outcome".into()));
+    }
+    let timeout_outcome = flags
+        .capture
+        .lock()
+        .map_err(|_| "Dictation capture state lock poisoned".to_string())?
+        .take_completion_or_cancel(delivery_id);
+    match timeout_outcome {
+        CaptureAcceptanceTimeout::Completed(completion) => return completion,
+        CaptureAcceptanceTimeout::Cancelled(event) if event.name == "tray-dictate" => {
+            flags.output.finish_session(event.payload.session_id);
+        }
+        CaptureAcceptanceTimeout::Cancelled(_) | CaptureAcceptanceTimeout::Missing => {}
+    }
+    Err("dictation capture did not start in time".into())
+}
+
+const CAPTURE_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const CAPTURE_ACCEPTANCE_TIMEOUT: Duration = Duration::from_secs(60);
+const CAPTURE_DELIVERY_POLL: Duration = Duration::from_millis(20);
+
+fn wait_for_capture_delivery<F>(mut pending: F, timeout: Duration) -> Result<bool, String>
+where
+    F: FnMut() -> Result<bool, String>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !pending()? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(CAPTURE_DELIVERY_POLL);
+    }
+}
+
+#[cfg(test)]
+mod capture_request_tests {
+    use super::wait_for_capture_delivery;
+    use std::time::Duration;
+
+    #[test]
+    fn listener_acknowledgement_completes_the_request() {
+        let mut polls = 0;
+        let acknowledged = wait_for_capture_delivery(
+            || {
+                polls += 1;
+                Ok(polls < 2)
+            },
+            Duration::from_millis(50),
+        )
+        .expect("poll succeeds");
+
+        assert!(acknowledged);
+    }
+
+    #[test]
+    fn missing_listener_acknowledgement_times_out() {
+        let acknowledged = wait_for_capture_delivery(
+            || Ok(true),
+            Duration::from_millis(0),
+        )
+        .expect("poll succeeds");
+
+        assert!(!acknowledged);
+    }
 }
 
 /// Distance from the bottom edge of the work area, in logical pixels — clear of
@@ -1082,13 +1295,28 @@ pub fn acknowledge_dictation_capture_delivery(
     app: tauri::AppHandle,
     registration_id: u64,
     delivery_id: u64,
+) -> bool {
+    let flags = app.state::<AppFlags>();
+    let Ok(mut capture) = flags.capture.lock() else {
+        log::warn!("Dictation capture state lock poisoned");
+        return false;
+    };
+    capture.acknowledge(registration_id, delivery_id)
+}
+
+#[tauri::command]
+pub fn complete_dictation_capture_delivery(
+    app: tauri::AppHandle,
+    registration_id: u64,
+    delivery_id: u64,
+    error: Option<String>,
 ) {
     let flags = app.state::<AppFlags>();
     let Ok(mut capture) = flags.capture.lock() else {
         log::warn!("Dictation capture state lock poisoned");
         return;
     };
-    capture.acknowledge(registration_id, delivery_id);
+    capture.complete(registration_id, delivery_id, error);
 }
 
 #[tauri::command]

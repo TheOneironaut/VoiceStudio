@@ -540,12 +540,30 @@ _DUB_SOURCE_LANG_CODES = frozenset({
 
 
 def _source_lang_override(value: str | None) -> str | None:
-    """Normalize a user-selected source language; auto/und means detect."""
+    """Normalize a user-selected source language; auto/und means detect.
+
+    A rejection NAMES the code it rejected. "Invalid source language code" on
+    its own cannot be acted on or reported usefully: it does not say which of
+    the ninety-odd codes was wrong, so neither the user nor a maintainer
+    reading the auto-filed issue can tell whether the picker offered something
+    the backend does not accept, or a stale preference from an older build is
+    still being sent (#1960).
+
+    The value is a language code the user chose from a menu — not private
+    data — and the neighbouring engine validator already echoes its input the
+    same way.
+    """
     code = (value or "").strip().lower()
     if code in {"", "auto", "und"}:
         return None
     if code not in _DUB_SOURCE_LANG_CODES:
-        raise HTTPException(status_code=400, detail="Invalid source language code")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid source language code: {code!r}. Pick a language from "
+                "the Dubbing source-language menu, or leave it on auto-detect."
+            ),
+        )
     return code
 
 
@@ -714,7 +732,7 @@ _prep_event_helper = dub_pipeline.prep_event  # alias; we keep the module-local 
 #: into one reference, which is how "made up" clone voices happen).
 CLONE_SKIP_HEURISTIC_MSG = (
     "auto voice cloning skipped: speaker labels are gap-based estimates — "
-    "set up diarization (Model Catalogue → Models → pyannote) for per-speaker clones"
+    "set up diarization (Model Catalogue → Other weights → pyannote) for per-speaker clones"
 )
 
 
@@ -1486,7 +1504,7 @@ async def dub_transcribe_stream(
                         f"unavailable, so the ASR engine's built-in speaker "
                         f"turns were used and the detected count may differ "
                         f"from the {num_speakers} you set. Set up diarization "
-                        f"(Model Catalogue → Models → pyannote) to enforce an exact "
+                        f"(Model Catalogue → Other weights → pyannote) to enforce an exact "
                         f"speaker count."
                     )
                 return resplit, {

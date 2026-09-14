@@ -58,7 +58,7 @@ _PLACEHOLDER_ALLOWLIST = {
 
 # Engine brand names that must never appear in a status string covering work a
 # *different* engine may be doing. ASR and TTS are both user-selectable
-# (Model Catalogue → Models), so "Transcribing with Whisper…" was a lie for anyone on
+# (the engine's Weights list in Model Catalogue), so "Transcribing with Whisper…" was a lie for anyone on
 # Parakeet or a transformers pipeline (#1352). Latin spellings only — several
 # locales transliterate ("ウィスパー", "Bisikan", "الهمس"), which no practical
 # pattern catches; the keys below are checked in every locale anyway, so the
@@ -99,10 +99,10 @@ _ENGINE_AGNOSTIC_KEYS = (
 # Never raise one: if this fails after adding en.json keys, add the keys to
 # every locale (translated) in the same change instead.
 _MISSING_BASELINE = {
-    "ar": 493, "de": 493, "es": 493, "fr": 493, "hi": 493, "id": 493,
-    "it": 493, "ja": 493, "ko": 493, "nl": 493, "pl": 493, "pt": 493,
-    "ru": 493, "sv": 493, "th": 493, "tr": 493, "uk": 493, "vi": 493,
-    "zh-CN": 486, "zh-TW": 493,
+    "ar": 475, "de": 475, "es": 475, "fr": 475, "hi": 475, "id": 475,
+    "it": 475, "ja": 475, "ko": 0, "nl": 475, "pl": 475, "pt": 475,
+    "ru": 475, "sv": 475, "th": 475, "tr": 475, "uk": 475, "vi": 475,
+    "zh-CN": 0, "zh-TW": 475,
 }
 
 #: Keys every locale must carry regardless of the aggregate ratchet above.
@@ -113,9 +113,22 @@ _MISSING_BASELINE = {
 #: delivery IS the Wayland default, so leaving it English broke that path for
 #: every non-English Linux user (#1610 review).
 _REQUIRED_IN_EVERY_LOCALE = (
+    "common.error",
+    "bootstrap.retry",
+    "firstrun.hf_token_saved",
     "capture.copied",
     "capture.inserted",
     "capture.pasted",
+    "dub.autofit_quality",
+    "engines.inMemory",
+    "models.role_llm",
+    "models.role_tts",
+    "models.role_asr",
+    "player.pause",
+    "player.play",
+    "settings.hf_source_app_label",
+    "settings.hf_source_cli_label",
+    "settings.hf_source_env_label",
 )
 
 
@@ -336,7 +349,7 @@ def test_engine_agnostic_labels_name_no_engine(locale):
     """A stage label must not name the engine that happens to implement it.
 
     The dub overlay said "Transcribing with Whisper…" in all 21 languages while
-    ASR is a Model Catalogue → Models choice, so anyone on Parakeet or a transformers
+    ASR is a Model Catalogue choice, so anyone on Parakeet or a transformers
     pipeline was told the wrong engine was running — and a user debugging a slow
     or failing transcription would go read Whisper's docs (#1352, thanks
     @paoloantinori!). The same trap is one line away for any future stage label,
@@ -427,7 +440,23 @@ def test_every_locale_carries_the_user_facing_dictation_status(locale, key):
         f"{locale}.json is missing {key!r} — users on that locale see the raw key "
         f"or the English string"
     )
-    assert value != english, (
+    # Standard model acronyms and product/CLI names are shared across locales.
+    assert key in {
+        "models.role_llm", "models.role_tts", "models.role_asr",
+        "settings.hf_source_cli_label",
+    } or value != english, (
         f"{locale}.json copies the English {key!r} verbatim ({english!r}); "
         f"translate it or the ratchet is measuring nothing"
     )
+
+
+@pytest.mark.parametrize("locale", sorted(_MISSING_BASELINE))
+def test_dub_plan_actions_and_explanations_are_translated(locale):
+    with open(os.path.join(_LOCALES_DIR, f"{locale}.json"), encoding="utf-8") as source:
+        segment = json.load(source)["segment"]
+    for key in (
+        "plan_apply", "plan_apply_title", "plan_impossible",
+        "plan_impossible_title", "plan_tight", "plan_tight_title",
+    ):
+        assert segment.get(key), f"{locale}: missing segment.{key}"
+        assert segment[key] != _load("en")["segment"][key]

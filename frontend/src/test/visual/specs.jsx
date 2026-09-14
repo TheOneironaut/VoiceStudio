@@ -11,6 +11,17 @@
 // ─────────────────────────────────────────────────────────────────
 
 import React from 'react';
+import DubSegmentTable from '../../components/DubSegmentTable.jsx';
+import DubWorkspaceSidebar from '../../components/DubWorkspaceSidebar.jsx';
+import DubSelectionToolbar from '../../components/dub/DubSelectionToolbar.jsx';
+import IdleSkeleton from '../../components/dub/IdleSkeleton.jsx';
+import i18n from '../../i18n';
+import WaveformTimeline from '../../components/WaveformTimeline.jsx';
+import DubWorkspaceFixture from './DubWorkspaceFixture.jsx';
+import '../../components/dub/DubRightColumn.css';
+import Header from '../../components/Header';
+import StoriesEditor from '../../components/StoriesEditor.jsx';
+import AudiobookTab from '../../pages/AudiobookTab.jsx';
 import { Download, Mic, Search, Sparkles, Trash2 } from 'lucide-react';
 
 import Badge from '../../ui/Badge.jsx';
@@ -158,7 +169,370 @@ const TABLE_COLS = [
   { key: 'dur', label: 'Length', width: 70, align: 'right' },
 ];
 
+// Generated locally so waveform interaction checks need neither a backend nor media fixtures.
+function WaveformPanFixture() {
+  const [audioSrc] = React.useState(() => {
+    const samples = 8000 * 30;
+    const buffer = new ArrayBuffer(44 + samples * 2);
+    const wav = new DataView(buffer);
+    const text = (at, value) =>
+      [...value].forEach((char, i) => wav.setUint8(at + i, char.charCodeAt(0)));
+    text(0, 'RIFF');
+    wav.setUint32(4, buffer.byteLength - 8, true);
+    text(8, 'WAVE');
+    text(12, 'fmt ');
+    wav.setUint32(16, 16, true);
+    wav.setUint16(20, 1, true);
+    wav.setUint16(22, 1, true);
+    wav.setUint32(24, 8000, true);
+    wav.setUint32(28, 16000, true);
+    wav.setUint16(32, 2, true);
+    wav.setUint16(34, 16, true);
+    text(36, 'data');
+    wav.setUint32(40, samples * 2, true);
+    for (let i = 0; i < samples; i++)
+      wav.setInt16(44 + i * 2, Math.round(Math.sin(i * 0.17) * 8000), true);
+    return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+  });
+  React.useEffect(() => () => URL.revokeObjectURL(audioSrc), [audioSrc]);
+  return (
+    <WaveformTimeline
+      audioSrc={audioSrc}
+      segments={[{ id: 'one', start: 5, end: 10, text: 'Drag the waveform to pan' }]}
+    />
+  );
+}
+
+function DubIdleStartFixture() {
+  const [ingestUrl, setIngestUrl] = React.useState('');
+  const [sourceLanguage, setSourceLanguage] = React.useState('auto');
+  const [targetLanguage, setTargetLanguage] = React.useState('es');
+  const [optionalOpen, setOptionalOpen] = React.useState(false);
+  const noop = () => {};
+  return (
+    <div style={{ height: 760, minWidth: 0 }}>
+      <IdleSkeleton
+        t={i18n.t.bind(i18n)}
+        uiLocale="en"
+        dubVideoFile={null}
+        activeProjectName=""
+        dubFilename=""
+        dubError=""
+        dubJobId={null}
+        dubStep="idle"
+        dubFailure={null}
+        asrInstall={null}
+        handleInstallMissingAsr={noop}
+        handleDubRetryTranscribe={noop}
+        handleDubImportSrt={noop}
+        dubLocalBlobUrl={null}
+        dubPrepStage={null}
+        dubPrepProgress={{ percent: null, speedBps: null, etaS: null, stageStartedAt: null }}
+        handleDubAbort={noop}
+        transcribeElapsed={0}
+        transcribeProgress={null}
+        dubDuration={0}
+        dubNumSpeakers={null}
+        setDubNumSpeakers={noop}
+        handleDubUpload={noop}
+        demoDismissed
+        dismissDubDemo={noop}
+        setDubVideoFile={noop}
+        setDubInputType={noop}
+        setDubStep={noop}
+        fileToMediaUrl={async () => ({ audioUrl: null, videoUrl: null })}
+        setDubLocalBlobUrl={noop}
+        ingestUrl={ingestUrl}
+        setIngestUrl={setIngestUrl}
+        onIngestUrl={noop}
+        fetchYtSubs={false}
+        setFetchYtSubs={noop}
+        youtubeCookieFile={null}
+        setYoutubeCookieFile={noop}
+        dubLangCode={targetLanguage}
+        dubSourceLangCode={sourceLanguage}
+        setDubSourceLangCode={setSourceLanguage}
+        setDubLangCode={setTargetLanguage}
+        setDubLang={noop}
+        landingAdvOpen={optionalOpen}
+        setLandingAdvOpen={setOptionalOpen}
+        dubInstruct=""
+        setDubInstruct={noop}
+        onOpenQueue={noop}
+      />
+    </div>
+  );
+}
+
+const DUB_SIDEBAR_PROJECTS = [
+  {
+    id: 'dub-project-1',
+    name: 'Documentary voice-over',
+    updated_at: '2026-09-08T12:00:00Z',
+    duration: 128,
+    video_path: 'documentary.mp4',
+  },
+  {
+    id: 'dub-project-2',
+    name: 'Product launch — Spanish',
+    updated_at: '2026-09-07T12:00:00Z',
+    duration: 64,
+    video_path: 'product-launch.mov',
+  },
+];
+
+const DUB_SIDEBAR_HISTORY = [
+  {
+    id: 'dub-history-1',
+    filename: 'Documentary final.mp4',
+    duration: 128,
+    segments_count: 18,
+    language: 'Spanish',
+    language_code: 'es',
+    job_data: { input_type: 'video' },
+  },
+  {
+    id: 'dub-history-2',
+    filename: 'Interview voice track.wav',
+    duration: 76,
+    segments_count: 9,
+    language: 'French',
+    language_code: 'fr',
+    job_data: { input_type: 'audio' },
+  },
+];
+
+function DubIdleWorkspaceFixture() {
+  const noop = () => {};
+  return (
+    <div className="studio-with-history" style={{ height: 760, minWidth: 0 }}>
+      <div className="studio-with-history__main">
+        <DubIdleStartFixture />
+      </div>
+      <div className="studio-right">
+        <DubWorkspaceSidebar
+          projects={DUB_SIDEBAR_PROJECTS}
+          activeProjectId={null}
+          loadProject={noop}
+          deleteProject={noop}
+          renameProject={noop}
+          dubHistory={DUB_SIDEBAR_HISTORY}
+          restoreDubHistory={noop}
+          deleteHistory={noop}
+          clearHistory={noop}
+        />
+      </div>
+    </div>
+  );
+}
+
+const STORIES_CAST = [
+  { id: 'narrator', name: 'Narrator', color: '#b8bb26', profileId: 'voice-aria' },
+  { id: 'mara', name: 'Mara', color: '#d3869b', profileId: 'voice-mara' },
+  { id: 'cole', name: 'Cole', color: '#83a598', profileId: 'voice-cole' },
+];
+
+const STORIES_TRACKS = [
+  {
+    id: 101,
+    character: 'narrator',
+    text: '# The Signal at Sundown',
+    profileId: null,
+    emotion: null,
+    speed: null,
+    generating: false,
+    audioUrl: null,
+  },
+  {
+    id: 102,
+    character: 'narrator',
+    text: 'The lighthouse had been silent for eleven winters.',
+    profileId: null,
+    emotion: null,
+    speed: null,
+    generating: false,
+    audioUrl: null,
+  },
+  {
+    id: 103,
+    character: 'mara',
+    text: 'Cole, did you hear that? [pause 0.4s] The old radio is calling us.',
+    profileId: null,
+    emotion: null,
+    speed: 0.95,
+    generating: false,
+    audioUrl: null,
+  },
+  {
+    id: 104,
+    character: 'cole',
+    text: 'I heard it. Stay close, and keep the lantern low.',
+    profileId: null,
+    emotion: null,
+    speed: null,
+    generating: false,
+    audioUrl: null,
+  },
+];
+
+const STORIES_PROJECT = {
+  id: 'visual-story',
+  name: 'The Signal at Sundown',
+  cast: STORIES_CAST,
+  tracks: STORIES_TRACKS,
+  updatedAt: 1,
+};
+
 export const SPECS = {
+  AudiobookWorkspace: {
+    width: '100%',
+    providers: {
+      store: {
+        script:
+          '# Chapter One\n\nA light shone across the water.\n\n# Chapter Two\n\nThe boat returned safely.',
+        lastOutput: '',
+      },
+      fetch: () => ({}),
+    },
+    render: () => (
+      <div style={{ height: 800 }}>
+        <AudiobookTab profiles={[]} />
+      </div>
+    ),
+  },
+  DubIdleStart: {
+    width: '100%',
+    providers: {},
+    render: () => <DubIdleStartFixture />,
+  },
+  DubIdleWorkspace: {
+    width: '100%',
+    providers: {},
+    render: () => <DubIdleWorkspaceFixture />,
+  },
+  StoriesWorkspaceLayout: {
+    width: '100%',
+    providers: {
+      store: {
+        cast: STORIES_CAST,
+        storyTracks: STORIES_TRACKS,
+        storyProjects: [STORIES_PROJECT],
+        currentProjectId: STORIES_PROJECT.id,
+      },
+    },
+    render: () => (
+      <div style={{ height: 780, minWidth: 0 }}>
+        <StoriesEditor
+          profiles={[
+            { id: 'voice-aria', name: 'Aria — warm narrator' },
+            { id: 'voice-mara', name: 'Mara — intimate alto' },
+            { id: 'voice-cole', name: 'Cole — steady baritone' },
+          ]}
+        />
+      </div>
+    ),
+  },
+  DubWorkspaceLayout: {
+    width: '100%',
+    providers: {},
+    render: () => <DubWorkspaceFixture />,
+  },
+  DubSelectionLayout: {
+    width: '100%',
+    providers: {},
+    render: () => (
+      <div style={{ overflow: 'hidden' }}>
+        <DubSelectionToolbar
+          t={i18n.t.bind(i18n)}
+          count={353}
+          profiles={[
+            { id: 'demo', name: 'VoiceStudio Demo Voice' },
+            { id: 'narrator', name: 'Studio Narrator', instruct: 'calm' },
+          ]}
+          speakerClones={{ 'Speaker 1': {}, 'Speaker 2': {} }}
+          onApply={() => {}}
+          onDelete={() => {}}
+          onClear={() => {}}
+        />
+      </div>
+    ),
+  },
+  DubWaveformPan: {
+    width: '100%',
+    providers: {},
+    render: () => <WaveformPanFixture />,
+  },
+  DubSegmentLayout: {
+    width: '100%',
+    providers: {},
+    render: () => (
+      <div
+        className="dub-panel-right"
+        style={{
+          height: 760,
+          width: '100%',
+          minWidth: 0,
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <DubSegmentTable
+          segments={Array.from({ length: 353 }, (_, i) => ({
+            id: `segment-${i}`,
+            start: 16.7 + i * 4,
+            end: 19.5 + i * 4,
+            text:
+              i % 2
+                ? "What happened? It's complicated. Oh, it's perfect. Complicated is the best."
+                : 'Am I with you?',
+            text_original:
+              i % 2 ? 'An original line that should stay below the editable translation.' : '',
+            speaker_id: `Speaker ${(i % 2) + 1}`,
+            profile_id: `auto:speaker_${(i % 2) + 1}`,
+            fit_status: { status: i % 2 ? 'overflows' : 'fits', overflow_s: 0.69 },
+            rate_ratio: 0.73,
+            ...(i === 1
+              ? {
+                  qc_flagged: true,
+                  plan: {
+                    status: 'impossible',
+                    est_overrun_s: 1.5,
+                    suggested_text: 'A shorter line.',
+                  },
+                }
+              : {}),
+          }))}
+          profiles={[]}
+          speakerClones={{ 'Speaker 1': {}, 'Speaker 2': {} }}
+          selectedIds={new Set()}
+          dubStep="done"
+          dubProgress={{}}
+          {...Object.fromEntries(
+            [
+              'Select',
+              'SelectAll',
+              'ClearSelection',
+              'EditField',
+              'Delete',
+              'Restore',
+              'Preview',
+              'Split',
+              'Merge',
+              'Insert',
+              'MoveResize',
+            ].map((name) => [`on${name}`, () => {}]),
+          )}
+        />
+      </div>
+    ),
+  },
+  HeaderStatus: {
+    providers: {
+      query: (qc) => qc.setQueryData(queryKeys.sysinfo, { cpu_percent: 0, ram_percent: 0 }),
+      fetch: (url) => (url.endsWith('/sysinfo') ? { cpu_percent: 0, ram_percent: 0 } : undefined),
+    },
+    render: () => <Header mode="dub" setMode={() => {}} modelStatus="idle" />,
+  },
   Badge: {
     render: () => (
       <>

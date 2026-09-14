@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { FileText, Users, BookText } from 'lucide-react';
 import {
   audiobookPlan,
   audiobookGenerate,
+  audiobookResume,
   audiobookUploadCover,
   audiobookPreviewChapter,
   audiobookImport,
@@ -11,27 +13,40 @@ import { audioUrl } from '../api/generate';
 import { useEngines } from '../api/hooks';
 import { consumeLongformStream } from '../utils/longformStream';
 import { useAppStore } from '../store';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 import { overridesToRequest } from '../components/audiobook/AudiobookOverrides';
 import GenerationProgress from '../components/audiobook/GenerationProgress';
 import PlanList from '../components/audiobook/PlanList';
 import AudiobookResult from '../components/audiobook/AudiobookResult';
-import MarkupToolbar from '../components/audiobook/MarkupToolbar';
 import StatsBar from '../components/audiobook/StatsBar';
 import ValidationWarnings from '../components/audiobook/ValidationWarnings';
 import AudiobookHero from '../components/audiobook/AudiobookHero';
-import AudiobookInspector from '../components/audiobook/AudiobookInspector';
+import AudiobookScriptPanel from '../components/audiobook/AudiobookScriptPanel';
+import AudiobookVoicesPanel from '../components/audiobook/AudiobookVoicesPanel';
+import AudiobookBookPanel from '../components/audiobook/AudiobookBookPanel';
+import AudiobookRecovery from '../components/audiobook/AudiobookRecovery';
 import { useAudiobookLexicon } from '../hooks/useAudiobookLexicon';
 import { parseCastNames, validateScript } from '../utils/audiobookScript';
 import { SAMPLE_AUDIOBOOK_SCRIPT } from '../data/sampleAudiobook';
 
-// Chrome-mono uppercase form label (was the scoped `.audiobook-tab .field-label`
-// rule; `.field-label` has no global styling, so it's reproduced as utilities).
 // Stable empty-cast fallback: a literal `?? {}` mints a new object every render,
 // which defeats the useMemos keyed on voiceCast (they'd recompute every render).
 const EMPTY_CAST = Object.freeze({});
 
-const FIELD_LABEL =
-  '[font-family:var(--chrome-font-mono)] [font-size:var(--chrome-label-size)] font-semibold [letter-spacing:var(--chrome-label-track)] uppercase [color:var(--chrome-fg-muted)]';
+// Write → Cast → Produce: the audiobook pipeline as workspace tabs, mirroring
+// the clone workspace (Script / Voice + pinned actions). Persisted per visit;
+// validated on read so a stale value can never strand the workspace.
+const BOOK_TABS = ['script', 'voices', 'book'];
+const BOOK_TAB_KEY = 'omnivoice.audiobook.tab';
+
+function readStoredBookTab() {
+  try {
+    const stored = localStorage.getItem(BOOK_TAB_KEY);
+    return BOOK_TABS.includes(stored) ? stored : 'script';
+  } catch {
+    return 'script';
+  }
+}
 
 /**
  * AudiobookTab — turn a chapter-delimited script into a chapterized m4b.
@@ -42,6 +57,18 @@ const FIELD_LABEL =
  */
 export default function AudiobookTab({ profiles = [] }) {
   const { t } = useTranslation();
+  // Workspace tab (Script / Voices / Book) — local + persisted, like the
+  // catalogue pane. Manual activation so arrowing across the strip never
+  // yanks the panel out from under keyboard users.
+  const [bookTab, setBookTabRaw] = useState(readStoredBookTab);
+  const setBookTab = useCallback((next) => {
+    setBookTabRaw(next);
+    try {
+      localStorage.setItem(BOOK_TAB_KEY, next);
+    } catch {
+      /* private mode / quota — the tab still switches, it just won't persist */
+    }
+  }, []);
   // Persisted via the unified LongformProject store (#31b) — book identity,
   // script, voice, and output prefs now survive a tab switch / reload (they
   // used to live in component useState and evaporate).
@@ -148,17 +175,26 @@ export default function AudiobookTab({ profiles = [] }) {
     return validateScript(text, { mappedNames, profileIds: profiles.map((p) => p.id) });
   }, [text, voiceCast, profiles]);
 
-  const onCoverPick = useCallback((e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setCoverFile(f);
-    setCoverPreview(URL.createObjectURL(f));
-  }, []);
+  // Tab badges (the inspector's counts, moved onto the strip): cast size on
+  // Voices, filled details + lexicon rows on Book.
+  const detailCount =
+    Object.values(meta).filter((value) => value?.trim()).length + (coverPreview ? 1 : 0);
+  const lexiconCount = lex.filter((row) => row.word.trim() || row.say.trim()).length;
+
+  const onCoverPick = useCallback(
+    (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      setCoverFile(f);
+      setCoverPreview(URL.createObjectURL(f));
+    },
+    [setCoverFile, setCoverPreview],
+  );
   const clearCover = useCallback(() => {
     setCoverFile(null);
     if (coverPreview) URL.revokeObjectURL(coverPreview);
     setCoverPreview('');
-  }, [coverPreview]);
+  }, [coverPreview, setCoverFile, setCoverPreview]);
   // Revoke the cover blob URL when it's replaced or the tab unmounts (React
   // doesn't reclaim object URLs on its own).
   useEffect(
@@ -239,47 +275,8 @@ export default function AudiobookTab({ profiles = [] }) {
     [text, defaultVoice, lex, overrides, language, voiceMapArg],
   );
 
-  const onCreate = useCallback(async () => {
-    setError('');
-    setOutput('');
-    setDone(null);
-    setStopped(false);
-    setChapters([]);
-    chaptersRef.current = [];
-    setAssembling(false);
-    setGenerating(true);
-    abortRef.current = false;
-    // A per-generation AbortController: Stop aborts it, which cancels the fetch
-    // end-to-end so the backend sees the disconnect and stops rendering (#1216).
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    try {
-      let cover_path = null;
-      if (coverFile) {
-        cover_path = (await audiobookUploadCover(coverFile)).path;
-      }
-      // Only send metadata fields the user actually filled in.
-      const metadata = Object.fromEntries(Object.entries(meta).filter(([, v]) => v && v.trim()));
-      const lexicon = lexDict();
-      const res = await audiobookGenerate(
-        {
-          text,
-          default_voice: defaultVoice || null,
-          format,
-          loudness: loudness === 'off' ? null : loudness,
-          cover_path,
-          metadata: Object.keys(metadata).length ? metadata : null,
-          lexicon: Object.keys(lexicon).length ? lexicon : null,
-          // Multi-voice cast map (#1217): [voice:NAME] → profile id. Absent when
-          // empty, so a single-voice book stays byte-identical to before.
-          voice_map: voiceMapArg,
-          // language pick + expressive/quality overrides + cache opt-out (#1208).
-          // Only non-default values are emitted, so an untouched panel keeps the
-          // request byte-identical to before.
-          ...overridesToRequest(overrides, language),
-        },
-        { signal: controller.signal },
-      );
+  const consumeGeneration = useCallback(
+    async (res, snapshotScript = null) => {
       await consumeLongformStream(
         res,
         (evt) => {
@@ -326,7 +323,8 @@ export default function AudiobookTab({ profiles = [] }) {
           } else if (evt.type === 'stopped') {
             setStopped(true);
           } else if (evt.type === 'done') {
-            setOutputSnapshot(evt.output, text, chaptersRef.current);
+            if (snapshotScript === null) setOutput(evt.output);
+            else setOutputSnapshot(evt.output, snapshotScript, chaptersRef.current);
             setDone({
               cached_chapters: evt.cached_chapters || 0,
               failed_chapters: evt.failed_chapters || [],
@@ -335,10 +333,56 @@ export default function AudiobookTab({ profiles = [] }) {
             setError(evt.error || 'synthesis failed');
           }
         },
-        { isAborted: () => abortRef.current, signal: controller.signal },
+        { isAborted: () => abortRef.current, signal: abortControllerRef.current?.signal },
       );
       // consumeLongformStream returns (never throws) on a caller-initiated stop.
       if (abortRef.current) setStopped(true);
+    },
+    [setOutput, setOutputSnapshot],
+  );
+
+  const onCreate = useCallback(async () => {
+    setError('');
+    setOutput('');
+    setDone(null);
+    setStopped(false);
+    setChapters([]);
+    chaptersRef.current = [];
+    setAssembling(false);
+    setGenerating(true);
+    abortRef.current = false;
+    // A per-generation AbortController: Stop aborts it, which cancels the fetch
+    // end-to-end so the backend sees the disconnect and stops rendering (#1216).
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    try {
+      let cover_path = null;
+      if (coverFile) {
+        cover_path = (await audiobookUploadCover(coverFile)).path;
+      }
+      // Only send metadata fields the user actually filled in.
+      const metadata = Object.fromEntries(Object.entries(meta).filter(([, v]) => v && v.trim()));
+      const lexicon = lexDict();
+      const res = await audiobookGenerate(
+        {
+          text,
+          default_voice: defaultVoice || null,
+          format,
+          loudness: loudness === 'off' ? null : loudness,
+          cover_path,
+          metadata: Object.keys(metadata).length ? metadata : null,
+          lexicon: Object.keys(lexicon).length ? lexicon : null,
+          // Multi-voice cast map (#1217): [voice:NAME] → profile id. Absent when
+          // empty, so a single-voice book stays byte-identical to before.
+          voice_map: voiceMapArg,
+          // language pick + expressive/quality overrides + cache opt-out (#1208).
+          // Only non-default values are emitted, so an untouched panel keeps the
+          // request byte-identical to before.
+          ...overridesToRequest(overrides, language),
+        },
+        { signal: controller.signal },
+      );
+      await consumeGeneration(res, text);
     } catch (e) {
       // A Stop that lands before/around the first byte aborts the fetch →
       // AbortError. Treat every self-initiated abort as "Stopped", not an error.
@@ -360,8 +404,44 @@ export default function AudiobookTab({ profiles = [] }) {
     overrides,
     language,
     voiceMapArg,
-    setOutputSnapshot,
+    consumeGeneration,
   ]);
+
+  const onResume = useCallback(
+    async (jobId) => {
+      let accepted = false;
+      setError('');
+      setOutput('');
+      setDone(null);
+      setStopped(false);
+      setChapters([]);
+      chaptersRef.current = [];
+      setAssembling(false);
+      setGenerating(true);
+      abortRef.current = false;
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      try {
+        const res = await audiobookResume(jobId, { signal: controller.signal });
+        accepted = true;
+        // The manifest contains the original chapter plan, but the endpoint does
+        // not expose its source script. Keep playback, but do not attach whatever
+        // script happens to be open now as misleading synced lyrics.
+        await consumeGeneration(res);
+      } catch (error) {
+        if (abortRef.current || error?.name === 'AbortError') setStopped(true);
+        else {
+          setError(t('audiobook.resume_failed', { message: error?.message || String(error) }));
+        }
+      } finally {
+        setGenerating(false);
+        setAssembling(false);
+        abortControllerRef.current = null;
+      }
+      return accepted;
+    },
+    [consumeGeneration, setOutput, t],
+  );
 
   // Stop = abort the fetch (cancels the request → backend disconnect) AND flip
   // the isAborted flag the stream consumer polls, so the read loop releases too.
@@ -384,6 +464,26 @@ export default function AudiobookTab({ profiles = [] }) {
     [canRun, onCreate],
   );
 
+  // The pinned status rail (warnings / progress / result / plan) only takes
+  // space once there is something to show — a fresh book is just the tabs.
+  const showWarnings = !warningsDismissed && !generating && warnings.length > 0;
+  const hasStatus =
+    showWarnings || error || generating || (stopped && !generating) || output || plan;
+
+  const tabDefs = useMemo(
+    () => [
+      { id: 'script', label: t('audiobook.tab_script'), Icon: FileText, badge: 0 },
+      { id: 'voices', label: t('audiobook.tab_voices'), Icon: Users, badge: castNames.length },
+      {
+        id: 'book',
+        label: t('audiobook.tab_book'),
+        Icon: BookText,
+        badge: detailCount + lexiconCount,
+      },
+    ],
+    [t, castNames.length, detailCount, lexiconCount],
+  );
+
   return (
     <div className="audiobook-tab flex h-full flex-col box-border px-[1.25rem] py-[1rem] gap-[10px] max-[1120px]:overflow-y-auto">
       <AudiobookHero
@@ -400,68 +500,101 @@ export default function AudiobookTab({ profiles = [] }) {
         onStop={onStop}
       />
 
-      <div className="audiobook-tab__body grid flex-auto grid-cols-[minmax(0,1fr)_minmax(440px,500px)] max-[1120px]:grid-cols-1 gap-[14px] min-h-0">
-        {/* Left: script editor fills the height */}
-        <div className="audiobook-tab__script flex flex-col min-h-0 gap-[7px]">
-          <div className="flex min-h-[18px] items-center justify-between gap-[12px] px-[4px]">
-            <label className={FIELD_LABEL}>{t('audiobook.script')}</label>
-            {text.trim() ? <StatsBar t={t} text={text} /> : null}
-          </div>
-          <div className="audiobook-tab__manuscript flex min-h-0 flex-1 flex-col overflow-hidden rounded-[14px]">
-            <div className="border-b border-transparent px-[10px] py-[7px]">
-              <MarkupToolbar t={t} textareaRef={textareaRef} text={text} setText={setText} />
-            </div>
-            <textarea
-              ref={textareaRef}
-              className="input-base"
-              value={text}
-              onChange={(e) => {
-                setText(e.target.value);
-                if (warningsDismissed) setWarningsDismissed(false);
-              }}
-              onKeyDown={onScriptKeyDown}
-              placeholder={t('audiobook.script_placeholder')}
-              aria-label={t('audiobook.script')}
-            />
-            {!text.trim() && (
-              <p className="m-0 border-t border-transparent px-[14px] py-[9px] text-[var(--text-sm)] text-fg-muted">
-                {t('audiobook.empty_hint')}
-              </p>
-            )}
-          </div>
+      <AudiobookRecovery t={t} generating={generating} onResume={onResume} />
+
+      <Tabs
+        value={bookTab}
+        onValueChange={setBookTab}
+        activationMode="manual"
+        className="flex min-h-0 flex-1 flex-col gap-0"
+      >
+        <div className="relative z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 px-1 pb-3 pt-1 max-[600px]:px-0">
+          <TabsList
+            aria-label={t('audiobook.title')}
+            className="grid h-auto w-auto min-w-0 flex-[1_1_320px] grid-cols-3 gap-[3px] rounded-[var(--chrome-radius-pill)] border border-transparent bg-[var(--chrome-bg)] p-[3px]"
+          >
+            {tabDefs.map(({ id, label, Icon, badge }) => (
+              <TabsTrigger
+                key={id}
+                value={id}
+                data-book-tab={id}
+                disabled={busy}
+                className="min-h-11 h-auto min-w-0 cursor-pointer whitespace-normal rounded-[var(--chrome-radius-pill)] border border-transparent bg-transparent px-3 py-2 text-sm font-medium text-[color:var(--chrome-fg-muted)] transition-colors data-[state=active]:border-[var(--chrome-accent-border)] data-[state=active]:bg-[var(--chrome-accent-bg)] data-[state=active]:font-semibold data-[state=active]:text-[color:var(--chrome-accent)] data-[state=active]:shadow-none dark:data-[state=active]:border-[var(--chrome-accent-border)] dark:data-[state=active]:bg-[var(--chrome-accent-bg)] dark:data-[state=active]:text-[color:var(--chrome-accent)] hover:data-[state=inactive]:bg-[var(--chrome-hover-bg)]"
+              >
+                <Icon size={16} aria-hidden="true" />
+                {label}
+                {badge > 0 && (
+                  <span
+                    className="rounded-full bg-[var(--chrome-hover-bg)] px-[8px] text-[0.7rem] [font-variant-numeric:tabular-nums]"
+                    aria-hidden="true"
+                  >
+                    {badge}
+                  </span>
+                )}
+              </TabsTrigger>
+            ))}
+          </TabsList>
         </div>
 
-        {/* Right: settings + results, scrolls independently */}
-        <div className="audiobook-tab__side flex flex-col gap-[9px] min-h-0 overflow-y-auto max-[1120px]:overflow-visible rounded-[12px] bg-[var(--color-bg-elev-2)] p-[10px]">
-          <AudiobookInspector
-            t={t}
-            profiles={profiles}
-            defaultVoice={defaultVoice}
-            setDefaultVoice={setDefaultVoice}
-            language={language}
-            setLanguage={setLanguage}
-            format={format}
-            setFormat={setFormat}
-            loudness={loudness}
-            setLoudness={setLoudness}
-            castNames={castNames}
-            voiceCast={voiceCast}
-            setVoiceCast={setVoiceCast}
-            overrides={overrides}
-            setOverrides={setLongformOverrides}
-            emotionSupported={emotionSupported}
-            coverPreview={coverPreview}
-            onCoverPick={onCoverPick}
-            clearCover={clearCover}
-            meta={meta}
-            setMetaField={setMetaField}
-            lex={lex}
-            setLexRow={setLexRow}
-            addLexRow={addLexRow}
-            removeLexRow={removeLexRow}
-          />
+        <TabsContent value={bookTab} className="flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col">
+            {bookTab === 'script' && (
+              <AudiobookScriptPanel
+                t={t}
+                text={text}
+                setText={setText}
+                textareaRef={textareaRef}
+                onScriptKeyDown={onScriptKeyDown}
+                warningsDismissed={warningsDismissed}
+                setWarningsDismissed={setWarningsDismissed}
+              />
+            )}
+            {bookTab === 'voices' && (
+              <AudiobookVoicesPanel
+                t={t}
+                profiles={profiles}
+                defaultVoice={defaultVoice}
+                setDefaultVoice={setDefaultVoice}
+                language={language}
+                setLanguage={setLanguage}
+                castNames={castNames}
+                voiceCast={voiceCast}
+                setVoiceCast={setVoiceCast}
+                overrides={overrides}
+                setOverrides={setLongformOverrides}
+                emotionSupported={emotionSupported}
+              />
+            )}
+            {bookTab === 'book' && (
+              <AudiobookBookPanel
+                t={t}
+                format={format}
+                setFormat={setFormat}
+                loudness={loudness}
+                setLoudness={setLoudness}
+                coverPreview={coverPreview}
+                onCoverPick={onCoverPick}
+                clearCover={clearCover}
+                meta={meta}
+                setMetaField={setMetaField}
+                lex={lex}
+                setLexRow={setLexRow}
+                addLexRow={addLexRow}
+                removeLexRow={removeLexRow}
+                detailCount={detailCount}
+                lexiconCount={lexiconCount}
+              />
+            )}
+          </div>
+        </TabsContent>
+      </Tabs>
 
-          {!warningsDismissed && !generating && (
+      {hasStatus && (
+        <div
+          className="flex shrink-0 flex-col gap-[9px] overflow-y-auto rounded-[12px] bg-[var(--color-bg-elev-2)] p-[10px]"
+          data-testid="audiobook-status-rail"
+        >
+          {showWarnings && (
             <ValidationWarnings
               t={t}
               warnings={warnings}
@@ -503,7 +636,7 @@ export default function AudiobookTab({ profiles = [] }) {
             />
           )}
         </div>
-      </div>
+      )}
     </div>
   );
 }

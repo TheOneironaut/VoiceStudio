@@ -11,20 +11,31 @@ pins `transformers>=5.3` — the same isolation primitive used by
 [IndexTTS-2](indextts.md) and [MOSS-TTS-v1.5](moss-tts-v15.md).
 
 > **Opt-in, and never a default.** dots.tts is selected explicitly in
-> **Model Catalogue → Engines** (or `OMNIVOICE_TTS_BACKEND=dots-tts`). It is not
+> **Model Catalogue** (or `OMNIVOICE_TTS_BACKEND=dots-tts`). It is not
 > part of the default install.
 
 ## Platform support
 
 - **Linux / macOS only.** dots.tts's upstream package declares Linux and
   macOS classifiers and has **no Windows install path**. On Windows the
-  engine reports itself unavailable in **Model Catalogue → Engines** with a clear
+  engine reports itself unavailable in **Model Catalogue** with a clear
   reason — run VoiceStudio under WSL2 or use a Linux/macOS host.
 - **No MPS.** Upstream device selection is CUDA-or-CPU with no Metal branch,
   so on Apple Silicon the official package runs on **CPU** (slow but
   correct). A faster Apple-Silicon path exists only via community MLX ports,
   which VoiceStudio does not auto-wire.
 - **VRAM:** ~9 GB checkpoint; a 12–16 GB CUDA GPU is the realistic target.
+
+## One-click install
+
+On Linux and macOS, **Model Catalogue → dots.tts → Install** does the
+steps below for you. It installs into its own folder under VoiceStudio's data directory, with its own Python environment. Nothing it installs touches VoiceStudio itself or any other engine, so you can switch to it and back without breaking what already worked. **Uninstall** in the same row removes only that folder. It is not offered on Windows, where upstream
+publishes no install. The ~9 GB checkpoint still downloads on first synthesis.
+
+The first synthesis downloads the weights, which takes a while on a slow
+connection. The generation stays alive while the download makes progress;
+if a stalled download runs out of time, raise the compute-time budget in
+**Settings → Performance & Device** and try again.
 
 ## Install
 
@@ -60,7 +71,7 @@ dots.tts is **not** bundled (large checkpoint + conflicting `transformers`).
    source ~/.zshrc
    ```
 
-5. Restart VoiceStudio. dots.tts appears in **Model Catalogue → Engines** with
+5. Restart VoiceStudio. dots.tts appears in **Model Catalogue** with
    `available: true` and `isolation_mode: subprocess`.
 
 ## Venv resolution order
@@ -115,3 +126,9 @@ dots.tts runs in a dedicated sidecar venv (it pins `transformers==4.57`,
 which conflicts with the parent's `transformers>=5.3`). For why that adds
 disk and how uv keeps the cost down, see
 [Engine venvs & disk usage](disk-usage.md).
+
+The upstream runtime selects CUDA or CPU internally. Automatic precision follows
+that selection: bfloat16 on CUDA, float32 otherwise, including XPU/NPU/MPS hosts
+where this runtime executes on CPU. `OMNIVOICE_DOTS_TTS_PRECISION` remains an
+explicit override. If the CUDA availability probe raises, the automatic precision
+default stays float32; upstream remains responsible for its device selection.

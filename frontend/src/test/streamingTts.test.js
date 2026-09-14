@@ -17,6 +17,7 @@ const {
   supportsStreamingPreview,
   resolveRemoteTtsTarget,
   decodePcm16Base64,
+  pcm16BytesToFloat32,
   peaksFromChunkList,
   StreamingPreviewError,
   shouldFallbackToClassic,
@@ -162,6 +163,47 @@ describe('decodePcm16Base64', () => {
   });
 });
 
+describe('pcm16BytesToFloat32', () => {
+  it('decodes a raw binary frame (the /ws/tts shape) identically to base64', () => {
+    const samples = [0, 16384, -16384, 32767, -32768];
+    const raw = pcm16BytesToFloat32(new Int16Array(samples).buffer);
+    const viaB64 = decodePcm16Base64(b64Pcm(samples));
+    expect(Array.from(raw)).toEqual(Array.from(viaB64));
+  });
+
+  it('decodes a view carved at an odd byteOffset instead of throwing', () => {
+    const backing = new Uint8Array(5);
+    backing.set(new Uint8Array(new Int16Array([-12345]).buffer), 1);
+    const out = pcm16BytesToFloat32(backing.subarray(1, 3));
+    expect(out.length).toBe(1);
+    expect(out[0]).toBeCloseTo(-12345 / 32768, 5);
+  });
+
+  it('respects a Uint8Array view with a nonzero byteOffset', () => {
+    const backing = new Uint8Array(8);
+    backing.set(new Uint8Array(new Int16Array([12345]).buffer), 2);
+    const out = pcm16BytesToFloat32(backing.subarray(2, 4));
+    expect(out.length).toBe(1);
+    expect(out[0]).toBeCloseTo(12345 / 32768, 5);
+  });
+});
+
+describe('createStreamingChunkPlayer.appendPcm16Bytes', () => {
+  it('schedules raw /ws/tts frames on the same gapless timeline as base64 chunks', () => {
+    const player = createStreamingChunkPlayer({ label: 'live', sampleRate: 24000 });
+    const ctx = FakeAudioContext.instances.at(-1);
+
+    const frame = new Int16Array(Array.from({ length: 2400 }, (_, i) => (i % 100) * 50));
+    player.appendPcm16Bytes(frame.buffer);
+    player.appendPcm16Bytes(frame.buffer);
+
+    expect(ctx.started.length).toBe(2);
+    // Second chunk starts exactly one chunk-duration later — gapless.
+    expect(ctx.started[1].startedAt.when).toBeCloseTo(2400 / 24000, 5);
+    player.fail();
+  });
+});
+
 describe('peaksFromChunkList', () => {
   it('returns normalized peaks across chunk boundaries', () => {
     const quiet = new Float32Array(1000).fill(0.1);
@@ -285,6 +327,31 @@ describe('streamGenerateSpeech', () => {
     await expect(streamGenerateSpeech(new FormData(), {})).rejects.toThrow(StreamingPreviewError);
     expect(getPlaybackTrack()).toBeNull(); // playback torn down for the fallback
     expect(FakeAudioContext.instances[0].state).toBe('closed');
+  });
+
+  it('carries the backend error class from the error frame (#1800)', async () => {
+    // Every unclassified engine failure renders the same floor message, so
+    // the auto-filed reports were byte-identical and none could be triaged.
+    // The class name is the only thing that separates them.
+    apiFetch.mockResolvedValue(
+      ndjsonResponse([
+        startEvent(3),
+        chunkEvent(0),
+        { type: 'error', detail: 'Generation failed.', error_class: 'MemoryError' },
+      ]),
+    );
+    await expect(streamGenerateSpeech(new FormData(), {})).rejects.toMatchObject({
+      errorClass: 'MemoryError',
+    });
+  });
+
+  it('leaves the error class null when the frame omits it', async () => {
+    apiFetch.mockResolvedValue(
+      ndjsonResponse([startEvent(3), chunkEvent(0), { type: 'error', detail: 'boom' }]),
+    );
+    await expect(streamGenerateSpeech(new FormData(), {})).rejects.toMatchObject({
+      errorClass: null,
+    });
   });
 
   it('carries the retryable marker from a GPU-timeout error frame (#1190)', async () => {

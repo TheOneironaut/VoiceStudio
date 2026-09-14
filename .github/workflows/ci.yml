@@ -11,6 +11,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      windows_wix_diagnostic:
+        description: Run only the tiny nonpublishing Windows MSI authoring diagnostic
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,6 +30,7 @@ env:
 
 jobs:
   test:
+    if: ${{ !inputs.windows_wix_diagnostic }}
     name: Tests (backend + frontend)
     runs-on: ubuntu-22.04
     env:
@@ -193,6 +199,7 @@ jobs:
   # and `cargo test --lib` runs the shell's unit tests natively on each OS.
   # Full bundling stays in release.yml on tag push.
   tauri-cross-platform:
+    if: ${{ !inputs.windows_wix_diagnostic }}
     name: Tauri shell check (${{ matrix.label }})
     needs: test
     strategy:
@@ -293,6 +300,7 @@ jobs:
   # job above misses. Narrow scope (tests/smoke/ only) — full pytest stays
   # on Linux until Phase 1's INST-01 lands setuptools for WhisperX.
   smoke-matrix:
+    if: ${{ !inputs.windows_wix_diagnostic }}
     name: Smoke (${{ matrix.label }})
     needs: test
     strategy:
@@ -432,17 +440,68 @@ jobs:
           PY
 
       - name: Run smoke tests
+        # Exercise credential paths on native Windows as well as POSIX hosts.
         if: matrix.backend_supported
-        run: uv run --no-sync pytest tests/smoke/ -q --tb=short
+        run: uv run --no-sync pytest tests/smoke/ tests/test_hf_token_cache_paths.py -q --tb=short
         env:
           HF_HUB_OFFLINE: "1"  # same no-silent-downloads guard as the main pytest job
           HF_HUB_CACHE: ${{ runner.temp }}/pockettts-empty-hf-cache
 
+      # The isolated backend session, on Windows. The `test` job runs it on
+      # Linux only, which is how four tests that CANNOT pass on Windows shipped
+      # unnoticed: two reach for os.WNOHANG and os.waitid (POSIX-only, an
+      # AttributeError before the first assertion), one asserts a RuntimeError
+      # that `backend_drain_fd` returns None instead of raising off POSIX, and
+      # one raced the OS reaping a crashed child — a race Linux won and Windows
+      # lost every time. All four were invisible to CI and hit every Windows
+      # contributor on their first `pytest` run. Forty seconds closes the class.
+      - name: Isolated backend session (Windows)
+        if: runner.os == 'Windows' && matrix.backend_supported
+        run: uv run --no-sync pytest backend/tests/ -q --tb=short
+        env:
+          HF_HUB_OFFLINE: "1"
+
       # Artifact commits depend on native Windows rename/replace semantics;
       # Linux emulation cannot exercise sharing rules or path parsing.
+      # test_worker_task_store and test_worker_inbound_transport joined this
+      # step after a Windows run found a real portability bug the Linux-only
+      # `test` job could not see: a staged input's artifact id was built with
+      # os.path.join, so a Windows control plane persisted and shipped
+      # `inputs\<sha>.wav` — which a Linux worker cannot resolve. These suites
+      # need no ffmpeg, so they cost seconds here.
       - name: Remote-worker artifact paths (Windows)
         if: runner.os == 'Windows' && matrix.backend_supported
-        run: uv run --no-sync pytest tests/test_worker_upload_server.py tests/test_worker_server_integrity.py -q --tb=short
+        run: >-
+          uv run --no-sync pytest
+          tests/test_worker_upload_server.py
+          tests/test_worker_server_integrity.py
+          tests/test_worker_task_store.py
+          tests/test_worker_inbound_transport.py
+          -q --tb=short
         env:
           HF_HUB_OFFLINE: "1"
           HF_HUB_CACHE: ${{ runner.temp }}/worker-artifact-empty-hf-cache
+
+  windows-wix-diagnostic:
+    name: Windows MSI authoring (no publishing)
+    needs: test
+    if: ${{ !cancelled() && (inputs.windows_wix_diagnostic || needs.test.result == 'success') }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+      - name: Bundle canonical system and per-user templates with a tiny payload
+        shell: pwsh
+        run: ./scripts/diagnose-windows-wix.ps1
+      - name: Restore hosted Installer policy after failed standard-user installation
+        shell: powershell
+        run: ./scripts/test-msi-policy-cleanup.ps1
+      - name: Preserve verbose linker output and rendered authoring
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-wix-diagnostic
+          path: wix-diagnostic-artifacts/
+          if-no-files-found: warn
+          retention-days: 3

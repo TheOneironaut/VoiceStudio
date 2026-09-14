@@ -300,6 +300,31 @@ class TTSBackend(ABC):
     #: 0 means "no meaningful floor" (CPU-class engines) and never warns.
     min_vram_gb: float = 0.0
 
+    @classmethod
+    def runtime_compute_profile(cls, caps) -> dict:
+        """Resolved compute metadata for this engine on the current host.
+
+        Most engines have one implementation whose static declarations are
+        sufficient. Native adapters may override this single hook when the
+        installed executable determines both the available runtimes and the
+        device actually selected.
+        """
+        from services.engine_routing import resolve_routing
+
+        gpu_compat = tuple(getattr(cls, "gpu_compat", ("cpu",)))
+        min_vram_gb = float(getattr(cls, "min_vram_gb", 0.0) or 0.0)
+        return {
+            "gpu_compat": gpu_compat,
+            "min_vram_gb": min_vram_gb,
+            **resolve_routing(gpu_compat, caps, min_vram_gb),
+            "runtime_backend": None,
+            "runtime_device_index": None,
+            "runtime_device_name": None,
+            "runtime_hardware_family": None,
+            "runtime_vram_gb": None,
+            "runtime_device_verified": None,
+        }
+
     #: True when generation allocates in ANOTHER process — a dedicated-venv
     #: sidecar (SubprocessBackend) or a spawned binary (omnivoice-gguf).
     #: Parent-process accelerator counters cannot see those allocations, so
@@ -566,7 +591,12 @@ def _get_clone_prompt(
 ):
     """Return a cached/precomputed ``VoiceClonePrompt`` for
     (ref_audio, ref_text, preprocess_prompt), or ``None`` to fall back to the
-    inline ref path. Never raises.
+    inline ref path.
+
+    Raises only on a device OOM that survives a cache-drop retry (#1790): the
+    inline path is the same allocation on the same device, so falling back to
+    it after an OOM cannot succeed and has been observed taking the whole
+    process down instead. Every other failure still falls back silently.
 
     ``store=False`` still *reads* the cache (a hit is free) but never inserts:
     it exists for single-use references — a dub's per-segment ref clips are each
@@ -596,10 +626,43 @@ def _get_clone_prompt(
                 ref_audio, ref_text=ref_text, preprocess_prompt=preprocess_prompt
             )
         except Exception as e:  # noqa: BLE001 — fall back, never break synthesis
-            logger.warning(
-                "voice-clone prompt precompute failed; using inline ref: %s", e
-            )
-            return None
+            # #1790/#1777: a GPU OOM is the one failure this fallback cannot
+            # absorb. `generate()`'s inline ref path runs the SAME encode on the
+            # SAME device — the docstring above says so, because producing
+            # identical output is the point — so returning None after an OOM
+            # guarantees a second OOM moments later, on a device with even less
+            # headroom than the first attempt found. Both reporters' backends
+            # then died with a Windows access violation (exit code
+            # -1073741819) seconds after this exact log line, mid-generation on
+            # a GPU that had just refused an 86 MiB allocation.
+            #
+            # An OOM here is also the most recoverable kind: the allocator is
+            # typically holding reserved-but-unallocated blocks (#1790's own
+            # log reports 90 MiB reserved against an 86 MiB request). Drop them
+            # and try once more. If it still will not fit, raise — the failure
+            # layer turns a device OOM into the actionable GPU_OOM message
+            # ("close other GPU-heavy apps or unload models…"), which is a far
+            # better answer than walking into a native fault.
+            from core.failure import is_gpu_oom
+
+            if is_gpu_oom(e):
+                logger.warning(
+                    "voice-clone prompt precompute hit a device OOM (%s) — "
+                    "releasing allocator caches and retrying once", e,
+                )
+                try:
+                    from services.model_manager import free_vram
+                    free_vram()
+                except Exception:  # noqa: BLE001 — reclaim is best-effort
+                    logger.debug("VRAM reclaim before OOM retry failed", exc_info=True)
+                prompt = model.create_voice_clone_prompt(
+                    ref_audio, ref_text=ref_text, preprocess_prompt=preprocess_prompt
+                )
+            else:
+                logger.warning(
+                    "voice-clone prompt precompute failed; using inline ref: %s", e
+                )
+                return None
         if store:
             _prompt_disk_save(key, prompt)
     if not store:
@@ -1255,7 +1318,7 @@ class MossTTSNanoBackend(TTSBackend):
         model_cls = _moss_model_class(moss_tts_nano)
         if model_cls is None:  # pragma: no cover - is_available() gates this
             raise RuntimeError(
-                "moss_tts_nano exposes no usable model class; see Model Catalogue → Engines"
+                "moss_tts_nano exposes no usable model class; see Model Catalogue"
             )
         checkpoint = os.environ.get(
             "OMNIVOICE_MOSS_TTS_MODEL", "OpenMOSS-Team/MOSS-TTS-Nano"
@@ -1572,7 +1635,7 @@ class MLXAudioBackend(TTSBackend):
     def __init__(self):
         self._model = None
         self._sr = 24000  # most mlx-audio engines emit 24 kHz mono
-        # Env var > persisted UI choice (#981 — Model Catalogue → Engines curated-
+        # Env var > persisted UI choice (#981 — Model Catalogue curated-
         # model picker) > default. Mirrors active_backend_id()'s resolution
         # order exactly so power-users can still pin a model without the UI
         # silently undoing it.
@@ -2198,6 +2261,13 @@ _LAZY_REGISTRY: dict[str, tuple[str, str]] = {
     # 2026-07-02 (CPU, Apple Silicon; 22.05 kHz output). Gated behind
     # OMNIVOICE_CONFUCIUS4_TTS_DIR so it's inert until enabled.
     "confucius4-tts": ("engines.confucius4", "Confucius4Backend"),
+    # audio.cpp (0xShug0/audio.cpp) — pure-C++ ggml runtime, no Python venv.
+    # v1 serves Breeze-TTS-2 (en+zh, clone+design) through a parent-managed
+    # audiocpp_server over loopback HTTP. Gated behind a server binary
+    # (OMNIVOICE_AUDIOCPP_BIN) so it's inert until enabled. Lazy for the
+    # same import-cycle reason as the entries above (engines.audiocpp
+    # imports services.tts_backend for TTSBackend).
+    "audiocpp": ("engines.audiocpp", "AudioCPPBackend"),
 }
 
 
@@ -2283,7 +2353,7 @@ _LAST_ERRORS: dict[str, str] = {}
 
 
 
-# Short install hints surfaced as tooltips on the Model Catalogue → Engines UI.
+# Short install hints surfaced as tooltips on the Model Catalogue UI.
 # Helps users understand what pip package to install and where.
 _INSTALL_HINTS: dict[str, str] = {
     "gemini-3.1-flash-tts": "Set GEMINI_API_KEY (or GOOGLE_API_KEY), then select this engine. Uses the cloud Gemini API; no voice cloning.",
@@ -2300,9 +2370,10 @@ _INSTALL_HINTS: dict[str, str] = {
     "omnivoice-gguf":"Bundled — runs the C++ omnivoice-tts binary in bin/. Quants download lazily from Serveurperso/OmniVoice-GGUF on first generate.",
     "supertonic3":   "uv sync --extra supertonic  (CPU-only ONNX, 31 langs, ~400 MB model on first use; OpenRAIL-M model license)",
     "pockettts":     "uv sync --extra pockettts  (Kyutai, CPU-only, ~100 MB model on first use; MIT code + CC-BY-4.0 weights; HF-gated, review terms and set HF_TOKEN)",
-    "moss-tts-v15":  "git clone OpenMOSS/MOSS-TTS + set OMNIVOICE_MOSS_TTS_V15_DIR  (own venv, transformers==5.0; 8B, ~16 GB weights; CUDA/CPU, no MPS; Apache-2.0)",
+    "moss-tts-v15":  "git clone OpenMOSS/MOSS-TTS + set OMNIVOICE_MOSS_TTS_V15_DIR  (own venv, transformers==5.0; 8B, ~16 GB weights; CUDA/ROCm/XPU/NPU/CPU, no MPS; Apache-2.0)",
     "dots-tts":      "git clone rednote-hilab/dots.tts + set OMNIVOICE_DOTS_TTS_DIR  (own venv, transformers==4.57; 2B, ~9 GB weights; CUDA/CPU, Linux/macOS only — no Windows; Apache-2.0)",
-    "confucius4-tts":"git clone netease-youdao/Confucius4-TTS + set OMNIVOICE_CONFUCIUS4_TTS_DIR  (own Python 3.10 venv; 14-lang cross-lingual zero-shot clone; ~5 GB weights auto-download; CUDA/CPU, no MPS; Apache-2.0)",
+    "confucius4-tts":"git clone netease-youdao/Confucius4-TTS + set OMNIVOICE_CONFUCIUS4_TTS_DIR  (own Python 3.10 venv; 14-lang cross-lingual zero-shot clone; ~5 GB weights auto-download; CUDA/ROCm/XPU/NPU/CPU, no MPS; Apache-2.0)",
+    "audiocpp":     "download the matching audio.cpp v0.7.2 prebuilt + set OMNIVOICE_AUDIOCPP_BIN, then explicitly install Breeze-TTS-2 in the engine's Weights list in Model Catalogue  (native CPU/Vulkan/CUDA/Metal GGUF server, no Python; en+zh clone+design; ~4.73 GiB; weights research/non-commercial only)",
 }
 
 
@@ -2323,8 +2394,54 @@ _SETUP_SNIPPETS: dict[str, str] = {
 }
 
 
+# Per-engine documentation page, as a repo-relative path (#1866). Every one of
+# these docs already exists and several are CI-guarded against the code they
+# describe (e.g. tests/test_cosyvoice_install_docs.py), but nothing in the app
+# linked to them, so the point of failure — an unavailable engine row — was a
+# dead end. Paths rather than URLs so tests/test_engine_docs.py can assert the
+# file is really there; the URL is built once, at read time, from core.links.
+#
+# Keyed on the engine id, so it stays correct when the doc filename does not
+# match the id (indextts2 → indextts.md).
+_ENGINE_DOCS: dict[str, str] = {
+    "omnivoice":            "docs/engines/omnivoice.md",
+    "omnivoice-subprocess": "docs/engines/omnivoice-subprocess.md",
+    "omnivoice-gguf":       "docs/engines/omnivoice-gguf.md",
+    "cosyvoice":            "docs/engines/cosyvoice.md",
+    "kittentts":            "docs/engines/kittentts.md",
+    "mlx-audio":            "docs/engines/mlx-audio.md",
+    "voxcpm2":              "docs/engines/voxcpm2.md",
+    "moss-tts-nano":        "docs/engines/moss-tts-nano.md",
+    "moss-tts-v15":         "docs/engines/moss-tts-v15.md",
+    "dots-tts":             "docs/engines/dots-tts.md",
+    "confucius4-tts":       "docs/engines/confucius4-tts.md",
+    "indextts2":            "docs/engines/indextts.md",
+    "gpt-sovits":           "docs/engines/gpt-sovits.md",
+    "sherpa-onnx":          "docs/engines/sherpa-onnx.md",
+    "supertonic3":          "docs/engines/supertonic3.md",
+    "pockettts":            "docs/engines/pockettts.md",
+    "audiocpp":             "docs/engines/audio-cpp.md",
+    "gemini-3.1-flash-tts": "docs/engines/gemini-tts.md",
+}
+
+
+def _engine_docs_url(bid: str) -> str | None:
+    """Public URL of this engine's doc page, or None when it has none.
+
+    VoiceStudio-owned constant either way: the path comes from the registry
+    above and the base from :mod:`core.links`, so no part of it is derived
+    from an engine probe. That is what lets it cross the public boundary
+    intact (see api.public_engine_metadata).
+    """
+    path = _ENGINE_DOCS.get(bid)
+    if not path:
+        return None
+    from core import links
+    return f"{links.PROJECT_REPO_BLOB_MAIN}/{path}"
+
+
 # Short, readable labels for mlx-audio's curated models (#981) — surfaced in
-# the Model Catalogue → Engines model picker so users see more than a bare key.
+# the Model Catalogue model picker so users see more than a bare key.
 # Single-sourced here rather than on MLXAudioBackend.CURATED_MODELS itself so
 # the class dict stays a plain key → repo-id map (what __init__ needs).
 _MLX_AUDIO_MODEL_LABELS: dict[str, str] = {
@@ -2349,14 +2466,24 @@ def _sidecar_installable_ids() -> frozenset[str]:
     button into their matrix rows.
     """
     try:
-        from services.sidecar_install import SPECS
-        return frozenset(SPECS)
+        # Host-aware: an engine whose installer cannot work on THIS machine
+        # (dots.tts on Windows, a CUDA-only install on a CPU host) must not get
+        # an Install button that can only fail.
+        from services.sidecar_install import installable_engine_ids
+        return installable_engine_ids()
     except Exception:  # pragma: no cover — defensive only
         return frozenset()
 
 
-def list_backends() -> list[dict]:
-    """Enumerate every registered backend with its availability state.
+def list_backends(*, include_hidden: bool = False) -> list[dict]:
+    """Enumerate the engine catalogue with each backend's availability state.
+
+    On MPS, the canonical ``omnivoice`` id already resolves to the killable
+    OmniVoice sidecar. The explicit ``omnivoice-subprocess`` compatibility id
+    is therefore omitted from the normal catalogue so the picker does not
+    advertise two choices with the same runtime behavior. Internal callers
+    that must validate or preserve a stored compatibility id can pass
+    ``include_hidden=True``.
 
     Per-entry shape (ENGINE-05 + ENGINE-06):
 
@@ -2370,10 +2497,11 @@ def list_backends() -> list[dict]:
                                                     #   e.g. VoxCPM2's >=2.0.3 upgrade hint)
           "install_hint":   Optional[str],
           "setup_snippet":  Optional[str],          # exact `export VAR=...` for path-gated opt-in engines
+          "docs_url":       Optional[str],          # this engine's doc page (registry-authored constant)
           "one_click_install": bool,                # services.sidecar_install can provision it in-app
           "last_error":     Optional[str],          # cached most-recent failure
           "isolation_mode": "in-process" | "subprocess",
-          "gpu_compat":     list[str],              # subset of {cuda, rocm, mps, xpu, cpu}
+          "gpu_compat":     list[str],              # subset of {cuda, rocm, mps, vulkan, xpu, npu, cpu}
           "supports_cloning": Optional[bool],       # True/False from the class attr; None when
                                                     #   model-dependent (property, e.g. mlx-audio)
           "effective_device": str,                  # device this engine uses on THIS host
@@ -2403,12 +2531,17 @@ def list_backends() -> list[dict]:
     from core.device_caps import detect_host_caps
     from services.engine_disk_usage import disk_summary_for
     from services.engine_evidence import snapshot as execution_snapshot
-    from services.engine_routing import routing_fields
     caps = detect_host_caps()
     installable = _sidecar_installable_ids()
 
     out: list[dict] = []
     for bid, cls in _REGISTRY.items():
+        if (
+            not include_hidden
+            and caps.family == "mps"
+            and bid == "omnivoice-subprocess"
+        ):
+            continue
         cls = _effective_backend_class(bid, cls, caps.family)
         try:
             ok, msg = cls.is_available()
@@ -2429,14 +2562,40 @@ def list_backends() -> list[dict]:
             isolation = "subprocess"
         else:
             isolation = "in-process"
-        gpu_compat = getattr(cls, "gpu_compat", ("cpu",))
+        from services.engine_routing import resolve_routing, runtime_compute_profile
+        try:
+            profile = runtime_compute_profile(cls, caps)
+        except Exception:
+            # Runtime-aware native probes remain optional metadata. A broken
+            # provider probe must not take down the engine picker, especially
+            # when availability already explains a missing binary or model.
+            compat = tuple(getattr(cls, "gpu_compat", ("cpu",)))
+            floor = float(getattr(cls, "min_vram_gb", 0.0) or 0.0)
+            profile = {
+                "gpu_compat": compat,
+                "min_vram_gb": floor,
+                **resolve_routing(compat, caps, floor),
+                "runtime_backend": None,
+                "runtime_device_index": None,
+                "runtime_device_name": None,
+                "runtime_hardware_family": None,
+                "runtime_vram_gb": None,
+                "runtime_device_verified": None,
+            }
+        gpu_compat = profile["gpu_compat"]
         # Cloning capability: same descriptor guard as
         # cloning_capable_engine_ids() — a class-level getattr on a *property*
         # (mlx-audio: capability depends on the picked model) returns the
         # descriptor, not a bool, so report None (= model-dependent) there
         # instead of an always-truthy false positive.
         _clone = getattr(cls, "supports_cloning", True)
-        routing = routing_fields(gpu_compat, caps, getattr(cls, "min_vram_gb", 0.0))
+        from core.scrub import scrub_text
+        routing = {
+            "effective_device": profile["effective_device"],
+            "routing_status": profile["routing_status"],
+            "routing_reason": scrub_text(profile["routing_reason"])
+            if profile["routing_reason"] else None,
+        }
         loaded_instance = None
         if _active_instance_id == bid:
             loaded_instance = _active_instance
@@ -2457,6 +2616,10 @@ def list_backends() -> list[dict]:
             "install_hint": _INSTALL_HINTS.get(bid),
             # Exact `export VAR=...` line for path-gated opt-in engines, or None.
             "setup_snippet": _SETUP_SNIPPETS.get(bid),
+            # This engine's doc page (#1866). Registry-authored constant, so it
+            # survives api.public_engine_metadata and gives an unavailable row
+            # somewhere to send the user.
+            "docs_url": _engine_docs_url(bid),
             # True when services.sidecar_install can provision this engine
             # in-app (Settings renders an Install button instead of leading
             # with the manual setup snippet).
@@ -2466,7 +2629,7 @@ def list_backends() -> list[dict]:
             "isolation_mode": isolation,
             "gpu_compat": list(gpu_compat),
             # effective_device / routing_status / routing_reason (scrubbed):
-            "min_vram_gb": getattr(cls, "min_vram_gb", 0.0) or None,
+            "min_vram_gb": profile["min_vram_gb"] or None,
             # effective_device / routing_status / routing_reason (scrubbed);
             # the reason now also carries the under-provisioned-GPU caveat.
             **routing,
@@ -2474,7 +2637,7 @@ def list_backends() -> list[dict]:
                 engine_id=bid,
                 engine_cls=cls,
                 instance=loaded_instance,
-                routing=routing,
+                routing={**profile, **routing},
                 caps=caps,
             ),
         })
@@ -2517,12 +2680,29 @@ def list_backends() -> list[dict]:
     return out
 
 
+# In-process engines that also run from a venv of their own once the
+# one-click installer has made one: engine id -> (sidecar module, class). Each
+# module exposes own_venv_python(); an install made into the app's environment
+# keeps running in-process.
+_OWN_VENV_SIDECARS: dict[str, tuple[str, str]] = {
+    "voxcpm2": ("engines.voxcpm2_subprocess", "VoxCPM2SubprocessBackend"),
+    "moss-tts-nano": ("engines.moss_tts_nano_subprocess", "MossTTSNanoSubprocessBackend"),
+    "cosyvoice": ("engines.cosyvoice_subprocess", "CosyVoiceSubprocessBackend"),
+}
+
+
 def _effective_backend_class(
     backend_id: str,
     backend_cls: type[TTSBackend],
     host_family: str | None = None,
 ) -> type[TTSBackend]:
     """Resolve host-specific containment without changing the configured id."""
+    sidecar = _OWN_VENV_SIDECARS.get(backend_id)
+    if sidecar is not None:
+        import importlib
+
+        module = importlib.import_module(sidecar[0])
+        return getattr(module, sidecar[1]) if module.own_venv_python() is not None else backend_cls
     if backend_id != "omnivoice":
         return backend_cls
     if host_family is None:
@@ -2576,7 +2756,9 @@ def active_routing() -> dict | None:
     """
     try:
         active = active_backend_id()
-        for b in list_backends():
+        # The MPS picker intentionally hides the redundant compatibility id,
+        # but routing must still describe a saved or environment-pinned id.
+        for b in list_backends(include_hidden=True):
             if b.get("id") == active:
                 return {
                     "engine": active,
@@ -2881,7 +3063,7 @@ def release_idle_engines(
 #
 # dub_generate.py and batch.py used to call services.model_manager.get_model()
 # directly, hardcoding OmniVoice regardless of the engine selected in
-# Model Catalogue → Engines — a SILENT fallback: pick VoxCPM2, dub anyway with
+# Model Catalogue — a SILENT fallback: pick VoxCPM2, dub anyway with
 # OmniVoice, no error. This is the single resolution path both routers now
 # call instead, mirroring generation.py's /generate resolution (engine id →
 # is_available() → routing gate) plus a voice-cloning capability gate that
@@ -2912,7 +3094,7 @@ async def resolve_generation_backend(
     except ValueError as e:
         raise ValueError(
             f"Active TTS engine '{engine_id}' is not a recognized backend ({e}). "
-            "Check Model Catalogue → Engines or the OMNIVOICE_TTS_BACKEND env var."
+            "Check Model Catalogue or the OMNIVOICE_TTS_BACKEND env var."
         ) from e
 
     try:
@@ -2923,10 +3105,9 @@ async def resolve_generation_backend(
         raise ValueError(f"TTS engine '{engine_id}' is not available: {_mask_hf_tokens(msg)}")
 
     from core.device_caps import detect_host_caps
-    from services.engine_routing import resolve_routing
-    routing = resolve_routing(
-        getattr(backend_cls, "gpu_compat", ("cpu",)), detect_host_caps(),
-        getattr(backend_cls, "min_vram_gb", 0.0),
+    from services.engine_routing import runtime_compute_profile_async
+    routing = await runtime_compute_profile_async(
+        backend_cls, detect_host_caps()
     )
     if routing["routing_status"] == "unavailable":
         raise ValueError(routing["routing_reason"])
@@ -2946,7 +3127,7 @@ async def resolve_generation_backend(
             f"The active TTS engine '{engine_id}' doesn't support voice cloning, "
             f"so {cloning_purpose} can't preserve speaker voices. Switch to one "
             f"of: {', '.join(cloning_capable_engine_ids())} in "
-            "Model Catalogue → Engines, or use OmniVoice for this job."
+            "Model Catalogue, or use OmniVoice for this job."
         )
 
     return backend
@@ -2964,4 +3145,6 @@ def __getattr__(name: str):  # pragma: no cover - exercised via tests
         return _REGISTRY[name if name in _REGISTRY else None]
     if name == "IndexTTS2Backend":
         return _REGISTRY["indextts2"]
+    if name == "AudioCPPBackend":
+        return _REGISTRY["audiocpp"]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

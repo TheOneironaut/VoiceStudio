@@ -157,7 +157,7 @@ without the quarantine step.
 - **Apple Silicon (M-series):** VoiceStudio automatically picks the `mlx-whisper`
   and `mlx-audio` backends where available — these use the Apple Neural Engine
   and Metal Performance Shaders for ~2× the throughput of the CPU path.
-  Installing the **Parakeet TDT v3 (MLX)** model from **Model Catalogue → Models**
+  Installing the **Parakeet TDT v3 (MLX)** model from **Model Catalogue** (ASR tab → the engine's **Weights**)
   additionally makes dictation/capture prefer the `parakeet-mlx` engine
   (25 European languages, word timestamps, ~2 GB unified memory) — it is never
   downloaded without that explicit install, and it is only auto-preferred when
@@ -170,7 +170,7 @@ without the quarantine step.
   works only when pointed at a remote backend (**Settings → Sharing → Remote
   backend**).
 
-The picker in **Model Catalogue → Engines** shows which backend is active.
+The picker in **Model Catalogue** shows which backend is active.
 
 ## Hugging Face token (optional but recommended)
 
@@ -190,3 +190,21 @@ Hit a wall? See [docs/install/troubleshooting.md](troubleshooting.md).
 The in-app error UI (the React error boundary that fires on backend errors)
 includes an **"Open docs for this error"** button — that button deeplinks
 back into this docs tree at the right section for the error class.
+
+### Desktop window chrome
+
+The main window uses native macOS traffic lights with an overlay title bar;
+window sizing, resize limits, and application file-drop behavior match the
+other desktop platforms. The platform configuration repeats the complete window
+list because Tauri replaces arrays when merging it with the shared config.
+The capture widget remains a separate borderless window created at runtime.
+Its window-scoped Tauri capability permits hiding after recording or idle
+reconciliation on every desktop platform.
+
+### Fast process shutdown
+
+A process that exits while shutdown is signalling it can report a macOS
+permission error. VoiceStudio accepts this only after confirming the original
+process exited without being reaped (macOS can take a moment to report that
+exit, so it waits up to a quarter of a second), then still waits for nested
+operations to drain. Live-process permission errors and lost process ownership remain failures.

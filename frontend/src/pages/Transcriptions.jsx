@@ -11,8 +11,11 @@ import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Mic, Copy, Trash2, Search, Clock, Languages, FileText, Download } from 'lucide-react';
 import { Button } from '../ui';
-import EngineQuickSwitch from '../components/EngineQuickSwitch';
+import { detectPlatform } from '../utils/micError';
+import { useDictationReadiness } from '../hooks/useDictationReadiness';
+import AsrModelChooser from '../components/AsrModelChooser';
 import { toast } from 'react-hot-toast';
+import { copyText as copyToClipboard } from '../utils/copyText';
 import { toMillis } from '../utils/relativeTime';
 import { useEffectiveDictationShortcut } from '../hooks/useEffectiveDictationShortcut';
 import { requestDictationCapture } from '../utils/dictationCapture';
@@ -24,6 +27,23 @@ import {
 
 function saveTranscriptions(list) {
   localStorage.setItem(TRANSCRIPTIONS_KEY, JSON.stringify(list));
+}
+
+/** A segment's "12.0s – 15.5s" label, tolerant of missing timings (#1798).
+ *
+ * Not every ASR path produces a timed segment: an OpenAI-compatible backend
+ * answering in `json`/`text` format has no timings at all, and
+ * `services/asr_backend.py` records that honestly as `end: None` rather than
+ * inventing a number. Calling `.toFixed()` on it threw during render and took
+ * the whole Transcriptions view down, so a transcript that merely lacked
+ * timings became one the user could not read at all. Render whichever half is
+ * known, and nothing when neither is. */
+export function segTimeRange(seg) {
+  const known = (v) => typeof v === 'number' && Number.isFinite(v);
+  const start = known(seg?.start) ? `${seg.start.toFixed(1)}s` : null;
+  const end = known(seg?.end) ? `${seg.end.toFixed(1)}s` : null;
+  if (start && end) return `${start} – ${end}`;
+  return start || end || '';
 }
 
 export function addTranscription(entry) {
@@ -50,17 +70,28 @@ export default function TranscriptionsPage() {
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState(null);
   const { info: shortcut } = useEffectiveDictationShortcut();
+  const readiness = useDictationReadiness();
+  const checkReadiness = readiness.check;
+  // What the progress bar names: the model the user picked, else the recommended one.
+  const installTarget = readiness.target || readiness.missing?.recommended;
+  const [starting, setStarting] = useState(false);
+  const captureDisabled = readiness.phase !== 'ready' || starting;
   const emptyDescription = t('transcriptions.empty_desc', { shortcut: shortcut.display });
   const normalizedSearch = search.trim();
 
   const startCapture = useCallback(async () => {
+    if (captureDisabled) return;
+    setStarting(true);
     try {
+      if (!(await checkReadiness())) return;
       await requestDictationCapture('start');
     } catch (error) {
       console.warn('Could not start dictation:', error);
       toast.error(t('transcriptions.capture_failed'));
+    } finally {
+      setStarting(false);
     }
-  }, [t]);
+  }, [t, captureDisabled, checkReadiness]);
 
   // Listen for new transcriptions added from CaptureButton
   useEffect(() => {
@@ -86,8 +117,11 @@ export default function TranscriptionsPage() {
 
   const copyText = useCallback(
     (text) => {
-      copyText(text).then(
-        () => toast.success(t('transcriptions.copied')),
+      copyToClipboard(text).then(
+        (copied) =>
+          copied
+            ? toast.success(t('transcriptions.copied'))
+            : toast.error(t('transcriptions.copy_failed')),
         () => toast.error(t('transcriptions.copy_failed')),
       );
     },
@@ -160,10 +194,17 @@ export default function TranscriptionsPage() {
           </span>
         </div>
         <div className="txn-header__right flex items-center gap-[6px]">
-          <EngineQuickSwitch family="asr" />
-          <Button size="sm" variant="primary" onClick={startCapture}>
-            <Mic size={13} /> {t('transcriptions.capture')}
-          </Button>
+          {transcriptions.length > 0 && (
+            <Button
+              size="sm"
+              variant="primary"
+              leading={<Mic size={13} />}
+              disabled={captureDisabled}
+              onClick={startCapture}
+            >
+              {t('transcriptions.capture')}
+            </Button>
+          )}
           <div className="txn-search relative flex items-center">
             <Search
               size={13}
@@ -200,6 +241,66 @@ export default function TranscriptionsPage() {
         </div>
       </div>
 
+      {readiness.phase !== 'ready' && (
+        <div
+          className="rounded-lg border border-border bg-bg-elev-1 p-4 flex flex-col gap-3"
+          role="status"
+          aria-live="polite"
+        >
+          <p className="text-sm text-fg m-0">
+            {readiness.phase === 'checking'
+              ? t('setup.checking')
+              : readiness.phase === 'error'
+                ? t('common.error')
+                : readiness.phase === 'installing'
+                  ? t('dub.install_progress', { engine: installTarget?.label })
+                  : t('asr_missing.message')}
+          </p>
+          {readiness.phase === 'installing' ? (
+            <progress
+              className="w-full"
+              max={100}
+              value={readiness.percent ?? undefined}
+              aria-label={t('dub.install_progress', { engine: installTarget?.label })}
+            />
+          ) : (
+            readiness.phase !== 'checking' && (
+              <>
+                {readiness.phase === 'missing' && (
+                  <AsrModelChooser
+                    fallback={readiness.missing?.recommended}
+                    onInstall={readiness.install}
+                    onSelect={readiness.select}
+                  />
+                )}
+                <div className="flex items-center gap-3">
+                  <Button size="sm" variant="ghost" onClick={readiness.check}>
+                    {t('common.refresh')}
+                  </Button>
+                  {readiness.error && <span role="alert">{t('common.error')}</span>}
+                </div>
+              </>
+            )
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+        <kbd className="rounded border border-border bg-bg-elev-1 px-2 py-1 font-mono">
+          {shortcut.display}
+        </kbd>
+        <span>
+          {t('transcriptions.capture')} / {t('common.stop')}
+        </span>
+        <span aria-hidden="true" className="mx-2">
+          ·
+        </span>
+        <kbd className="rounded border border-border bg-bg-elev-1 px-2 py-1 font-mono">
+          {detectPlatform() === 'mac' ? '⌘+V' : 'Ctrl+V'}
+        </kbd>
+        <span>{t('clone.paste')}</span>
+      </div>
+
       {/* Content */}
       <div className="txn-content grid flex-1 grid-cols-[1fr_1fr] gap-[12px] min-h-0">
         {/* List */}
@@ -213,11 +314,21 @@ export default function TranscriptionsPage() {
                   : t('transcriptions.empty_title')}
               </p>
               <p className="txn-empty__desc m-0 max-w-[280px] text-[var(--text-xs)] leading-[1.6] text-fg-muted">
-                {normalizedSearch ? t('transcriptions.empty_search_desc') : emptyDescription}
+                {normalizedSearch
+                  ? t('transcriptions.empty_search_desc')
+                  : readiness.phase === 'ready'
+                    ? emptyDescription
+                    : ''}
               </p>
               {!normalizedSearch && (
-                <Button size="sm" variant="primary" onClick={startCapture}>
-                  <Mic size={13} /> {t('transcriptions.capture')}
+                <Button
+                  size="sm"
+                  variant="primary"
+                  leading={<Mic size={13} />}
+                  disabled={captureDisabled}
+                  onClick={startCapture}
+                >
+                  {t('transcriptions.capture')}
                 </Button>
               )}
             </div>
@@ -288,7 +399,7 @@ export default function TranscriptionsPage() {
                     className="txn-detail__seg flex gap-[8px] py-[3px] text-[var(--text-xs)]"
                   >
                     <span className="txn-detail__seg-time shrink-0 font-mono text-fg-subtle min-w-[80px]">
-                      {seg.start.toFixed(1)}s – {seg.end.toFixed(1)}s
+                      {segTimeRange(seg)}
                     </span>
                     <span className="txn-detail__seg-text text-fg">{seg.text}</span>
                   </div>

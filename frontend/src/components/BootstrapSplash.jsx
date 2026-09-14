@@ -120,7 +120,25 @@ const STEPS = [
   'starting_backend',
 ];
 
-const MAX_LOG_LINES = 200;
+// Stages that only occur when there is actual first-run/repair work to do.
+// `awaiting_setup` renders its own screen (FirstRunSetup) rather than the
+// step list below, but it still counts as "install work observed" (#1894):
+// reaching it means Rust found no venv and is about to do real work, so the
+// journey chrome should already be armed by the time the step list appears.
+const INSTALL_STAGES = ['downloading_uv', 'creating_venv', 'installing_deps', 'awaiting_setup'];
+
+// How many log lines the <pre> shows. `logs` state holds exactly this tail and
+// nothing more, so the per-event array copy stays bounded no matter how long a
+// bootstrap runs.
+//
+// The FULL run lives in `allLogsRef` instead (#1847). Four consumers need every
+// line — the Activity counter, the Copy button, the actionable failure hints and
+// the unrecoverable-retry gate — and capping the state they read meant a cold
+// install silently destroyed its own early output. A ref rather than state
+// because appending to it is O(1); `totalLines` is what makes a new line
+// re-render. It lives for exactly one bootstrap: both retry paths clear it, and
+// App.jsx unmounts the splash the moment the stage flips to 'ready'.
+const VISIBLE_LOG_LINES = 200;
 
 /** Scan logs + error message for known failure patterns and return i18n keys
  *  for actionable hints (resolved with `t(...)` at render — English defaults
@@ -365,6 +383,27 @@ function IpcLostRecovery({ t }) {
 }
 
 /** Mono error block. */
+/** When the backend last produced ANY line of bootstrap output.
+ *
+ * #1791: the stall watchdog in `useBootstrapStage` keys on `bootstrap_status`,
+ * which sits on a single stage for the whole of a slow start — a cold `import
+ * torch` off a mapped network drive can hold `starting_backend` for many
+ * minutes. The narration that proves it is alive ("Loading ML runtime
+ * (PyTorch)…") arrives on the separate `bootstrap-log` event stream instead,
+ * so the watchdog never saw it and called a live launch stuck. A splash that
+ * is still printing new lines is by definition not the info-less spinner the
+ * watchdog exists to break.
+ *
+ * Module-scoped rather than a ref because the two halves live in different
+ * components — `BootstrapSplash` owns the event subscription, `useBootstrapStage`
+ * owns the watchdog — and they are always mounted as a pair.
+ */
+let lastBootstrapLogTs = 0;
+
+export function noteBootstrapLogActivity(ts = Date.now()) {
+  lastBootstrapLogTs = ts;
+}
+
 function ErrorBox({ children }) {
   return (
     <pre className="m-0 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-danger/10 px-3 py-2 font-mono text-[0.66rem] leading-relaxed text-danger shadow-[inset_2px_0_0_var(--color-danger)]">
@@ -373,7 +412,7 @@ function ErrorBox({ children }) {
   );
 }
 
-export function BootstrapSplash({ stage, message }) {
+export function BootstrapSplash({ stage, message, attempt = 0 }) {
   const { t } = useTranslation();
   const locale = useAppStore((s) => s.locale);
   const setLocale = useAppStore((s) => s.setLocale);
@@ -424,22 +463,90 @@ export function BootstrapSplash({ stage, message }) {
   const [progress, setProgress] = useState(null);
   const [region, setRegionState] = useState('auto');
   const [retrying, setRetrying] = useState(false);
+  // Stages actually seen during the CURRENT bootstrap attempt (see the
+  // tracking effect below). Drives "done" ticks and journey visibility off
+  // observed reality instead of list position (#1894).
+  const [polledStages, setPolledStages] = useState(() => new Set([stage]));
+  // Every line of this bootstrap. `logs` above is only the rendered tail.
+  const [totalLines, setTotalLines] = useState(0);
+  const allLogsRef = useRef([]);
+  // Backfill and the live listener can overlap by a few lines at handover.
+  // Dedup guards that seam and nothing else — see the listener.
+  const handoverDoneRef = useRef(false);
   const logRef = useRef(null);
+  const prevAttemptRef = useRef(attempt); // last attempt id Rust reported
   const prevProgRef = useRef(null); // {bytes, t} — last progress event
   const rateRef = useRef(0); // EMA bytes/sec across events
+
+  // The union of what we polled and what actually logged.
+  //
+  // Neither source alone is complete. `bootstrap_status` is sampled ~1/s, so
+  // a stage that starts and finishes between samples is never polled — on a
+  // fast disk `creating_venv` routinely does. Stage-tagged `bootstrap-log`
+  // lines close that gap: the Rust side emits them as the work happens, so a
+  // line tagged with a stage is proof that stage ran, whether or not the
+  // poll ever saw it.
+  //
+  // Lines are scoped to the current attempt so a retry cannot inherit the
+  // previous one's evidence. The attempt is the id Rust stamps on both the
+  // status reply and every log line (#1900) — an exact match, rather than a
+  // clock comparison against a boundary this side had to guess at. (The
+  // VISIBLE log is left alone: clearing it on a restart nobody asked for
+  // would destroy the user's context, cf. #1847.)
+  const observedStages = useMemo(() => {
+    const seen = new Set(polledStages);
+    for (const entry of allLogsRef.current) {
+      if (entry?.stage && entry.attempt === attempt) seen.add(entry.stage);
+    }
+    return seen;
+    // totalLines is the render signal for allLogsRef, which is a ref and so
+    // cannot itself be a dependency. Reading the full run rather than the
+    // rendered tail is the point: a stage whose only evidence scrolled out of
+    // the capped tail would otherwise read as never having run (#1847).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [polledStages, totalLines, attempt]);
 
   const label = t(`bootstrap.${stage}`, STAGE_LABEL[stage]);
   const stepIndex = Math.max(0, STEPS.indexOf(stage));
   const isFailed = stage === 'failed';
   // Retrying an Intel-Mac install can never succeed — don't offer the dead end.
-  const isUnrecoverable = isFailed && isUnrecoverableFailure(message, logs);
+  // Reads the full run, not the rendered tail: an Intel-Mac marker printed
+  // early in a long install used to scroll out of the capped array, and the
+  // dead-end detection went with it. Only evaluated once `isFailed`, by which
+  // point no more lines are arriving.
+  const isUnrecoverable = isFailed && isUnrecoverableFailure(message, allLogsRef.current);
+
+  const resetLogs = () => {
+    allLogsRef.current = [];
+    handoverDoneRef.current = false;
+    setTotalLines(0);
+    setLogs([]);
+  };
+
+  // True once any genuine install stage has been observed this session. On a
+  // warm start the Rust stage jumps straight from `checking` to
+  // `starting_backend` — nothing here ever fires — so the first-run install
+  // chrome (journey rail, "Installing" heading, step list) stays suppressed
+  // instead of fabricating completed work (#1894).
+  const installWorkSeen = INSTALL_STAGES.some((s) => observedStages.has(s));
+
+  // Clear the splash for a retry the user just asked for. The attempt
+  // BOUNDARY is no longer this side's business (#1900) — Rust bumps its
+  // attempt id inside `respawn_backend`, before the stage moves, and the
+  // reset effect below follows that. What is left here is presentation: empty
+  // the visible log and the polled-stage set so the user watches a fresh run
+  // start, instead of the failed one's output sitting under a spinner.
+  const beginAttempt = () => {
+    resetLogs();
+    setPolledStages(new Set());
+  };
 
   const handleRetry = async () => {
     if (retrying) return;
     setRetrying(true);
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      setLogs([]);
+      beginAttempt();
       await invoke('retry_bootstrap');
     } catch (e) {
       console.error('retry failed', e);
@@ -454,7 +561,7 @@ export function BootstrapSplash({ stage, message }) {
     setRetrying(true);
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      setLogs([]);
+      beginAttempt();
       await invoke('clean_and_retry_bootstrap');
     } catch (e) {
       console.error('clean retry failed', e);
@@ -462,6 +569,34 @@ export function BootstrapSplash({ stage, message }) {
       setRetrying(false);
     }
   };
+
+  // Record `stage` as observed the moment it's seen, and reset when a new
+  // attempt begins.
+  //
+  // Sticky WITHIN an attempt: the functional updater bails out (same Set
+  // reference) once a stage is recorded, so it never un-observes and never
+  // loops. But NOT across attempts — a Retry restarts the bootstrap from
+  // `checking`, and what the previous attempt did says nothing about what
+  // this one will do. Without the reset, stages the new attempt skips would
+  // still render as completed, which is the very fabrication this change
+  // exists to remove.
+  //
+  // A new attempt is a fact Rust reports, not something this side infers from
+  // a sampled stage (#1900). Every real restart bumps the id — both retry
+  // commands via `respawn_backend`, and the supervisor's own venv rebuild — so
+  // the id changing IS the boundary, whether or not the poll ever sampled the
+  // restart stage. The heuristics this replaces (arriving at
+  // `checking`/`awaiting_setup`, leaving `failed`) could miss a Rust-initiated
+  // restart by up to a poll interval and discard that attempt's earliest
+  // evidence. Equality on an id cannot.
+  useEffect(() => {
+    if (prevAttemptRef.current !== attempt) {
+      prevAttemptRef.current = attempt;
+      setPolledStages(new Set([stage]));
+      return;
+    }
+    setPolledStages((p) => (p.has(stage) ? p : new Set(p).add(stage)));
+  }, [stage, attempt]);
 
   // Load persisted region on mount.
   useEffect(() => {
@@ -507,13 +642,15 @@ export function BootstrapSplash({ stage, message }) {
         try {
           const buffered = await invoke('get_bootstrap_logs');
           if (!cancelled && Array.isArray(buffered) && buffered.length > 0) {
-            setLogs(
-              buffered.map(({ stage: s, line }) => ({
-                stage: s,
-                line,
-                t: Date.now(),
-              })),
-            );
+            const entries = buffered.map(({ attempt: a, stage: s, line }) => ({
+              attempt: a ?? 0,
+              stage: s,
+              line,
+              t: Date.now(),
+            }));
+            allLogsRef.current = entries;
+            setTotalLines(entries.length);
+            setLogs(entries.slice(-VISIBLE_LOG_LINES));
           }
         } catch {
           /* command may not exist in older builds */
@@ -521,14 +658,35 @@ export function BootstrapSplash({ stage, message }) {
 
         // Subscribe to live events for anything new from here on.
         unlistenLog = await listen('bootstrap-log', (e) => {
-          const { stage: s, line } = e.payload || {};
+          const { attempt: a, stage: s, line } = e.payload || {};
           if (!line) return;
+          noteBootstrapLogActivity();
+          // Dedup ONLY across the backfill→live seam. The overlap it exists
+          // for can only happen on the first live event; running it for the
+          // whole bootstrap silently dropped legitimate repeats, and installer
+          // output repeats itself constantly. Telling a true repeat from a
+          // replayed one needs a sequence number from the Rust side, so the
+          // window is narrowed to where the ambiguity actually is instead of
+          // guessing for the rest of the run.
+          if (!handoverDoneRef.current) {
+            const seam = allLogsRef.current.slice(-5);
+            // The attempt is part of the identity (#1900, CodeRabbit): the
+            // same stage and the same text from a DIFFERENT attempt is not a
+            // replay of a buffered line, it is this attempt's own evidence.
+            // Matching on stage+line alone dropped it, which can remove the
+            // only proof for a stage the poll never sampled.
+            if (seam.some((l) => l.attempt === (a ?? 0) && l.stage === s && l.line === line))
+              return;
+            handoverDoneRef.current = true;
+          }
+          const entry = { attempt: a ?? 0, stage: s, line, t: Date.now() };
+          allLogsRef.current.push(entry);
+          setTotalLines(allLogsRef.current.length);
           setLogs((prev) => {
-            // Deduplicate against backfill by checking the last few lines.
-            const lastFew = prev.slice(-5);
-            if (lastFew.some((l) => l.stage === s && l.line === line)) return prev;
-            const next = prev.concat([{ stage: s, line, t: Date.now() }]);
-            return next.length > MAX_LOG_LINES ? next.slice(next.length - MAX_LOG_LINES) : next;
+            const next = prev.concat([entry]);
+            return next.length > VISIBLE_LOG_LINES
+              ? next.slice(next.length - VISIBLE_LOG_LINES)
+              : next;
           });
         });
         unlistenProgress = await listen('bootstrap-progress', (e) => {
@@ -569,11 +727,15 @@ export function BootstrapSplash({ stage, message }) {
     if (isFailed) setLogsOpen(true);
   }, [isFailed]);
 
+  // Serializes the WHOLE run, not the visible tail (#1847). A user filing a
+  // bootstrap bug is asked for this output, and the early lines — which stage
+  // failed first, which mirror was reached — are the ones that scrolled out.
   const handleCopyLogs = () => {
+    const all = allLogsRef.current;
     const logText =
-      logs.length === 0
+      all.length === 0
         ? 'No log output captured.'
-        : logs.map((l) => `[${l.stage}] ${l.line}`).join('\n');
+        : all.map((l) => `[${l.stage}] ${l.line}`).join('\n');
     const full =
       isFailed && message ? `ERROR: ${message}\n\n--- Bootstrap Logs ---\n${logText}` : logText;
     copyText(full)
@@ -616,7 +778,10 @@ export function BootstrapSplash({ stage, message }) {
           data-tauri-drag-region
         >
           <Waveform />
-          <JourneyRail t={t} />
+          {/* Suppressed until real install work is observed — otherwise a
+              warm start (or a repair sync) shows "Setup done / Installing
+              active" for work that never happened (#1894). */}
+          {installWorkSeen && <JourneyRail t={t} />}
           <div className="mt-2 flex flex-wrap items-end justify-between gap-6">
             <div className="min-w-0">
               {/* Version rides beside the app name — same masthead across all
@@ -699,7 +864,7 @@ export function BootstrapSplash({ stage, message }) {
                 <Lightbulb size={12} /> {t('bootstrap.what_to_try', 'What to try:')}
               </span>
               <ul className="mt-1.5 flex list-disc flex-col gap-1.5 pl-5 text-fg-muted">
-                {detectHints(message, logs).map((key) => (
+                {detectHints(message, allLogsRef.current).map((key) => (
                   <li key={key}>{t(key)}</li>
                 ))}
               </ul>
@@ -738,9 +903,16 @@ export function BootstrapSplash({ stage, message }) {
           </section>
         ) : (
           <section className="fr-rise flex flex-col gap-2.5" style={{ '--rise': 1 }}>
-            <h2 className="m-0 font-mono text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-muted">
-              {t('firstrun.installing_title', 'Installing')}
-            </h2>
+            {/* Heading, step list and resume note only make sense once real
+                install work has actually been observed — otherwise a warm
+                start or a repair sync narrates a first-run install that
+                never happened (#1894). The live stage label in the masthead
+                and the progress meter below stay visible either way. */}
+            {installWorkSeen && (
+              <h2 className="m-0 font-mono text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-muted">
+                {t('firstrun.installing_title', 'Installing')}
+              </h2>
+            )}
             {/* Overall journey meter. */}
             <Progress
               value={overallPct}
@@ -748,61 +920,69 @@ export function BootstrapSplash({ stage, message }) {
               size="md"
               aria-valuenow={Math.round(overallPct)}
             />
-            <ol className="m-0 mt-1 flex list-none flex-col gap-2 p-0">
-              {STEPS.map((s, i) => {
-                const done = i < stepIndex;
-                const activeStep = i === stepIndex;
-                return (
-                  <li
-                    key={s}
-                    className={cn(
-                      'flex min-w-0 items-center gap-2 text-sm',
-                      !done && !activeStep && 'opacity-45',
-                    )}
-                  >
-                    <span
+            {installWorkSeen && (
+              <ol className="m-0 mt-1 flex list-none flex-col gap-2 p-0">
+                {STEPS.map((s, i) => {
+                  const activeStep = i === stepIndex;
+                  // Done only if this stage was actually observed AND it isn't
+                  // the one currently in progress — list POSITION alone lies on
+                  // a warm start or a repair sync, where earlier stages in the
+                  // fixed STEPS order are skipped by Rust entirely (#1894).
+                  const done = !activeStep && observedStages.has(s);
+                  return (
+                    <li
+                      key={s}
                       className={cn(
-                        'h-1.5 w-1.5 shrink-0 rounded-full',
-                        done
-                          ? 'bg-success shadow-[0_0_5px_1px_color-mix(in_srgb,var(--color-success)_50%,transparent)]'
-                          : activeStep
-                            ? 'bg-primary shadow-[0_0_6px_1px_var(--color-brand-glow)] fr-pulse'
-                            : 'bg-fg-subtle/40',
+                        'flex min-w-0 items-center gap-2 text-sm',
+                        !done && !activeStep && 'opacity-45',
                       )}
-                      aria-hidden="true"
-                    />
-                    <span className={cn(activeStep && 'font-semibold', done && 'text-fg-muted')}>
-                      {t(`bootstrap.${s}`, STAGE_LABEL[s])}
-                    </span>
-                    {activeStep && stageProgress && (
-                      <span className="ml-auto whitespace-nowrap font-mono text-[0.64rem] tabular-nums text-fg-muted">
-                        {formatBytes(stageProgress.bytes_done)}
-                        {stageProgress.bytes_total > 0
-                          ? ` / ${formatBytes(stageProgress.bytes_total)}`
-                          : ''}
-                        {pctFromBytes != null ? ` (${pctFromBytes}%)` : ''}
-                        {stageProgress.bytes_total > 0 &&
-                          rateRef.current > 0 &&
-                          stageProgress.bytes_done < stageProgress.bytes_total &&
-                          ` · ${t('firstrun.eta_left', {
-                            eta: formatEta(
-                              (stageProgress.bytes_total - stageProgress.bytes_done) /
-                                rateRef.current,
-                            ),
-                            defaultValue: '~{{eta}} left',
-                          })}`}
+                    >
+                      <span
+                        className={cn(
+                          'h-1.5 w-1.5 shrink-0 rounded-full',
+                          done
+                            ? 'bg-success shadow-[0_0_5px_1px_color-mix(in_srgb,var(--color-success)_50%,transparent)]'
+                            : activeStep
+                              ? 'bg-primary shadow-[0_0_6px_1px_var(--color-brand-glow)] fr-pulse'
+                              : 'bg-fg-subtle/40',
+                        )}
+                        aria-hidden="true"
+                      />
+                      <span className={cn(activeStep && 'font-semibold', done && 'text-fg-muted')}>
+                        {t(`bootstrap.${s}`, STAGE_LABEL[s])}
                       </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-            <p className="m-0 text-xs text-fg-subtle">
-              {t(
-                'firstrun.resume_note',
-                'Interrupted downloads resume automatically — closing the app is safe.',
-              )}
-            </p>
+                      {activeStep && stageProgress && (
+                        <span className="ml-auto whitespace-nowrap font-mono text-[0.64rem] tabular-nums text-fg-muted">
+                          {formatBytes(stageProgress.bytes_done)}
+                          {stageProgress.bytes_total > 0
+                            ? ` / ${formatBytes(stageProgress.bytes_total)}`
+                            : ''}
+                          {pctFromBytes != null ? ` (${pctFromBytes}%)` : ''}
+                          {stageProgress.bytes_total > 0 &&
+                            rateRef.current > 0 &&
+                            stageProgress.bytes_done < stageProgress.bytes_total &&
+                            ` · ${t('firstrun.eta_left', {
+                              eta: formatEta(
+                                (stageProgress.bytes_total - stageProgress.bytes_done) /
+                                  rateRef.current,
+                              ),
+                              defaultValue: '~{{eta}} left',
+                            })}`}
+                        </span>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+            {installWorkSeen && (
+              <p className="m-0 text-xs text-fg-subtle">
+                {t(
+                  'firstrun.resume_note',
+                  'Interrupted downloads resume automatically — closing the app is safe.',
+                )}
+              </p>
+            )}
           </section>
         )}
 
@@ -811,7 +991,7 @@ export function BootstrapSplash({ stage, message }) {
           <h2 className="m-0 flex items-center font-mono text-[0.62rem] font-semibold uppercase tracking-[0.18em] text-fg-muted">
             {t('firstrun.activity_title', 'Activity')}
             <span className="ml-auto tracking-[0.08em] text-fg-subtle">
-              {logs.length > 0 && t('bootstrap.lines', { count: logs.length })}
+              {totalLines > 0 && t('bootstrap.lines', { count: totalLines })}
             </span>
           </h2>
           <div className="flex items-center gap-1.5">
@@ -856,19 +1036,21 @@ export function BootstrapSplash({ stage, message }) {
  * returns 'ready' immediately so the splash never mounts.
  */
 export function useBootstrapStage(pollMs = 1000) {
-  const [state, setState] = useState({ stage: 'checking', message: null });
+  // `attempt` is Rust's bootstrap-attempt id (#1900). 0 means "none reported",
+  // which is where the non-Tauri and dev-web short-circuits below settle.
+  const [state, setState] = useState({ stage: 'checking', message: null, attempt: 0 });
 
   useEffect(() => {
     if (typeof window === 'undefined') {
-      setState({ stage: 'ready', message: null });
+      setState({ stage: 'ready', message: null, attempt: 0 });
       return;
     }
     if (!('__TAURI_INTERNALS__' in window)) {
-      setState({ stage: 'ready', message: null });
+      setState({ stage: 'ready', message: null, attempt: 0 });
       return;
     }
     if (import.meta.env.DEV) {
-      setState({ stage: 'ready', message: null });
+      setState({ stage: 'ready', message: null, attempt: 0 });
       return;
     }
 
@@ -888,7 +1070,7 @@ export function useBootstrapStage(pollMs = 1000) {
         healthUrl: `${getApiBase()}/health`,
         onHealthy: () => {
           if (cancelled) return;
-          setState({ stage: 'ready', message: null });
+          setState({ stage: 'ready', message: null, attempt: 0 });
         },
       });
     };
@@ -908,11 +1090,11 @@ export function useBootstrapStage(pollMs = 1000) {
       onReadyViaHttp: () => {
         if (cancelled) return;
         httpForcedReady = true;
-        setState({ stage: 'ready', message: null });
+        setState({ stage: 'ready', message: null, attempt: 0 });
       },
       onStuck: () => {
         if (cancelled || httpForcedReady) return;
-        setState({ stage: 'ipc_lost', message: null });
+        setState({ stage: 'ipc_lost', message: null, attempt: 0 });
       },
     });
     // Stall watchdog (#474): if the backend hangs in a non-terminal stage and
@@ -957,7 +1139,7 @@ export function useBootstrapStage(pollMs = 1000) {
       const tauriInvoke = await invoke();
       if (!tauriInvoke) {
         watchdog.cancel();
-        setState({ stage: 'ready', message: null });
+        setState({ stage: 'ready', message: null, attempt: 0 });
         return;
       }
       const tick = async () => {
@@ -974,6 +1156,9 @@ export function useBootstrapStage(pollMs = 1000) {
           misses = 0;
           const stage = res.stage || 'ready';
           const message = res.message || null;
+          // Rust's bootstrap-attempt id (#1900). A build that predates the
+          // field reports nothing, which reads as 0 — never a live attempt.
+          const attempt = typeof res.attempt === 'number' ? res.attempt : 0;
           // Reset the stall clock whenever something actually changes.
           const key = `${stage}|${message || ''}`;
           if (key !== lastKey) {
@@ -982,9 +1167,11 @@ export function useBootstrapStage(pollMs = 1000) {
           }
           // Rust returns { stage: 'ready' } or { stage: 'failed', message: '…' } etc.
           if (stage !== 'ready' && stage !== 'failed') {
-            if (Date.now() - lastChangeTs > stallBudgetMs(stage)) {
+            const lastActivity = Math.max(lastChangeTs, lastBootstrapLogTs);
+            if (Date.now() - lastActivity > stallBudgetMs(stage)) {
               // Stuck — surface it as a failure so Retry/logs/hints appear.
               setState({
+                attempt,
                 stage: 'failed',
                 message:
                   (message ? message + '\n\n' : '') +
@@ -995,10 +1182,10 @@ export function useBootstrapStage(pollMs = 1000) {
               startFailedRecovery();
               return; // stop IPC polling — only /health recovery remains
             }
-            setState({ stage, message });
+            setState({ attempt, stage, message });
             timer = setTimeout(tick, pollMs);
           } else {
-            setState({ stage, message });
+            setState({ attempt, stage, message });
             if (stage === 'failed') startFailedRecovery();
           }
         } catch {
@@ -1015,7 +1202,7 @@ export function useBootstrapStage(pollMs = 1000) {
             // HTTP watchdog too, so it can't flip to 'ipc_lost' underneath
             // the already-mounted main UI (#879).
             watchdog.cancel();
-            setState({ stage: 'ready', message: null });
+            setState({ stage: 'ready', message: null, attempt: 0 });
           }
         }
       };

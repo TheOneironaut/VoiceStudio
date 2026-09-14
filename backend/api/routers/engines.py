@@ -42,10 +42,26 @@ _FAMILIES = {
 }
 
 
+def _catalogue_active_id(family: str, module) -> str:
+    """Return the active id represented by the public engine catalogue."""
+    active = module.active_backend_id()
+    if family != "tts" or active != "omnivoice-subprocess":
+        return active
+
+    from core.device_caps import detect_host_caps
+
+    try:
+        return "omnivoice" if detect_host_caps().family == "mps" else active
+    except Exception:
+        return active
+
+
 def _family_payload(family: str, module):
     """Public inventory plus whether an environment pin owns this family."""
     return {
-        "active": module.active_backend_id(),
+        # MPS hides the explicit compatibility row, so legacy configs report
+        # the visible canonical equivalent as active to picker consumers.
+        "active": _catalogue_active_id(family, module),
         "env_override": bool(os.environ.get(f"OMNIVOICE_{family.upper()}_BACKEND")),
         "backends": public_backends(module.list_backends()),
     }
@@ -188,6 +204,11 @@ async def uninstall_translation_engine(engine_id: str):
     pkg = entry.get("pip_package")
     if not pkg:
         return {"status": "no_op", "engine": engine_id}
+    # The builtin flag is a promise someone has to remember to make; this
+    # check does not depend on it (#2019).
+    blocked = translation_engines.uninstall_blocker(engine_id)
+    if blocked:
+        raise HTTPException(status_code=blocked[0], detail=blocked[1])
     rc, out = await translation_engines.run_pip(["uninstall", "-y", pkg])
     if rc != 0:
         raise HTTPException(status_code=500, detail=f"pip uninstall {pkg} failed ({rc}): {out[-1000:]}")
@@ -199,7 +220,7 @@ async def uninstall_translation_engine(engine_id: str):
 # Sidecar engines (dedicated venv + source checkout + weights, isolated from
 # the parent's transformers>=5.3) used to require four manual terminal steps.
 # These routes drive services.sidecar_install: POST starts a resumable
-# background job, GET polls its step-by-step status (the Model Catalogue → Engines
+# background job, GET polls its step-by-step status (the Model Catalogue
 # Install button polls this), DELETE removes an app-managed install.
 #
 # Path namespace: /engines/sidecar/{engine_id}/… — NOT /engines/{engine_id}/…
@@ -230,6 +251,11 @@ def install_sidecar_engine(engine_id: str):
     from services import sidecar_install
     try:
         return sidecar_install.start_install(engine_id)
+    except sidecar_install.HostUnsupported as exc:
+        # The engine has an installer, but not one that can work on this
+        # machine. 409, not 404: the route is right, the host is the problem,
+        # and the message (a VoiceStudio-owned sentence) says what to do.
+        raise HTTPException(status_code=409, detail=str(exc))
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -354,6 +380,9 @@ def engine_health(engine_id: str):
         )
 
     t0 = perf_counter()
+    # Stable exception class when the probe itself raised, None when it merely
+    # returned not-available. Never the exception text — see the log line below.
+    raised_class: str | None = None
     if hasattr(cls, "health_check"):
         # SubprocessBackend path — spawn sidecar (if not running) and ping.
         # ``health_check`` already swallows its own exceptions per Plan
@@ -364,6 +393,7 @@ def engine_health(engine_id: str):
             ok, msg = instance.health_check()
         except Exception as exc:
             ok, msg = False, f"{type(exc).__name__}: {exc}"
+            raised_class = type(exc).__name__
     else:
         # In-process backend — `is_available()` is the classmethod-level
         # liveness check. Cheap and side-effect-free for every shipping
@@ -372,6 +402,7 @@ def engine_health(engine_id: str):
             ok, msg = cls.is_available()
         except Exception as exc:
             ok, msg = False, f"{type(exc).__name__}: {exc}"
+            raised_class = type(exc).__name__
 
     # Engine-owned output can contain much more than shaped HF tokens: local
     # paths, arbitrary credentials, source lines, or a nested traceback.
@@ -379,7 +410,38 @@ def engine_health(engine_id: str):
 
     latency_ms = (perf_counter() - t0) * 1000.0
     if not ok:
-        logger.warning("Engine health check failed; details withheld")
+        # The response tells the user to "check the backend log for details",
+        # and docs/engines/*.md asks a user diagnosing an unavailable engine to
+        # copy that engine's log lines. The old line named neither the engine
+        # nor anything about the probe, so neither instruction could be
+        # followed (#1866).
+        #
+        # `probe=` reports what the PROBE DID, not what went wrong. It cannot
+        # classify the cause: SubprocessBackend.health_check() swallows its own
+        # exceptions per Plan 02-01's contract, so a dead sidecar and a package
+        # that was never installed both arrive here as `returned-unavailable`.
+        # Separating those needs structured failure metadata from the probes
+        # themselves, which is a wider change than this one.
+        #
+        # Still no diagnostic text and still not the caller-supplied id: the
+        # engine id comes off the resolved registry class and a raised probe
+        # contributes only its exception class, the same shape
+        # core.public_errors.public_failure() logs as `class=`.
+        # tests/test_response_safety.py pins that boundary and passes
+        # unchanged.
+        #
+        # The id is a class attribute off the registry rather than caller
+        # input, but this line is a log-injection surface either way, so it is
+        # flattened to a single token before it goes in.
+        engine_label = str(getattr(cls, "id", None) or cls.__name__)
+        engine_label = "".join(
+            c if (c.isalnum() or c in "-_.") else "-" for c in engine_label
+        )[:64]
+        logger.warning(
+            "Engine health check failed; engine=%s probe=%s, details withheld",
+            engine_label or "unknown",
+            f"raised:{raised_class}" if raised_class else "returned-unavailable",
+        )
     return {
         "id": engine_id,
         "ok": bool(ok),
@@ -588,7 +650,15 @@ def select_engine(req: SelectEngineRequest):
     if not family:
         raise HTTPException(400, f"Unknown family: {req.family}. Expected one of tts/asr/llm.")
     module, pref_key = family
-    available = {b["id"]: b for b in module.list_backends()}
+    # MPS intentionally hides the redundant explicit OmniVoice sidecar from
+    # the picker, but existing scripts and saved preferences may still submit
+    # that supported compatibility id directly.
+    rows = (
+        module.list_backends(include_hidden=True)
+        if req.family == "tts"
+        else module.list_backends()
+    )
+    available = {b["id"]: b for b in rows}
     if req.backend_id not in available:
         raise HTTPException(400, f"Unknown {req.family} backend: {req.backend_id!r}")
     entry = available[req.backend_id]
@@ -607,7 +677,7 @@ def select_engine(req: SelectEngineRequest):
     # #981: mlx-audio multiplexes 7+ curated models behind one backend id —
     # persist the model pick alongside the backend id so the UI can actually
     # select which curated model gets loaded (previously it always defaulted
-    # to Kokoro no matter what the user downloaded in Model Catalogue → Models).
+    # to Kokoro no matter what the user downloaded in the engine's Weights list in Model Catalogue).
     if req.family == "tts" and req.backend_id == "mlx-audio" and req.model_id is not None:
         known_keys = tts_backend.MLXAudioBackend.CURATED_MODELS
         # Accept a curated key OR a raw HF repo id ("owner/name") — the same

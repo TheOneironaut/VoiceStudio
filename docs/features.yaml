@@ -60,6 +60,8 @@ tts_engines:
     readme: "**Confucius4-TTS**"
     doc: docs/engines/confucius4-tts.md
   - id: pockettts
+  - id: audiocpp
+    doc: docs/engines/audio-cpp.md
   - id: gemini-3.1-flash-tts
     readme: Gemini 3.1 Flash TTS Preview
     doc: docs/engines/gemini-tts.md

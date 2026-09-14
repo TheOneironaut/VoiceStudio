@@ -6,7 +6,7 @@
     "clear_confirm": "Isto elimina permanentemente todos os projetos guardados de Histórias e Audiolivros e quaisquer rascunhos não guardados para que o VoiceStudio possa voltar a abrir. Não é possível desfazer. Continuar?"
   },
   "backendUnreachable": {
-    "contact_recent": "Estava respondendo há {{ago}} e depois parou de responder — muito provavelmente travou ou foi encerrado no meio de uma requisição.",
+    "contact_recent": "Respondia há {{ago}} e depois parou de responder, e nenhuma falha foi registada — por isso pode continuar ativo, mas preso numa tarefa pesada que está a ocupar o motor.",
     "contact_never": "Não respondeu nenhuma vez nesta sessão — pode ser que nunca tenha iniciado.",
     "dev": "Não é possível contactar o backend local do VoiceStudio. {{contact}} Com `bun run dev` o backend corre com recarga automática: qualquer alteração de ficheiro — incluindo gravar enquanto havia um pedido em curso — reinicia-o e corta a ligação. Tente a ação novamente primeiro; se foi uma recarga, funciona. Se continuar a falhar, verifique o terminal com `bun run dev` para um traceback de Python ou uma mensagem de saída, e omnivoice.log na sua pasta de dados do VoiceStudio.",
     "server": "Não foi possível conectar ao servidor backend do VoiceStudio. {{contact}} Verifique os logs do servidor para encontrar a causa (ex.: `docker logs <container>` ou `journalctl`) — e note que, se o Docker serve esta página, a própria página pode cair junto com o backend.",
@@ -33,13 +33,16 @@
   },
   "catalogue": {
     "title": "Catálogo de modelos",
-    "tab_engines": "Motores",
-    "tab_models": "Modelos",
-    "moved_title": "Agora no catálogo de modelos",
-    "moved_engines_body": "A escolha do motor padrão de voz, transcrição e LLM foi para o espaço Catálogo de modelos.",
-    "moved_models_body": "Explorar, instalar e remover modelos baixados foi para o espaço Catálogo de modelos.",
-    "open_engines": "Abrir motores",
-    "open_models": "Abrir modelos"
+    "summary_title": "Sua configuração",
+    "other_weights": "Outros pesos",
+    "change": "Alterar",
+    "status_setup": "Requer configuração",
+    "status_cpu": "Alternativa CPU",
+    "status_off": "Desligado",
+    "storage_link": "Configurações de armazenamento",
+    "reco_line": "{{installed}} de {{total}} modelos recomendados para {{device}} instalados · faltam {{remaining}} GB",
+    "install_rest": "Instalar o restante",
+    "device_remote": "Remoto"
   },
   "settings": {
     "remote_backend_test": "Testar conexão",
@@ -159,7 +162,7 @@
     "shortcut_reset_failed": "Falha na reinicialização: {{message}}",
     "reset_longform_failed": "O VoiceStudio não conseguiu limpar com segurança os projetos salvos. Os dados dos seus projetos não foram alterados; libere espaço de armazenamento ou reinicie o aplicativo e tente novamente.",
     "cancel": "Cancelar",
-    "hf_token_also_clear": "Limpar também",
+    "hf_token_also_clear": "Excluir também os arquivos de tokens salvos do HuggingFace CLI",
     "hf_token_clear_btn": "Limpar token",
     "hf_token_clear_confirm": "Limpar o token HuggingFace da fonte App?",
     "hf_token_clear_dialog": "Limpar token",
@@ -334,10 +337,30 @@
     "device_family_cuda": "NVIDIA GPU (CUDA)",
     "device_family_rocm": "AMD GPU (ROCm)",
     "device_family_xpu": "Intel GPU (XPU)",
+    "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
     "device_load_failed": "Falha ao carregar a configuração do dispositivo",
-    "perf_save_failed": "Falha ao salvar a configuração"
+    "perf_save_failed": "Falha ao salvar a configuração",
+    "generate_budget_title": "Orçamento de tempo de computação",
+    "generate_budget_desc": "Por quanto tempo uma geração pode ser executada antes de ser abandonada por ser pesada demais para este hardware. Renderizações em CPU são legitimamente mais lentas do que as aceleradas, por isso têm seu próprio limite, mais alto.",
+    "generate_timeout_gpu": "Orçamento acelerado (GPU)",
+    "generate_timeout_gpu_note": "Usado quando a geração é executada em CUDA, ROCm, MPS ou outro acelerador. Também usado para geração em CPU se nenhum orçamento de CPU estiver definido abaixo.",
+    "generate_timeout_cpu": "Orçamento de CPU",
+    "generate_timeout_cpu_note": "Usado quando a geração é executada na CPU. Depois de salvo aqui, este valor sempre rege a geração em CPU — independentemente do orçamento acelerado acima.",
+    "generate_timeout_invalid": "Insira um número de segundos maior que 0 e no máximo {{max}}.",
+    "generate_timeout_saved": "Salvo. Reinicie o VoiceStudio para que o novo orçamento tenha efeito.",
+    "generate_timeout_shadowed_badge": "Substituído externamente",
+    "generate_timeout_shadowed_note": "Uma variável de ambiente externa ao VoiceStudio (shell, arquivo .env ou contêiner) está definindo este valor no momento — o valor salvo aqui é ignorado até que essa variável seja removida.",
+    "generate_timeout_shadowed_toast": "Salvo, mas uma variável de ambiente externa ao VoiceStudio está definindo este valor no momento — ele continuará sendo usado até que essa variável seja removida.",
+    "hf_token_not_checked": "Não testado",
+    "hf_source_app_label": "VoiceStudio (criptografado, recomendado)",
+    "hf_source_cli_label": "HuggingFace CLI",
+    "hf_source_env_label": "Variável de ambiente",
+    "theme_auto": "Automático do Sistema",
+    "theme_light": "Claro",
+    "reduce_motion": "Reduzir movimento",
+    "reduce_motion_desc": "Para as animações de fundo e as transições. A definição do sistema continua a ser respeitada; esta acrescenta-se."
   },
   "bootstrap": {
     "title": "VoiceStudio",
@@ -456,6 +479,9 @@
     "deleteProjectConfirm": "Excluir este projeto permanentemente?"
   },
   "common": {
+    "stop": "Pare",
+    "resume": "Retomar",
+    "paused": "Em pausa",
     "open": "Abrir",
     "cancel": "Cancelar",
     "save": "Salvar",
@@ -528,10 +554,19 @@
     "convert_desc": "Diga uma vez — ouça em outra voz. Fala para fala, totalmente local."
   },
   "clone": {
+    "text_label": "Texto",
+    "paste": "Colar",
+    "paste_failed": "O acesso à área de transferência foi bloqueado. Cole diretamente no campo de texto usando o teclado.",
     "prompt": "Alerta",
     "language": "Idioma",
     "steps": "Passos",
     "voice_source": "Fonte de voz",
+    "reference_audio": "Áudio de referência",
+    "reference_hint": "Use de 5 a 15 segundos de fala nítida.",
+    "upload_audio": "Carregar áudio",
+    "optional_details": "Detalhes opcionais",
+    "starting_recording": "Iniciando…",
+    "unsupported_audio": "Escolha um arquivo de áudio compatível: WAV, MP3, M4A, FLAC, OGG, AAC ou WebM.",
     "saved_profiles": "Perfis salvos",
     "transcript": "Transcrição",
     "style": "Estilo",
@@ -580,6 +615,7 @@
     "cat_Style": "Estilo",
     "cat_EnglishAccent": "Sotaque Inglês",
     "cat_ChineseDialect": "Dialeto Chinês",
+    "vd_exclusive_cleared": "{{cleared}} limpo — um dialeto chinês e um sotaque inglês não podem ser combinados.",
     "opt_Auto": "✨ Automóvel",
     "opt_male": "masculino",
     "opt_female": "feminino",
@@ -598,7 +634,7 @@
     "stop_playback": "Parar reprodução",
     "describe_label": "Descreva a sua voz",
     "describe_placeholder": "ex.: a warm elderly British storyteller, slightly raspy",
-    "describe_hint": "A sua descrição (em inglês) define os controlos abaixo — pode afiná-los depois.",
+    "describe_hint": "Descreva a voz, ou escolha um ponto de partida. Qualquer um dos dois preenche os detalhes abaixo.",
     "describe_unmatched": "Não foi possível mapear: {{items}}",
     "describe_no_match": "Ainda não foram reconhecidos traços de voz — experimente palavras como deep, elderly ou British.",
     "define_by_design": "Por design",
@@ -619,7 +655,14 @@
     "seed_keep": "Guarde esta semente",
     "seed_reroll": "Nova semente",
     "seed_reroll_hint": "Role uma nova semente aleatória e guarde-a",
-    "define_convert": "Converter"
+    "define_convert": "Converter",
+    "details": "Detalhes",
+    "edit": "Editar",
+    "cat_AccentDialect": "Sotaque ou dialeto",
+    "accent_dialect_hint": "um ou outro, nunca os dois",
+    "reset_to_description": "Redefinir conforme a descrição",
+    "chips_more": "mais {{count}}…",
+    "cfg": "CFG"
   },
   "about": {
     "app": "Aplicativo",
@@ -684,6 +727,7 @@
   },
   "consent": {
     "title": "Ajudar a melhorar o VoiceStudio?",
+    "desc": "Estatísticas de uso anônimas e sem conteúdo que nos ajudam a corrigir bugs mais rápido — totalmente opcionais, desativadas por padrão.",
     "step_label": "Melhorar o VoiceStudio",
     "body": "Estatísticas de uso anônimas e sem conteúdo: quais mecanismos são usados, quanto tempo as gerações levam e o tipo de erros. Nunca o seu texto, o seu áudio, os seus arquivos ou qualquer coisa que o identifique. Nada é enviado a menos que você aceite, e você pode mudar de ideia a qualquer momento em Configurações → Privacidade.",
     "learn_more": "O que exatamente é enviado?",
@@ -738,12 +782,27 @@
     "configureProviders": "Configurar provedores",
     "loading": "Carregando motores…",
     "refresh": "Atualizar",
-    "matrixTitle": "Matriz de compatibilidade do motor",
+    "matrixTitle": "Motores",
+    "ariaTest": "Testar {{engine}}",
+    "ariaRecheck": "Verificar {{engine}} novamente",
+    "ariaSelfTest": "Autoteste de {{engine}}",
+    "ariaUnload": "Liberar {{engine}} da memória",
+    "ariaUse": "Usar {{engine}}",
+    "ariaAcceptLicense": "Revisar e aceitar a licença de {{engine}}",
+    "weights": "Pesos",
+    "noWeights": "Sem pesos no catálogo — este motor baixa o que precisa no primeiro uso.",
+    "colRunsOn": "Executa em",
+    "detailsFor": "Detalhes de {{engine}}",
+    "runsIsolated": "Executa isolado",
+    "selectHint": "Selecione um motor para ver o que ele precisa, testá-lo ou instalá-lo.",
     "loadFailed": "Falha ao carregar motores: {{message}}",
     "couldNotLoad": "Não foi possível carregar os motores: {{message}}",
     "retry": "Tentar novamente",
     "activeEngine": "Ativo {{family}}: {{engine}}",
     "engineCompatLabel": "{{family}} compatibilidade do motor",
+    "dictation_model": "Modelo de ditado",
+    "dictation_model_hint": "Usado pelo ditado ao vivo e por este mecanismo ao transcrever.",
+    "dictation_not_installed": "Não instalado — selecione para baixar",
     "active": "ativo",
     "whyUnavailable": "O que falta",
     "diskDetails": "Detalhes do disco",
@@ -789,6 +848,7 @@
     "routingRemote": "Remoto",
     "routingUnknown": "Desconhecido",
     "routingEffectiveChip": "Funciona em {{device}} nesta máquina",
+    "gpuVulkan": "Vulkan",
     "routingCaveatTitle": "GPU selecionada, mas: {{reason}}",
     "selectCpuFallback": "{{engine}}: em execução na CPU — {{reason}}",
     "selectWithCaveat": "Alterado para {{engine}} — {{reason}}",
@@ -798,7 +858,9 @@
     "familyMatrixTitle": "Motores {{family}}",
     "familyDesc_tts": "Transforma o roteiro em fala. Estúdio, Dublagem e Lote usam o motor ativo.",
     "familyDesc_asr": "Transforma áudio em texto para transcrição, dublagem, legendas e ditado.",
-    "familyDesc_llm": "Assistente de texto opcional para tradução e reescrita. “Desativado” ignora essas etapas."
+    "familyDesc_llm": "Assistente de texto opcional para tradução e reescrita. “Desativado” ignora essas etapas.",
+    "mpsLongText": "{{engine}} é executado em Apple Silicon (MPS) aqui e este texto é longo — a geração pode ultrapassar o limite de tempo. Um texto mais curto, ou dividido em algumas partes, será bem mais rápido.",
+    "inMemory": "Na memória"
   },
   "capture": {
     "desc": "As teclas de atalho globais funcionam apenas no aplicativo de desktop. A IU da web usa um atalho <1>Ctrl+Shift+Space</1> na página enquanto a janela está em foco.",
@@ -936,6 +998,9 @@
     "consent_revoked": "Verificação revogada"
   },
   "dub": {
+    "timing_label": "Sincronização",
+    "timing_concise": "Conciso",
+    "timing_stretch_video": "Estender vídeo",
     "install_engine_pkg": "Instalar {{pkg}}",
     "needs_install_short": "Requer instalação",
     "install_popover_title": "Instalar este motor",
@@ -956,6 +1021,7 @@
     "paste_url": "…ou cole o URL do YouTube/vídeo",
     "ingest": "Ingerir",
     "pull_captions": "Obtenha legendas + traduções automáticas do YouTube",
+    "batch_queue_link": "Dublando muitos vídeos? Abra a fila em lote",
     "youtube_auth": "Login no YouTube (opcional)",
     "youtube_cookie_file": "Escolher uma exportação cookies.txt",
     "remove_cookie_file": "Remover arquivo de cookies",
@@ -1142,7 +1208,11 @@
     "multi_lang_skipped": "A tradução de {{langs}} falhou; essas dublagens foram ignoradas para evitar uma faixa no idioma errado.",
     "manage_languages": "Gerenciar idiomas",
     "languages_done": "Concluído",
-    "languages_pending": "Pendente"
+    "languages_pending": "Pendente",
+    "live_preview": "Prévia ao vivo",
+    "live_preview_title": "Ouça uma linha enquanto a edita — o segmento editado transmite TTS com sua voz do CAST após uma breve pausa. Apenas reprodução: nada é salvo e a exportação continua renderizando em qualidade total.",
+    "live_preview_pick_voice": "Atribua uma voz do CAST a esta linha ou ao seu falante para ouvir a prévia ao vivo.",
+    "autofit_quality": "Ajuste automático"
   },
   "glossary": {
     "title": "Glossário",
@@ -1239,7 +1309,15 @@
     "fit_audio_title": "O áudio cabe dentro do slot.",
     "fit_ratio_title": "O áudio TTS é {{pct}}% do slot.",
     "qc_verify": "Verifique",
-    "qc_verify_title": "ASR de segunda passagem ouvido: \"{{heard}}\" — ouça novamente ou duble esta linha."
+    "qc_verify_title": "ASR de segunda passagem ouvido: \"{{heard}}\" — ouça novamente ou duble esta linha.",
+    "live_play_title": "Transmitir esta linha agora (prévia ao vivo)",
+    "live_stop_title": "Parar a prévia ao vivo",
+    "plan_apply": "Usar versão mais curta",
+    "plan_apply_title": "Substituir esta linha pela versão mais curta sugerida: “{{text}}”",
+    "plan_impossible": "Não cabe +{{seconds}}s",
+    "plan_impossible_title": "Fala prevista ≈{{est}}s para {{avail}}s disponíveis. Cerca de {{seconds}}s excedem qualquer ajuste possível e o áudio seria cortado. Encurte o texto antes de gerar.",
+    "plan_tight": "Ajuste apertado",
+    "plan_tight_title": "Fala prevista ≈{{est}}s para {{avail}}s disponíveis. O ajuste inteligente pode compensar com uma aceleração audível ou desaceleração do vídeo. Encurte o texto para um resultado melhor."
   },
   "timeline": {
     "track_label": "Linha do tempo de segmentos",
@@ -1372,7 +1450,18 @@
     "preserve_bg": "Preservar o áudio de fundo (música/FX)",
     "estimate": "{{videos}} vídeo(s) × {{langs}} idioma(s) = {{jobs}} trabalho(s)",
     "select_files_langs": "Selecione arquivos e idiomas",
-    "add_to_queue": "Adicionar à fila"
+    "add_to_queue": "Adicionar à fila",
+    "watch_folder": "Monitorar pasta",
+    "watching": "Monitorando {{folder}}",
+    "watch_paused": "Pausado — {{folder}}",
+    "watch_added": "{{count}} adicionados automaticamente",
+    "watch_pause": "Pausar",
+    "watch_resume": "Retomar",
+    "watch_stop": "Parar",
+    "watch_started": "Monitorando {{folder}} — vídeos novos entram na fila automaticamente",
+    "watch_unsupported": "O monitoramento de pastas requer o app para desktop ou um navegador baseado em Chromium — use Adicionar vídeos.",
+    "watch_failed": "Monitoramento interrompido — a pasta não pode mais ser lida (movida, excluída ou permissões alteradas). Selecione-a novamente para retomar.",
+    "watch_start_failed": "Não foi possível começar a monitorar essa pasta — selecione-a novamente para tentar de novo."
   },
   "gallery": {
     "title": "VoiceStudio Galeria",
@@ -1491,6 +1580,8 @@
     "open": "Abrir",
     "install_required_models": "Instale os modelos necessários acima para continuar.",
     "try_dictation": "Experimente o ditado",
+    "try_dictation_desc": "Pressione seu atalho uma vez para confirmar que o ditado funciona antes de concluir a configuração.",
+    "dictation_step_label": "Ditado",
     "next_try_dictation": "Próximo: Experimente o ditado",
     "step_aria": "Etapa {{num}}: {{label}}",
     "step_completed": "concluída",
@@ -1650,6 +1741,7 @@
     "dictation_lede": "Leia um deles em voz alta depois de pressionar a tecla de atalho ou pressione Replay para enviar a amostra agrupada através do transcritor para que você possa ver o trabalho do ditado de ponta a ponta sem falar.",
     "dictation_status_ok": "Verificado – a tecla de atalho funciona nesta máquina",
     "dictation_status_pending": "Pressione seu atalho em qualquer lugar para testar",
+    "dictation_status_taken": "Outra aplicação já usa este atalho — escolha outro nas Definições.",
     "dictation_status_warn": "Nenhuma tecla de atalho registrada – defina uma abaixo",
     "dictation_hear": "Ouça",
     "dictation_stop": "Pare",
@@ -1819,6 +1911,7 @@
     "hint": "8 etapas · visualização rápida"
   },
   "header": {
+    "speech": "Fala",
     "kicker_studio": "Estúdio",
     "kicker_library": "Biblioteca",
     "kicker_preferences": "Preferências",
@@ -1925,6 +2018,7 @@
     "preview_voice": "Visualizar voz"
   },
   "checkpoint": {
+    "timing_review": "{{count}} segmentos precisam de revisão de tempo",
     "asr_title": "Transcrições prontas",
     "asr_cta": "Traduzir",
     "asr_hint": "Corrija quaisquer erros de ASR agora – a dicção precisa salva tentativas de TTS posteriormente.",
@@ -1935,7 +2029,13 @@
     "done_hint": "Revise as proporções de tempo e sincronização. Ajuste qualquer linha e clique em \"Regen alterado\" para um refazer parcial rápido.",
     "segment_one": "segmento {{count}}",
     "segment_other": "{{count}} segmentos",
-    "dismiss_title": "Dispensar – não reaparecerá nesta fase até recarregar"
+    "dismiss_title": "Dispensar – não reaparecerá nesta fase até recarregar",
+    "timing_review_one": "{{count}} segmento precisa de revisão de tempo",
+    "timing_review_other": "{{count}} segmentos precisam de revisão de tempo",
+    "timing_review_zero": "{{count}} segmentos precisam de revisão de tempo",
+    "timing_review_two": "{{count}} segmentos precisam de revisão de tempo",
+    "timing_review_few": "{{count}} segmentos precisam de revisão de tempo",
+    "timing_review_many": "{{count}} segmentos precisam de revisão de tempo"
   },
   "compare": {
     "title": "Comparação de voz A/B",
@@ -2035,7 +2135,10 @@
     "voice_previews_checked": "verificado {{when}}",
     "voice_previews_never": "ainda não verificado",
     "voice_previews_check": "Verificar agora",
-    "voice_previews_rejected": "Atualização da galeria de vozes rejeitada: {{message}}"
+    "voice_previews_rejected": "Atualização da galeria de vozes rejeitada: {{message}}",
+    "role_llm": "LLM",
+    "role_tts": "TTS",
+    "role_asr": "ASR"
   },
   "enterprise_faq": {
     "q_internal_tools": "Preciso de uma licença para ferramentas internas?",
@@ -2066,6 +2169,7 @@
     "ingest_cancelled": "Ingestão cancelada",
     "ingest_failed": "Falha na ingestão de URL: {{message}}",
     "retry_cancelled": "Retry cancelled",
+    "transcribe_stream_dropped": "O fluxo de transcrição terminou antes que qualquer segmento chegasse, e não foi possível contatar o backend para saber o motivo. Verifique o log do backend e, se o modelo ASR ainda estava sendo baixado, os pesos dele em Catálogo de modelos.",
     "transcription_failed": "Falha na transcrição: {{message}}",
     "import_srt_no_job": "Carregue ou ingira um vídeo primeiro – não há trabalho para anexar legendas.",
     "import_srt_after_speakers": "SRT na fila. A análise dos falantes será concluída primeiro para preservar as vozes clonadas.",
@@ -2115,6 +2219,9 @@
     "error_prefix": "Erro: {{message}}",
     "ignored_unsupported": "Instrução não suportada ignorada: {{items}}",
     "ignored_duplicate": "Ignorado (categoria já definida): {{items}}",
+    "ignored_conflict": "{{items}} ignorado — um dialeto chinês e um sotaque inglês não podem ser combinados.",
+    "dialect_accent_conflict": "Um dialeto chinês e um sotaque inglês não podem ser usados juntos. Limpe um deles antes de gerar novamente.",
+    "instruct_category_conflict": "Foram selecionadas duas opções de design de voz conflitantes na mesma categoria (ex.: dois gêneros). Limpe uma delas antes de gerar novamente.",
     "ref_audio_unusable": "Nenhuma fala foi detectada no áudio de referência — o clipe está em silêncio ou quase, então não há voz para clonar. Grave novamente mais perto do microfone (confira se o dispositivo de entrada correto está selecionado e se o nível se move) ou escolha outro clipe.",
     "ref_audio_too_long": "Uma referência pode ter no máximo 20 segundos com transcrição ou 75 segundos sem ela. Corte-a para um trecho de fala claro de 3–10 segundos; se fornecer texto, corte a transcrição para o mesmo trecho.",
     "ref_audio_no_speech": "A detecção automática não encontrou palavras faladas na referência. Corte-a para um trecho de fala claro de 3–10 segundos ou forneça uma transcrição correspondente."
@@ -2324,7 +2431,10 @@
     "hf_token_saved_fast": "Token Hugging Face salvo – downloads agora são mais rápidos",
     "hf_token_inline_prompt": "Acelere os downloads com um token Hugging Face gratuito",
     "hf_token_inline_ph": "Cole o token hf_… (opcional)",
-    "hf_token_get_short": "Ganhe um grátis →"
+    "hf_token_get_short": "Ganhe um grátis →",
+    "hf_token_active_using": "Token do Hugging Face encontrado em {{source}} — {{masked}}",
+    "hf_token_replace": "Substituir token…",
+    "hf_token_replace_warning": "Isso substitui o token salvo para este aplicativo. Não revoga o token antigo."
   },
   "history": {
     "dub_meta": "{{segments}} segmentos · {{duration}} s",
@@ -2401,6 +2511,8 @@
     "test_placeholder": "Digite uma frase para visualizar a substituição…",
     "test_result": "Será falado como:",
     "test_nochange": "Nenhuma entrada corresponde – falada como escrita.",
+    "test_inert": "Guardado mas ainda não aplicado neste motor: {{terms}}. As entradas IPA e CMU são guardadas e validadas, mas hoje só o respelling altera o texto falado.",
+    "not_applied_badge": "Ainda não aplicado",
     "load_error": "Não foi possível carregar o dicionário de pronúncia.",
     "save_error": "Não foi possível salvar essa entrada.",
     "lang_label": "Código do idioma (por exemplo, en, de) ou deixe em branco para Global",
@@ -2436,10 +2548,13 @@
     "warn_unknown_voice": "Voz desconhecida «{{name}}» — a padrão será usada",
     "warn_empty_chapter": "O capítulo «{{title}}» não tem texto falado",
     "warn_unknown_tag": "Tag não reconhecida {{tag}} — será lida em voz alta",
-    "untitled": "Sem título",
+    "untitled": "Audiolivro sem título",
     "dismiss": "Dispensar",
     "output": "Saída",
     "title": "Audiolivro",
+    "tab_script": "Roteiro",
+    "tab_voices": "Vozes",
+    "tab_book": "Livro",
     "subtitle": "Escreva ou importe sua história, escolha cada voz e exporte um audiolivro bem-acabado com capítulos de verdade.",
     "script": "Roteiro",
     "script_placeholder": "# Capítulo Um\nEra uma vez… [pausa de 500ms] o fim.\n\n# Capítulo Dois\n[voz: narrador] E assim continuou.",
@@ -2448,6 +2563,14 @@
     "preview_plan": "Plano de visualização",
     "stop": "Parar",
     "stopped_note": "Parado — os capítulos concluídos estão em cache; clique em Criar novamente para retomar.",
+    "recovery_title": "Audiolivro interrompido",
+    "recovery_progress": "{{done}} de {{total}} capítulos estão em cache",
+    "recovery_hint": "Retomar reutiliza os capítulos concluídos e sintetiza apenas o que falta.",
+    "resume": "Retomar",
+    "open_chapter_cache": "Abrir cache dos capítulos",
+    "cache_location_hint": "Cache de áudio dos capítulos: {{cachePath}} · Manifesto de retomada: {{manifestPath}}",
+    "resume_failed": "Não foi possível retomar o audiolivro: {{message}}",
+    "open_cache_failed": "Não foi possível abrir o cache dos capítulos",
     "progress_summary": "Sintetizando {{current}} de {{total}} capítulos",
     "eta": "~{{time}} restante",
     "chapter_n": "Capítulo {{n}}",
@@ -2559,7 +2682,13 @@
   },
   "waveform": {
     "source_missing": "Mídia de origem ausente — este arquivo pode ter sido movido ou excluído. Reenvie o vídeo para continuar.",
-    "load_failed": "Não foi possível carregar o áudio deste arquivo"
+    "load_failed": "Não foi possível carregar o áudio deste arquivo",
+    "controls": "Controles de reprodução",
+    "restart": "Reiniciar reprodução",
+    "shortcuts": "J/K/L: retroceder, reproduzir/pausar, avançar",
+    "zoom": "Nível de zoom",
+    "timeline": "Linha do tempo da forma de onda",
+    "loading": "Carregando forma de onda…"
   },
   "tts": {
     "routingFallback": "Rodando em CPU — este mecanismo não possui caminho de GPU em sua máquina, então a geração será mais lenta. {{reason}}",
@@ -2625,7 +2754,12 @@
     "message": "Nenhum modelo de fala para texto está instalado — este recurso precisa de um para transcrever áudio.",
     "download": "Baixar {{label}} ({{size}} GB)",
     "started": "Baixando {{label}} — acompanhe o progresso em Configurações → Modelos e tente novamente.",
-    "install_failed": "Não foi possível iniciar o download: {{message}}"
+    "install_failed": "Não foi possível iniciar o download: {{message}}",
+    "choose": "Escolha o modelo que se ajusta ao seu trabalho — precisão, idiomas e tamanho do download variam. Os downloads só começam ao clicar.",
+    "group_offline": "Melhor precisão — transcreve depois que você para de falar",
+    "group_streaming": "Menor latência — texto ao vivo enquanto você fala",
+    "use": "Usar {{label}}",
+    "installed": "Instalado"
   },
   "model_missing": {
     "message": "Este modelo não foi baixado em {{target}}.",
@@ -2693,5 +2827,9 @@
     "transcript": "O que foi ouvido",
     "result_kicker": "Take convertido",
     "need_source_and_voice": "Adicione primeiro um clipe de origem e escolha uma voz de destino."
+  },
+  "player": {
+    "pause": "Pausar",
+    "play": "Reproduzir"
   }
 }

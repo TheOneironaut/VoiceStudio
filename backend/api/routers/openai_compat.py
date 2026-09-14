@@ -325,10 +325,9 @@ async def create_speech(req: SpeechRequest):
 
     # Routing gate (#21 — no silent CPU fallback), identical to REST /generate.
     from core.device_caps import detect_host_caps
-    from services.engine_routing import resolve_routing, routing_notice
-    _routing = resolve_routing(
-        getattr(backend, "gpu_compat", ("cpu",)), detect_host_caps(),
-        getattr(backend, "min_vram_gb", 0.0),
+    from services.engine_routing import routing_notice, runtime_compute_profile_async
+    _routing = await runtime_compute_profile_async(
+        backend, detect_host_caps()
     )
     if _routing["routing_status"] == "unavailable":
         raise HTTPException(status_code=400, detail=_routing["routing_reason"])
@@ -436,7 +435,7 @@ async def create_speech(req: SpeechRequest):
             detail=(
                 f"TTS engine '{backend.id}' did not finish loading within its "
                 f"model-load budget — on a first run this usually means the weight "
-                f"download is slow or stalled (check Model Catalogue → Models for "
+                f"download is slow or stalled (check the engine's Weights list in Model Catalogue for "
                 f"progress), not that generation failed. Retry once the model "
                 f"shows as installed."
             ),

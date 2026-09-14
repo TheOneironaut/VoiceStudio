@@ -211,7 +211,6 @@ vi.mock('../api/system', () => ({
   unloadLoadedModel: vi.fn(),
 }));
 vi.mock('../api/external', () => ({ openExternal: vi.fn() }));
-vi.mock('../components/settings/models/RecoBanner', () => ({ default: () => null }));
 vi.mock('../components/settings/VoicePreviewsPanel', () => ({ default: () => null }));
 // Surface the per-section row set without the virtualizer (yields no rows in
 // jsdom). Section chrome (headers, incompatible toggle) stays real.
@@ -229,7 +228,7 @@ vi.mock('../components/settings/models/ModelsTable', () => ({
 
 import ModelStoreTab from '../components/settings/ModelStoreTab';
 
-function mountTab() {
+function mountTab(props = {}) {
   global.EventSource = class {
     constructor() {
       this.onmessage = null;
@@ -238,7 +237,7 @@ function mountTab() {
   };
   return render(
     <I18nextProvider i18n={i18n}>
-      <ModelStoreTab info={{ has_hf_token: true }} modelBadge={null} />
+      <ModelStoreTab title="Leftovers" {...props} />
     </I18nextProvider>,
   );
 }
@@ -251,7 +250,7 @@ describe('Model Store — grouped catalog', () => {
   it('renders role sections in order with localized titles', async () => {
     mountTab();
     await waitFor(() => expect(screen.getByTestId('models-section-tts')).toBeInTheDocument());
-    expect(screen.getByTestId('model-list-panel')).toHaveClass('min-h-[95%]');
+    expect(screen.getByTestId('model-list-panel')).toBeInTheDocument();
     expect(screen.getByTestId('model-list-area')).toHaveClass('flex-1');
     const keys = ['tts', 'asr', 'dictation', 'diarisation'];
     const sections = keys.map((k) => screen.getByTestId(`models-section-${k}`));
@@ -296,20 +295,37 @@ describe('Model Store — grouped catalog', () => {
     expect(screen.queryByTestId('models-incompatible-toggle-tts')).not.toBeInTheDocument();
     expect(screen.queryByTestId('models-incompatible-toggle-dictation')).not.toBeInTheDocument();
   });
+});
 
-  it('search filters across sections and the global empty state clears it', async () => {
-    mountTab();
-    await waitFor(() => expect(visibleLabels().length).toBeGreaterThan(0));
-    const search = screen.getByRole('searchbox', { name: t('models.search_label') });
-    fireEvent.change(search, { target: { value: 'parakeet' } });
-    await waitFor(() => expect(visibleLabels()).toEqual(['Parakeet dictation']));
+// ── Family scoping: the catalogue lists one family's weights under its engines ─
+
+describe('Model Store — scoped to one engine family', () => {
+  it('ASR carries offline ASR, streaming dictation and diarisation; TTS only TTS', async () => {
+    mountTab({ family: 'asr' });
+    await waitFor(() => expect(screen.getByTestId('models-section-asr')).toBeInTheDocument());
+    expect(screen.getByTestId('models-section-dictation')).toBeInTheDocument();
+    expect(screen.getByTestId('models-section-diarisation')).toBeInTheDocument();
     expect(screen.queryByTestId('models-section-tts')).not.toBeInTheDocument();
+    expect(visibleLabels()).not.toContain('VoiceStudio TTS');
+  });
+});
 
-    fireEvent.change(search, { target: { value: 'zzz-nothing' } });
-    await waitFor(() => expect(visibleLabels()).toHaveLength(0));
-    expect(screen.getByText(t('models.no_matches'))).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId('models-clear-filters'));
-    await waitFor(() => expect(visibleLabels().length).toBeGreaterThan(0));
-    expect(search).toHaveValue('');
+describe('Model Store — only weights no engine owns', () => {
+  it('drops rows an engine claims and keeps pipeline weights', async () => {
+    MODELS[0].engines = ['omnivoice']; // VoiceStudio TTS now belongs to its engine
+    try {
+      const { unmount } = mountTab({ family: 'tts' });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(screen.queryByTestId('models-section-tts')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('model-list-panel')).not.toBeInTheDocument();
+      unmount();
+    } finally {
+      delete MODELS[0].engines;
+    }
+    mountTab({ family: 'asr' });
+    await waitFor(() =>
+      expect(screen.getByTestId('models-section-diarisation')).toBeInTheDocument(),
+    );
+    expect(screen.getByRole('heading', { name: 'Leftovers' })).toBeInTheDocument();
   });
 });

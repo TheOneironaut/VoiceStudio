@@ -8,7 +8,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 
 const { toastMock, eventHandlers, eventState, eventUnlisteners } = vi.hoisted(() => ({
   toastMock: Object.assign(vi.fn(), {
@@ -34,6 +34,7 @@ vi.mock('@tauri-apps/api/event', () => ({
     eventUnlisteners.push(unlisten);
     return unlisten;
   }),
+  emit: emitMock,
 }));
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ hide: async () => {} }),
@@ -46,7 +47,10 @@ vi.mock('../api/client', () => ({
 }));
 vi.mock('../pages/Transcriptions', () => ({ addTranscription: vi.fn() }));
 
-const { toastAsrMock } = vi.hoisted(() => ({ toastAsrMock: vi.fn() }));
+const { toastAsrMock, emitMock } = vi.hoisted(() => ({
+  toastAsrMock: vi.fn(),
+  emitMock: vi.fn(async () => {}),
+}));
 vi.mock('../utils/asrModelMissing', () => ({
   // Matches the real payload extraction for the WS frame shape.
   asrMissingPayload: (err) =>
@@ -57,13 +61,14 @@ vi.mock('../utils/asrModelMissing', () => ({
 // Deferred startMicCapture so each test controls WHEN (and HOW — resolve or
 // reject) the mic graph finishes setting up relative to the WS error frame.
 const { micControl, micStop } = vi.hoisted(() => ({
-  micControl: { resolve: null, reject: null },
+  micControl: { resolve: null, reject: null, onFrame: null },
   micStop: vi.fn(async () => {}),
 }));
 vi.mock('../utils/aec/micCapture', () => ({
   startMicCapture: vi.fn(
-    () =>
+    (_stream, onFrame) =>
       new Promise((resolve, reject) => {
+        micControl.onFrame = onFrame;
         micControl.resolve = resolve;
         micControl.reject = reject;
       }),
@@ -112,8 +117,11 @@ class FakeWS {
 
 function pressShortcut() {
   const handler = eventHandlers['tray-dictate'];
-  if (handler) handler({ payload: { sessionId: 'setup-race-session' } });
-  else eventState.pendingStart = true;
+  if (handler) {
+    handler({
+      payload: { sessionId: 'setup-race-session', deliveryId: 9, registrationId: 1 },
+    });
+  } else eventState.pendingStart = true;
 }
 
 let realWebSocket;
@@ -128,7 +136,7 @@ beforeEach(() => {
     if (cmd === 'mark_dictation_capture_ready' && eventState.pendingStart) {
       eventState.pendingStart = false;
       return eventHandlers['tray-dictate']?.({
-        payload: { sessionId: 'setup-race-session' },
+        payload: { sessionId: 'setup-race-session', deliveryId: 9, registrationId: 1 },
       });
     }
     return undefined;
@@ -136,6 +144,7 @@ beforeEach(() => {
   eventState.pendingStart = false;
   eventUnlisteners.length = 0;
   FakeWS.instances = [];
+  storeState.dictationEnabled = true;
   storeState.dictationModelId = 'sherpa-parakeet-v3';
   realWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = FakeWS;
@@ -192,6 +201,74 @@ describe('CaptureWidget — connect-time asr_model_missing during mic setup', ()
     });
   });
 
+  it('does not start capture when native receipt acknowledgement fails', async () => {
+    invokeMock.mockImplementation(async (cmd) => {
+      if (cmd === 'begin_dictation_capture_registration') return 1;
+      if (cmd === 'check_microphone') return 'granted';
+      if (cmd === 'check_accessibility') return true;
+      if (cmd === 'acknowledge_dictation_capture_delivery') {
+        throw new Error('receipt state unavailable');
+      }
+      return undefined;
+    });
+    render(<CaptureWidget />);
+    await waitFor(() => expect(eventHandlers['tray-dictate']).toBeTypeOf('function'));
+
+    await eventHandlers['tray-dictate']({
+      payload: { sessionId: 7, deliveryId: 9, registrationId: 1 },
+    });
+
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalledWith('activate_dictation_output_session', {
+      sessionId: 7,
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      'complete_dictation_capture_delivery',
+      expect.anything(),
+    );
+  });
+
+  it('completes an in-page delivery only after microphone startup is accepted', async () => {
+    render(<CaptureWidget />);
+    await waitFor(() => expect(eventHandlers['tray-dictate']).toBeTypeOf('function'));
+
+    await eventHandlers['tray-dictate']({
+      payload: { sessionId: 7, deliveryId: 9, registrationId: 1 },
+    });
+    await waitFor(() => expect(FakeWS.instances.length).toBe(1));
+    expect(invokeMock).not.toHaveBeenCalledWith('complete_dictation_capture_delivery', {
+      registrationId: 1,
+      deliveryId: 9,
+      error: null,
+    });
+
+    micControl.resolve(micStop);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith('complete_dictation_capture_delivery', {
+        registrationId: 1,
+        deliveryId: 9,
+        error: null,
+      }),
+    );
+  });
+
+  it('rejects an in-page delivery when dictation is disabled', async () => {
+    storeState.dictationEnabled = false;
+    render(<CaptureWidget />);
+    await waitFor(() => expect(eventHandlers['tray-dictate']).toBeTypeOf('function'));
+
+    await eventHandlers['tray-dictate']({
+      payload: { sessionId: 7, deliveryId: 9, registrationId: 1 },
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith('complete_dictation_capture_delivery', {
+      registrationId: 1,
+      deliveryId: 9,
+      error: 'Dictation is disabled',
+    });
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  });
+
   it('turns a PCM-fallback socket failure into a terminal error', async () => {
     storeState.dictationModelId = 'whisperx';
     render(<CaptureWidget />);
@@ -228,7 +305,21 @@ describe('CaptureWidget — connect-time asr_model_missing during mic setup', ()
     await waitFor(() => {
       expect(screen.getByText(/No speech-to-text model/)).toBeInTheDocument();
     });
-    expect(toastAsrMock).toHaveBeenCalled();
+    // In the desktop app this window has no <Toaster>, so a local toast here
+    // rendered nowhere. The install action goes to the main window instead,
+    // carrying the recommendation so it can offer the one-click download.
+    expect(toastAsrMock).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(emitMock).toHaveBeenCalledWith(
+        'dictation-notice',
+        expect.objectContaining({
+          kind: 'asr_missing',
+          missing: expect.objectContaining({
+            recommended: expect.objectContaining({ repo_id: 'x/y' }),
+          }),
+        }),
+      ),
+    );
 
     // Mic graph setup completes AFTER the error — the tail must abort:
     // release the worklet, keep the error state, never flip the tray on.
@@ -238,6 +329,11 @@ describe('CaptureWidget — connect-time asr_model_missing during mic setup', ()
     expect(screen.getByText(/No speech-to-text model/)).toBeInTheDocument();
     expect(screen.queryByText(/Listening/)).not.toBeInTheDocument();
     expect(invokeMock).not.toHaveBeenCalledWith('set_tray_recording', { recording: true });
+    expect(invokeMock).toHaveBeenCalledWith('complete_dictation_capture_delivery', {
+      registrationId: 1,
+      deliveryId: 9,
+      error: 'Dictation could not start',
+    });
   });
 
   it('setup REJECTION after the terminal frame must not clobber it with a mic error', async () => {
@@ -271,4 +367,27 @@ describe('CaptureWidget — connect-time asr_model_missing during mic setup', ()
     expect(toastMock.error).not.toHaveBeenCalled();
     expect(invokeMock).not.toHaveBeenCalledWith('set_tray_recording', { recording: true });
   });
+});
+
+it('pauses and resumes the microphone, then closes and releases capture', async () => {
+  const track = { enabled: true, stop: vi.fn() };
+  navigator.mediaDevices.getUserMedia.mockResolvedValue({ getTracks: () => [track] });
+  render(<CaptureWidget />);
+  await waitFor(() => expect(eventHandlers['tray-dictate']).toBeTypeOf('function'));
+  await eventHandlers['tray-dictate']({
+    payload: { sessionId: 7, deliveryId: 9, registrationId: 1 },
+  });
+  await waitFor(() => expect(FakeWS.instances.length).toBe(1));
+  micControl.resolve(micStop);
+  const pause = await screen.findByRole('button', { name: 'Pause' });
+  fireEvent.click(pause);
+  expect(track.enabled).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+  expect(track.enabled).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await waitFor(() => expect(track.stop).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(screen.queryByRole('button', { name: 'Resume' })).not.toBeInTheDocument(),
+  );
 });

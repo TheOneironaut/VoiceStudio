@@ -133,13 +133,13 @@ def _isolated_engine_hint(streak: int) -> str:
         "%d consecutive ASR transcribe timeouts this session — pool resets are "
         "not recovering the hang. Recommend switching the ASR engine to "
         "'Faster-Whisper (crash-isolated subprocess)' [faster-whisper-isolated] "
-        "in Model Catalogue → Engines. Not switching automatically (#730).", streak,
+        "in Model Catalogue. Not switching automatically (#730).", streak,
     )
     return (
         f"This is {streak} transcribe timeouts in a row this session, so pool "
         "resets aren't recovering the underlying hang. Recommended: switch the "
         "ASR engine to 'Faster-Whisper (crash-isolated subprocess)' "
-        "(faster-whisper-isolated) in Model Catalogue → Engines — it runs "
+        "(faster-whisper-isolated) in Model Catalogue — it runs "
         "transcription in a separate process that can be force-killed to "
         "reclaim a hung transcribe and its VRAM. VoiceStudio never switches "
         "engines automatically."
@@ -232,7 +232,7 @@ async def run_transcribe_guarded(executor, fn, *, what: str = "ASR",
             "The native call cannot be killed safely, so its capacity remains "
             "reserved until it exits. For a durable fix Flush the "
             "TTS model to free VRAM, pick a smaller ASR model in "
-            f"Model Catalogue → Models, or set ASR to CPU. (Raise {timeout_env} "
+            f"the engine's Weights list in Model Catalogue, or set ASR to CPU. (Raise {timeout_env} "
             "for very long transcribes.)"
         )
         hint = _isolated_engine_hint(streak)
@@ -648,7 +648,8 @@ class WhisperXBackend(ASRBackend):
         logger.warning(
             "whisperx VRAM preflight: %.1f GB free is too little for %s on CUDA "
             "(needs ≥%.1f GB even at int8) — using CPU int8 instead. Free VRAM "
-            "(flush the TTS model, or close other GPU apps) for GPU-speed ASR. (#723)",
+            "(flush the TTS model, or close other GPU apps) for GPU-speed ASR, or "
+            "set OMNIVOICE_ASR_VRAM_PREFLIGHT=0 to skip this check. (#723)",
             free, self._model_name,
             self._CUDA_VRAM_BUDGET_GB["int8"] * scale,
         )
@@ -1292,10 +1293,54 @@ class PyTorchWhisperBackend(ASRBackend):
         # Reuses the `_asr_pipe` attached to the TTS model when available.
         self._pipe = asr_pipe
 
-    # whisper-large-v3-turbo occupies roughly 3.2 GiB before generation adds
-    # its encoder/decoder workspace. Loading it onto a nearly full card works,
-    # then the first transcribe fails with a CUDA OOM and yields zero segments.
-    _CUDA_VRAM_BUDGET_GB = 5.0
+    # Free VRAM needed on CUDA, where _ensure_pipe loads fp16 weights: the
+    # weights (parameters x 2 bytes), the batch-16 decode workspace, and
+    # headroom. Loading onto a nearly full card works, then the first
+    # transcribe fails with a CUDA OOM and yields zero segments, so the device
+    # pick checks this against actually-free VRAM first.
+    #
+    # #2041: this was a flat 5.0 GB for every model, sized for full large-v3.
+    # The default is large-v3-turbo (0.81B parameters, about 1.6 GB in fp16),
+    # so a 6 GB card with nothing else resident reported 5.0 GB free and was
+    # sent to CPU every time, although CUDA transcribed the same audio in 37 s.
+    _CUDA_VRAM_BUDGET_GB = 5.0  # full large-v3, and any model not listed below
+    # fp16 weights (GB) of the OpenAI Whisper checkpoints, by exact repo id.
+    # Anything else, including a fine-tune or a custom repo whose name happens
+    # to contain "small" or "turbo", keeps the conservative 5.0 GB budget.
+    _FP16_WEIGHTS_GB = {
+        "openai/whisper-large-v3-turbo": 1.6,
+        "openai/whisper-large-v3": 3.1,
+        "openai/whisper-large-v2": 3.1,
+        "openai/whisper-large": 3.1,
+        "openai/whisper-medium": 1.5,
+        "openai/whisper-medium.en": 1.5,
+        "openai/whisper-small": 0.5,
+        "openai/whisper-small.en": 0.5,
+        "openai/whisper-base": 0.15,
+        "openai/whisper-base.en": 0.15,
+        "openai/whisper-tiny": 0.08,
+        "openai/whisper-tiny.en": 0.08,
+    }
+    _CUDA_WORKSPACE_GB = 1.5  # batch 16 x 15 s chunks
+    _CUDA_HEADROOM_GB = 0.5
+
+    @classmethod
+    def _cuda_budget_gb(cls, model_name: str) -> float:
+        """Free VRAM (GB) this model needs on CUDA; never above the 5.0 GB
+        that full large-v3 was measured to need."""
+        weights_gb = cls._FP16_WEIGHTS_GB.get((model_name or "").strip().lower())
+        if weights_gb is None:
+            return cls._CUDA_VRAM_BUDGET_GB
+        return min(
+            cls._CUDA_VRAM_BUDGET_GB,
+            weights_gb + cls._CUDA_WORKSPACE_GB + cls._CUDA_HEADROOM_GB,
+        )
+
+    @staticmethod
+    def _model_name() -> str:
+        return os.environ.get(
+            "OMNIVOICE_PYTORCH_ASR_MODEL", "openai/whisper-large-v3-turbo"
+        )
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
@@ -1306,7 +1351,7 @@ class PyTorchWhisperBackend(ASRBackend):
             return False, f"transformers not installed: {e}"
 
     @classmethod
-    def _pick_device(cls) -> str:
+    def _pick_device(cls, model_name: str | None = None) -> str:
         from services.model_manager import get_best_device
 
         device = str(get_best_device())
@@ -1321,14 +1366,18 @@ class PyTorchWhisperBackend(ASRBackend):
             free_gb = free / 1024**3
         except Exception:  # noqa: BLE001 — an unavailable probe must not block ASR
             return device
-        if free_gb >= cls._CUDA_VRAM_BUDGET_GB:
+        model_name = model_name or cls._model_name()
+        budget_gb = cls._cuda_budget_gb(model_name)
+        if free_gb >= budget_gb:
             return device
         logger.warning(
             "PyTorch Whisper VRAM preflight: %.1f GB free < %.1f GB needed "
-            "for reliable CUDA transcription — using CPU instead. Close other "
-            "GPU apps or Flush models to restore GPU-speed ASR.",
+            "for %s on CUDA — using CPU instead. Close other GPU apps or Flush "
+            "models to restore GPU-speed ASR, or set "
+            "OMNIVOICE_ASR_VRAM_PREFLIGHT=0 to skip this check.",
             free_gb,
-            cls._CUDA_VRAM_BUDGET_GB,
+            budget_gb,
+            model_name,
         )
         return "cpu"
 
@@ -1351,10 +1400,8 @@ class PyTorchWhisperBackend(ASRBackend):
         # constructor and this path is skipped.
         import torch
         from transformers import pipeline as hf_pipeline
-        model_name = os.environ.get(
-            "OMNIVOICE_PYTORCH_ASR_MODEL", "openai/whisper-large-v3-turbo"
-        )
-        device = self._pick_device()
+        model_name = self._model_name()
+        device = self._pick_device(model_name)
         asr_dtype = torch.float16 if str(device).startswith("cuda") else torch.float32
         logger.info(
             "PyTorchWhisperBackend: loading standalone ASR pipeline %s on %s",
@@ -1401,7 +1448,15 @@ class PyTorchWhisperBackend(ASRBackend):
         import soundfile as sf
         import torch
         self._ensure_pipe()
-        audio_np, sr = sf.read(audio_path, dtype="float32")
+        # #2039: libsndfile cannot open MP4/M4A (AAC), which /transcribe and
+        # the MCP tool both accept. Those decode through the validated ffmpeg
+        # path, which resamples to 16 kHz properly. Anything soundfile can
+        # read keeps its native rate, so the pipeline's band-limited
+        # resampler does the conversion rather than a linear interpolation.
+        try:
+            audio_np, sr = sf.read(audio_path, dtype="float32")
+        except Exception:
+            audio_np, sr = _decode_audio_16k_mono(audio_path), 16000
         if audio_np.ndim > 1:
             audio_np = audio_np.mean(axis=1)
         bs = 16 if torch.cuda.is_available() else 2
@@ -1801,9 +1856,7 @@ class SherpaDictationBackend(ASRBackend):
 
     def __init__(self, model_id: str | None = None):
         from services import sherpa_dictation as _sd
-        mid = model_id or os.environ.get(
-            "OMNIVOICE_SHERPA_ASR_MODEL", _sd.DEFAULT_MODEL_ID
-        )
+        mid = model_id or sherpa_engine_model_id()
         spec = _sd.get_spec(mid)
         if spec is None:
             raise ValueError(
@@ -2272,7 +2325,7 @@ class OpenAICompatASRBackend(ASRBackend):
     def is_available(cls) -> tuple[bool, str]:
         base_url = resolve_openai_compat_asr_base_url()
         if not base_url:
-            return False, "Configure a server endpoint in Model Catalogue → Engines"
+            return False, "Configure a server endpoint in Model Catalogue"
         try:
             normalize_openai_compat_asr_base_url(base_url)
         except ValueError as exc:
@@ -2417,7 +2470,7 @@ _REGISTRY: dict[str, type[ASRBackend]] = _LazyASRRegistry({
 })
 
 
-# Short install hints surfaced as tooltips on the Model Catalogue → Engines UI
+# Short install hints surfaced as tooltips on the Model Catalogue UI
 # (parity with tts_backend._INSTALL_HINTS).
 _INSTALL_HINTS: dict[str, str] = {
     "whisperx":        "pip install whisperx  (CTranslate2 + wav2vec2 alignment; CUDA or CPU)",
@@ -2444,7 +2497,7 @@ _INSTALL_HINTS: dict[str, str] = {
     "sherpa-onnx-asr": "uv add sherpa-onnx  (ONNX live dictation; CPU, cross-platform)",
     "openai-compat-asr": (
         "No install needed — configure a server endpoint in "
-        "Model Catalogue → Engines. Points VoiceStudio at any OpenAI-compatible "
+        "Model Catalogue. Points VoiceStudio at any OpenAI-compatible "
         "server (a self-hosted Qwen3-ASR/FunASR/SenseVoice server, OpenAI's "
         "own Whisper API, or similar) — a path to Qwen3-ASR today, without "
         "waiting on a direct transformers integration."
@@ -2779,7 +2832,7 @@ def load_active_asr_backend(*, asr_pipe=None) -> ASRBackend:
     import inside ``load_model``), so auto-detect can pick a backend that then
     dies at load with ``No module named 'lightning_fabric'`` — which used to
     fail ASR init wholesale even though the next engine in line works fine.
-    Instead: record the backend as broken (Model Catalogue → Engines shows why),
+    Instead: record the backend as broken (Model Catalogue shows why),
     re-select, and load the next candidate — mirroring how
     :func:`_probe_available` already swallows broken natives at probe time.
 
@@ -2828,7 +2881,7 @@ def load_active_asr_backend(*, asr_pipe=None) -> ASRBackend:
             # ModuleNotFoundError and its ImportError parent ("cannot import
             # name X" version skew) are the same env-rot class: the backend
             # cannot work in this process, but siblings with independent
-            # import chains can. Record it either way so Model Catalogue → Engines
+            # import chains can. Record it either way so Model Catalogue
             # reports the truth (unavailable + why + how to repair).
             reason = _deep_import_reason(type(backend), e)
             _DEEP_IMPORT_BROKEN[bid] = scrub_text(reason)
@@ -3047,6 +3100,31 @@ def get_sherpa_dictation_backend(model_id: str) -> "SherpaDictationBackend":
         return backend
 
 
+def sherpa_engine_model_id() -> str:
+    """The sherpa model the ``sherpa-onnx-asr`` engine loads when nothing pins
+    one explicitly: env var (power-user pin) → the dictation model the user
+    picked in Settings / the Engines menu → the catalogue default.
+
+    Unlike :func:`dictation_model_id` this ignores ``dictation.enabled`` — a
+    user who turned the hotkey off but chose the Sherpa engine for dub/batch
+    transcription still means *this* model — and never returns None: the
+    engine needs *some* model to construct. A demoted model (decoded nothing
+    on this host) falls through to the default rather than being re-picked.
+    """
+    from services import sherpa_dictation as _sd
+    explicit = os.environ.get("OMNIVOICE_SHERPA_ASR_MODEL")
+    if explicit:
+        return explicit
+    try:
+        from core import prefs
+        mid = prefs.get("dictation.model_id")
+    except Exception:  # noqa: BLE001 — prefs store unavailable → default
+        return _sd.DEFAULT_MODEL_ID
+    if _sd.is_sherpa_model(mid) and not _sd.is_demoted(mid):
+        return _sd.get_spec(mid).id
+    return _sd.DEFAULT_MODEL_ID
+
+
 def dictation_model_id() -> str | None:
     """The selected sherpa dictation model id, or None when dictation is off /
     no sherpa model is chosen. Env var wins (power-user pin), then prefs."""
@@ -3085,7 +3163,7 @@ def _parakeet_mlx_installed() -> bool:
     trigger a surprise multi-GB download (the asr_model_missing contract).
     Installed state comes from the same HF-cache helpers the model store uses
     (positive results memoized — see :func:`_repo_installed`), so the answer
-    matches the Model Catalogue → Models install badges. Never raises.
+    matches the Model Catalogue's install badges. Never raises.
     """
     try:
         repo = os.environ.get("ASR_MODEL_PARAKEET_MLX", _PARAKEET_MLX_DEFAULT)
@@ -3215,7 +3293,7 @@ def get_capture_asr_backend(*, skip_sherpa: bool = False) -> ASRBackend:
         # Prefer an already-installed Parakeet TDT v3 on Apple Silicon (when
         # the language gate allows it — see _capture_prefers_parakeet). Gated
         # on the weights being on disk so this NEVER triggers a download —
-        # users opt in by installing the model from Model Catalogue → Models. The
+        # users opt in by installing the model from the engine's Weights list in Model Catalogue. The
         # gate's answer is part of the warm-singleton key so installing
         # parakeet mid-session rebuilds the singleton instead of serving the
         # stale whisper pick until restart (the memo in _repo_installed keeps
@@ -3321,9 +3399,7 @@ def _offline_asr_repo(backend_id: str | None = None) -> str | None:
         # Unknown/none → fail open.
         try:
             from services import sherpa_dictation as _sd
-            spec = _sd.get_spec(
-                os.environ.get("OMNIVOICE_SHERPA_ASR_MODEL", _sd.DEFAULT_MODEL_ID)
-            )
+            spec = _sd.get_spec(sherpa_engine_model_id())
             return spec.repo_id if spec is not None else None
         except Exception:  # noqa: BLE001 — preflight must stay best-effort
             return None
@@ -3427,7 +3503,7 @@ def _repo_installed(repo: str) -> bool:
     """``is_cached`` + ``cache_is_complete`` with a positive-only session memo.
 
     Installed state comes from the same HF-cache helpers the model store uses,
-    so the answer matches the Model Catalogue → Models install badges."""
+    so the answer matches the Model Catalogue's install badges."""
     if repo in _INSTALLED_REPO_MEMO:
         return True
     from api.routers.setup.models import cache_is_complete, get_model_catalog, is_cached
@@ -3453,7 +3529,7 @@ def asr_model_missing_error(*, purpose: str = "transcribe",
     ``sherpa_model_id`` lets the live-dictation WS pass its per-session
     ``?model=`` override. Installed state comes from the same HF-cache helpers
     the model store uses (see :func:`_repo_installed`), so the answer matches
-    the Model Catalogue → Models install badges.
+    the Model Catalogue's install badges.
     ``skip_sherpa`` probes only the non-Sherpa capture fallback; silent-model
     recovery uses it before deciding whether persistent demotion is warranted.
     ``require_installed`` makes unknown/custom selections fail closed for that
@@ -3543,8 +3619,8 @@ def asr_model_missing_detail(payload: dict) -> str:
     if rec.get("label"):
         return (
             "No speech-to-text model is installed. Download "
-            f"{rec['label']} ({rec['size_gb']} GB) from Model Catalogue → Models, "
+            f"{rec['label']} ({rec['size_gb']} GB) from the engine's Weights list in Model Catalogue, "
             "then retry."
         )
     return ("No speech-to-text model is installed. Download one from "
-            "Model Catalogue → Models, then retry.")
+            "the engine's Weights list in Model Catalogue, then retry.")

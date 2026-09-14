@@ -18,11 +18,18 @@ ignores.
 | Emotion ("excited", "sad", graded intensity) | IndexTTS2's emotion controls — Audiobook tab's Production Overrides, or the `/ws/tts` API — or CosyVoice 3 instruct | Opt-in engines only |
 | The same take again | Pin the seed / lock the profile | Default engine |
 
+## Recovering an interrupted audiobook
+
+Switching away from the Audiobook tab explicitly interrupts synthesis at a chapter boundary. The Audiobook recovery card lets you resume with its cached chapters, and **Open chapter cache** reveals the chapter audio cache.
+
 ## Why bracket tags work at all (and when they don't)
 
 Everything you type in the text box reaches the active engine **verbatim** —
 the pipeline goes out of its way not to break tags:
 
+- Tilde-separated integer, signed, and decimal ranges get a spoken separator in
+  English, Korean, Japanese, and Chinese; malformed chains and product codes
+  are left unchanged.
 - The text-normalization pass (numbers, abbreviations) skips every `[…]` span
   (`backend/services/text_normalization.py`).
 - The long-text chunker never cuts inside a bracket tag
@@ -122,7 +129,7 @@ the default engine's taxonomy, so free-text instruct currently needs the API
 Setup: clone + install [CosyVoice](https://github.com/FunAudioLLM/CosyVoice)
 (non-trivial: `git clone --recursive`, its requirements, SoX), then set
 `OMNIVOICE_COSYVOICE_MODEL` to the model directory and select it in
-Model Catalogue → Engines. CUDA or CPU; MPS is unverified upstream.
+Model Catalogue. CUDA or CPU; MPS is unverified upstream.
 
 ### VoxCPM2 (opt-in)
 
