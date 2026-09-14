@@ -118,11 +118,11 @@ describe('AudioMethodPanel', () => {
 
     fireEvent.click(screen.getByRole('radio', { name: 'clone.record' }));
 
-    fireEvent.keyDown(screen.getByLabelText('recording.input_device'), { key: 'Enter' });
+    fireEvent.click(screen.getByLabelText('recording.input_device'));
     expect(screen.getByRole('option', { name: 'recording.microphone_number' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('option', { name: 'Built-in microphone' }));
-    fireEvent.keyDown(screen.getByLabelText('recording.channels'), { key: 'Enter' });
-    fireEvent.click(screen.getByRole('option', { name: 'recording.channels_mono' }));
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'Built-in microphone' }));
+    fireEvent.click(screen.getByLabelText('recording.channels'));
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'recording.channels_mono' }));
     expect(setDevice).toHaveBeenCalledWith('built-in');
     expect(setChannels).toHaveBeenCalledWith('mono');
   });
