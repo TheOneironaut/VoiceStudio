@@ -30,6 +30,7 @@ const GROUP_LABEL_CLS =
   'pt-[4px] px-[10px] pb-[2px] text-[0.55rem] uppercase tracking-[0.06em] text-[color:var(--text-secondary)] opacity-70 flex items-center gap-[4px]';
 
 export default function SearchableSelect({
+  id,
   value,
   onChange,
   options,
@@ -267,6 +268,7 @@ export default function SearchableSelect({
     // position/width rule now lives in these utilities.
     <div ref={wrapRef} className="ss-wrap relative w-full">
       <button
+        id={id}
         type="button"
         className={`${buttonClassName} flex items-center justify-between gap-[6px] w-full text-left cursor-pointer [font-family:inherit] disabled:cursor-not-allowed disabled:opacity-50 ${triggerSizeCls}`}
         style={buttonStyle}

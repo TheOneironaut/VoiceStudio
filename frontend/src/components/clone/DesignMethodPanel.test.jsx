@@ -127,8 +127,8 @@ describe('DesignMethodPanel — merged accent/dialect field', () => {
     const onVdChange = vi.fn();
     setup({ EnglishAccent: 'Auto', ChineseDialect: 'Auto' }, { identityOpen: true, onVdChange });
     const select = document.getElementById('vd-AccentDialect');
-    fireEvent.keyDown(select, { key: 'Enter' });
-    fireEvent.click(screen.getByRole('option', { name: 'british accent' }));
+    fireEvent.click(select);
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'british accent' }));
     expect(onVdChange).toHaveBeenCalledWith('EnglishAccent', 'british accent');
   });
 
@@ -136,8 +136,8 @@ describe('DesignMethodPanel — merged accent/dialect field', () => {
     const onVdChange = vi.fn();
     setup({ EnglishAccent: 'Auto', ChineseDialect: 'Auto' }, { identityOpen: true, onVdChange });
     const select = document.getElementById('vd-AccentDialect');
-    fireEvent.keyDown(select, { key: 'Enter' });
-    fireEvent.click(screen.getByRole('option', { name: '四川话' }));
+    fireEvent.click(select);
+    fireEvent.mouseDown(screen.getByRole('option', { name: '四川话' }));
     expect(onVdChange).toHaveBeenCalledWith('ChineseDialect', '四川话');
   });
 
@@ -145,8 +145,8 @@ describe('DesignMethodPanel — merged accent/dialect field', () => {
     const onVdChange = vi.fn();
     setup({ EnglishAccent: 'Auto', ChineseDialect: '四川话' }, { identityOpen: true, onVdChange });
     const select = document.getElementById('vd-AccentDialect');
-    fireEvent.keyDown(select, { key: 'Enter' });
-    fireEvent.click(screen.getByRole('option', { name: 'clone.auto' }));
+    fireEvent.click(select);
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'clone.auto' }));
     expect(onVdChange).toHaveBeenCalledWith('ChineseDialect', 'Auto');
     expect(onVdChange).not.toHaveBeenCalledWith('EnglishAccent', expect.anything());
   });
@@ -155,10 +155,10 @@ describe('DesignMethodPanel — merged accent/dialect field', () => {
     setup({ EnglishAccent: 'Auto', ChineseDialect: 'cosyvoice-speaker-601' });
     const select = document.getElementById('vd-AccentDialect');
     expect(select).toHaveTextContent('cosyvoice-speaker-601');
-    fireEvent.keyDown(select, { key: 'Enter' });
+    fireEvent.click(select);
     expect(screen.getByRole('option', { name: 'cosyvoice-speaker-601' })).toHaveAttribute(
-      'data-state',
-      'checked',
+      'aria-selected',
+      'true',
     );
   });
 
