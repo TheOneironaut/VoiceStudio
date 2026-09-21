@@ -1,6 +1,7 @@
 """Contracts for the fork's rolling Windows Gemini installer."""
 
 import json
+import re
 from pathlib import Path
 
 
@@ -11,6 +12,7 @@ CONFIG = ROOT / "frontend" / "src-tauri" / "tauri.gemini-windows.conf.json"
 README = ROOT / "README.md"
 SMOKE = ROOT / "scripts" / "smoke-gemini-windows.ps1"
 DOCKER_WORKFLOW = ROOT / ".github" / "workflows" / "docker.yml"
+TOOLS = ROOT / "frontend" / "src-tauri" / "src" / "tools.rs"
 
 MSI_NAME = "VoiceStudio-Gemini-Windows-x64.msi"
 RELEASE_TAG = "gemini-windows"
@@ -60,6 +62,18 @@ def test_gemini_windows_release_is_gated_by_installed_app_smoke():
     assert '"OmniVoice\\Logs"' in smoke
     assert 'Join-Path $appData "logs"' in smoke
     assert 'Get-ChildItem -LiteralPath $appData -Recurse' not in smoke
+
+
+def test_gemini_windows_bundle_uses_the_runtime_uv_version():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    tools = TOOLS.read_text(encoding="utf-8")
+
+    workflow_version = re.search(r'\$version = "([^"]+)"', workflow)
+    runtime_version = re.search(r'UV_VERSION: &str = "([^"]+)"', tools)
+
+    assert workflow_version is not None
+    assert runtime_version is not None
+    assert workflow_version.group(1) == runtime_version.group(1)
 
 
 def test_ci_cancels_only_superseded_non_main_runs():
