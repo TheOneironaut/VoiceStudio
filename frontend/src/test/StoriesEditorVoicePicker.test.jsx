@@ -89,6 +89,27 @@ describe('StoriesEditor voice pickers (#1220)', () => {
     expect(within(screen.getByRole('list')).getByRole('button', { name: /Aria/ })).toBeVisible();
   });
 
+  it('uses searchable selectors for line characters and export format', () => {
+    useAppStore.setState({
+      cast: [
+        ...useAppStore.getState().cast,
+        { id: 'guest', name: 'Guest', color: '#83a598', profileId: null },
+      ],
+    });
+    renderEditor();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Character' }));
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'Guest' }));
+    expect(useAppStore.getState().storyTracks[0].character).toBe('guest');
+
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Export' }), { button: 0 });
+    const format = screen.getByRole('button', { name: 'Export format' });
+    fireEvent.click(format);
+    expect(screen.getByRole('listbox').parentElement).toBe(document.body);
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'MP3' }));
+    expect(format).toHaveTextContent('MP3');
+  });
+
   it('defaults to Script and renders the project stats and line canvas', () => {
     renderEditor();
     expect(screen.getByRole('heading', { level: 1, name: /Untitled story/ })).toBeInTheDocument();

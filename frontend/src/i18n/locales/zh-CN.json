@@ -38,6 +38,10 @@
     "importFailed": "无法读取该文件。",
     "addLine": "添加台词",
     "addChapter": "添加章节",
+    "clearScript": "清空剧本",
+    "clearScriptHint": "移除剧本中的所有台词和章节（角色表保留）",
+    "clearConfirm": "清除全部 {{count}} 个脚本条目及待处理的导入文本？此操作无法撤销。",
+    "cleared": "剧本已清空",
     "chapterN": "第 {{n}} 章",
     "stems": "分轨",
     "stemsDone": "已导出 {{count}} 个角色分轨",
@@ -58,6 +62,11 @@
     "pasteAbove": "在上方粘贴文本",
     "cancel": "取消",
     "splitIntoTracks": "拆分为台词",
+    "splitMode": "拆分方式",
+    "split_sentences": "句子",
+    "split_paragraphs": "段落",
+    "split_chapters": "章节",
+    "splitModeHint": "每一行都作为独立的一段录音朗读。单人朗读时，按段落或整章拆分比按句子更连贯。",
     "emptyText": "添加对白和旁白台词，开始你的故事。在配音中为每个角色分配语音。",
     "addFirst": "添加第一句",
     "linePlaceholder": "输入对白或旁白……使用 [pause 0.5s] 插入静音停顿",
@@ -699,10 +708,10 @@
     "history_retention_save_failed": "保存失败",
     "history_retention_invalid": "请输入 0 或更大的数",
     "perf_title": "性能",
-    "perf_torch_compile": "禁用 torch.compile（Windows）",
+    "perf_torch_compile": "禁用 torch.compile",
     "perf_torch_compile_na": "仅限 Windows——本平台无需",
-    "perf_torch_compile_note": "回退到 eager 模式——修复小于 16 GB 显存 GPU 上的 Triton 内存溢出。",
-    "perf_torch_compile_hint": "<issueLink>#65</issueLink> 的变通方案——Windows 用户在显存小于 16 GB 的 GPU 上加载模型时，可能遇到 Triton / <code>torch.compile</code> 内存溢出。启用后会为引擎子进程设置 <code>TORCH_COMPILE_DISABLE=1</code>，回退到 eager 模式。macOS 与 Linux 不受影响。",
+    "perf_torch_compile_note": "使用即时执行以避免 Triton 内存错误。",
+    "perf_torch_compile_hint": "使用即时执行以避免 Triton 内存错误。 <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>",
     "perf_load_failed": "加载性能设置失败",
     "workers_title": "远程工作机",
     "workers_desc": "把单个任务发送到你其他机器的 GPU 上，结果会回到这里。在你添加并批准一台工作机之前，不会发送任何内容。",
@@ -822,6 +831,7 @@
     "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
+    "device_family_gpu": "GPU",
     "device_load_failed": "无法加载设备设置",
     "perf_save_failed": "无法保存设置",
     "generate_budget_title": "计算时长预算",
@@ -1092,7 +1102,9 @@
     "installStep_fetch_weights": "正在下载模型权重",
     "installStep_persist": "正在保存配置",
     "installAria": "安装 {{engine}}",
-    "mpsLongText": "{{engine}} 在本机上使用 Apple Silicon（MPS）运行，而这段文本较长——生成可能超出时间预算。缩短文本，或分成几次生成会快得多。"
+    "mpsLongText": "{{engine}} 在本机上使用 Apple Silicon（MPS）运行，而这段文本较长——生成可能超出时间预算。缩短文本，或分成几次生成会快得多。",
+    "localInstallRequired": "请在后端计算机上通过 localhost 或安装指南安装此引擎。远程安装已禁用。",
+    "argosRuntimeUnavailable": "Argos 运行时不可用。请重新安装后端或选择 NLLB。"
   },
   "capture": {
     "desc": "全局热键仅在桌面应用中有效。网页界面使用页面内快捷键 <1>Ctrl+Shift+Space</1>（窗口聚焦时可用）。",
@@ -1807,6 +1819,7 @@
     "h_ago": "{{count}} 小时前"
   },
   "setup": {
+    "ready_desc": "现在可以创建你的第一个声音了。你可以立即设置语音输入，也可以稍后在设置中完成。",
     "welcome": "欢迎",
     "system_check": "系统检查",
     "install_models": "安装模型",
@@ -1873,7 +1886,7 @@
     "choose_method": "选择捐赠方式",
     "choose_method_amount": "继续 ${{amount}}",
     "goal": {
-      "title": "Claude Max 基金",
+      "title": "支持 VoiceStudio 开发",
       "of": "已筹 / 目标",
       "per_month": "/月",
       "aria": "每月目标 {{goal}}，已筹 {{raised}}",
@@ -1882,7 +1895,7 @@
       "social_proof": "加入 {{count}} 位支持本地 AI 的支持者"
     },
     "postcard": {
-      "title": "Claude Max 基金",
+      "title": "支持 VoiceStudio 开发",
       "lead_default": "很高兴它对你有用！VoiceStudio 免费且完全本地运行。如果它能节省你的时间，每月一小笔赞助就能支撑其背后的 Claude Max。",
       "lead_first_clone": "你的第一次声音克隆已完成——太好了！VoiceStudio 完全在你的电脑上运行，你的支持让它保持如此。",
       "lead_tenth_dub": "十次配音——你显然正在让它发挥作用。每月一小笔赞助为这些功能背后的 Claude Max 提供资金。",
@@ -2117,7 +2130,8 @@
     "backend_shutting_down": "VoiceStudio 正在关闭。请重新打开应用后再试。",
     "crash_broken_env": "它在加载自身的 Python 依赖时退出，因此与内存或显卡无关——运行环境不完整，或更新到一半就停下了。请在 设置 → 日志 → 后端 中使用“清理并重试”，它会从头重建环境并就地修复，不会动你的声音或项目。如果之后仍然失败，崩溃详情会指出无法导入的具体软件包。",
     "crash_vram_default": "在较小的 GPU 上，常见原因是在 TTS 模型仍占用显存时加载 ASR 模型，导致显存（VRAM）不足：请先卸载 TTS 模型，或在 模型库 → 模型 中选择更小的 ASR 模型。",
-    "stream_cut_backend_alive": "音频流提前结束，但后端仍在运行——因此它并没有崩溃。在服务器或容器化部署中，这通常是反向代理或负载均衡器在缓冲连接或使其超时：请为此路由禁用响应缓冲（nginx: proxy_buffering off; X-Accel-Buffering: no）并调高读取超时。直接运行桌面应用，或在没有代理的 localhost 上运行，即可确认。"
+    "stream_cut_backend_alive": "音频流提前结束，但后端仍在运行——因此它并没有崩溃。在服务器或容器化部署中，这通常是反向代理或负载均衡器在缓冲连接或使其超时：请为此路由禁用响应缓冲（nginx: proxy_buffering off; X-Accel-Buffering: no）并调高读取超时。直接运行桌面应用，或在没有代理的 localhost 上运行，即可确认。",
+    "stream_cut_backend_alive_local": "串流提前结束，但后端仍在运行——因此并未崩溃。应用在任务进行中与后端断开了连接；当某个耗时步骤连续数分钟没有输出时就可能发生，而后端通常仍会把任务做完。请等几分钟后从历史记录中重新打开该任务，或查看后端日志（设置 → 日志 → 后端）了解它当时在做什么。"
   },
   "keyboard": {
     "title": "键盘快捷键",
@@ -2600,6 +2614,7 @@
     "session_expired": "此配音会话已过期或已清理——请重新上传视频以开始新的会话。"
   },
   "tts_errors": {
+    "profile_language_rejected": "自动模式使用声音档案的语言（{{language}}），但此引擎不支持该语言。请修改档案语言、选择支持的语言或更换引擎。",
     "enter_text": "请输入文字",
     "upload_or_select": "上传音频或选择语音配置文件",
     "trim_hint": "音频为 {{duration}}s — 修剪至 ≤{{max}}s 以获得最佳克隆效果",
@@ -2613,7 +2628,10 @@
     "instruct_category_conflict": "同一类别中选择了两个相互冲突的语音设计选项（例如两种性别）。请先清除其中一项，然后再重新生成。",
     "ref_audio_unusable": "参考音频中听不到任何语音——片段是静音或几乎静音的，因此没有可克隆的声音。请靠近麦克风重新录制（检查是否选择了正确的输入设备、电平是否有跳动），或换一段其他音频。",
     "ref_audio_too_long": "参考音频在提供文字稿时最长20秒，未提供时最长75秒。请裁剪为含清晰语音的3–10秒片段；若提供文字稿，请将其裁剪到同一片段。",
-    "ref_audio_no_speech": "自动语音检测未在参考音频中发现口语。请裁剪为含清晰语音的3–10秒片段，或提供匹配的文字稿。"
+    "ref_audio_no_speech": "自动语音检测未在参考音频中发现口语。请裁剪为含清晰语音的3–10秒片段，或提供匹配的文字稿。",
+    "gpu_arch_unsupported": "此 PyTorch 构建不支持您的 GPU。请在设置 → 性能与设备中选择 CPU，或安装兼容的 PyTorch 构建。",
+    "windows_app_control_blocked": "Windows 应用程序控制阻止了所需文件。请联系管理员允许受信任的 VoiceStudio 运行环境，然后重启应用。",
+    "audio_io_failed": "无法读取或保存音频。请检查文件格式、磁盘剩余空间和文件访问权限，并在设置 → 存储中检查文件夹。"
   },
   "sharing": {
     "title": "共享和远程访问",
@@ -3070,6 +3088,11 @@
     "seed_ph": "自动",
     "vary_repeats": "改变重复的行",
     "vary_repeats_help": "为相同的行提供不同的 take，而不是重复使用一条录音。",
+    "line_gap": "行间停顿",
+    "joins_help": "行间停顿加在没有自己 [pause] 的行之间，段落间停顿加在空行处。开启裁剪时，会先裁掉每行自带的起始和结尾静音，因此你设置的停顿就是实际听到的停顿。",
+    "paragraph_gap": "段落间停顿",
+    "trim_edges": "裁剪引擎静音",
+    "trim_edges_help": "拼接前去除引擎给每行附加的静音。关闭以保留原始渲染。",
     "emotion_help": "分层情感 — 仅由 IndexTTS2 引擎应用。",
     "emotion_text": "情感描述",
     "emotion_text_ph": "例如：听起来疲惫而悲伤",
@@ -3301,6 +3324,7 @@
     "none_selected": "未选择声音——描述一个、拖入音频，或从下方选择。"
   },
   "convert": {
+    "cloning_required": "请选择已就绪且支持声音克隆的语音合成模型。",
     "source_kicker": "源音频",
     "drop_audio": "拖入要转换的音频 — 或点击。WAV、MP3、M4A…",
     "target_voice": "目标声音",
@@ -3312,5 +3336,56 @@
     "transcript": "识别到的内容",
     "result_kicker": "转换后的音频",
     "need_source_and_voice": "请先添加源音频并选择目标声音。"
+  },
+  "dubIntegrity": {
+    "missingSpeech": "语音缺失或无法读取。请在导出前重新生成受影响的片段。",
+    "timingOverflow": "语音超出分配的时长。请缩短译文，或选择严格时间段或拉伸视频。",
+    "backgroundUnavailable": "无法保留原始声音。请检查背景音分离和对白时间后重试，或明确选择仅导出语音。"
+  },
+  "dubStyle": {
+    "label": "翻译风格提示词",
+    "help": "描述语气、受众和改编方式，例如保留笑点、自然转换习语。随项目保存，用于翻译和时长调整。留空使用默认风格。"
+  },
+  "dubActivity": {
+    "output": "翻译结果",
+    "waiting": "尚未收到输出。",
+    "progress": "已验证 {{done}} / {{total}} 个片段",
+    "cancelled": "已取消",
+    "fitting": "正在调整时间"
+  },
+  "sponsorSlot": {
+    "book": "预订展示位",
+    "preview": "赞助商展示预览",
+    "message": "您的品牌、网站和留言",
+    "email_app": "打开邮件应用",
+    "copy_email": "复制邮箱",
+    "preview_detail": "这里可以展示您的标志、链接和介绍。"
+  },
+  "supportPlans": {
+    "remove": "移除赞助商栏",
+    "title": "免费版与 Pro 对比",
+    "free": "免费版",
+    "pro": "Pro",
+    "sponsor_bar": "赞助商栏",
+    "visible": "显示",
+    "hideable": "可隐藏",
+    "unavailable": "尚未配置 Pro 激活。",
+    "telemetry": "遥测",
+    "opt_in": "可选，需主动同意",
+    "disabled": "已禁用",
+    "badge": "Pro 徽章",
+    "advanced": "高级工具",
+    "standard": "标准",
+    "included": "包含"
+  },
+  "integrationCatalog": {
+    "title": "集成",
+    "featured": "精选",
+    "description": "探索集成与精选合作伙伴。",
+    "n8nHint": "将此工作流导入 n8n，编辑请求后运行。请保持 VoiceStudio 运行。Docker 和远程 n8n 需要可访问的后端地址及必要的凭据。"
+  },
+  "directoryExamples": {
+    "example": "目录示例",
+    "notice": "仅为目录示例，并非赞助商或已连接的集成。"
   }
 }

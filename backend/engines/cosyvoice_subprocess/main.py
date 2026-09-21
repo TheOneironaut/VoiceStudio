@@ -136,6 +136,74 @@ def _model_dir(checkout: str) -> str:
     return override
 
 
+@contextlib.contextmanager
+def _qwen_full_precision_load():
+    """Load trained fp32 weights before any explicit upstream fp16 conversion.
+
+    Transformers 5 otherwise constructs Qwen in the blank checkpoint's bf16
+    dtype. Loading llm.pt into it rounds trained weights irreversibly; calling
+    float() afterwards cannot recover them. This sidecar loads one model at a
+    time, and restores the inherited classmethod even when loading fails.
+    """
+    import torch
+    import transformers
+
+    Qwen2ForCausalLM = getattr(transformers, "Qwen2ForCausalLM", None)
+    if Qwen2ForCausalLM is None:
+        yield  # Legacy CosyVoice 1 environments do not use Qwen.
+        return
+    owned = Qwen2ForCausalLM.__dict__.get("from_pretrained")
+    original = Qwen2ForCausalLM.from_pretrained
+
+    def load(cls, *args, **kwargs):
+        # torch_dtype also supports existing user-managed Transformers 4 envs.
+        if "dtype" not in kwargs and "torch_dtype" not in kwargs:
+            kwargs["torch_dtype"] = torch.float32
+        return original(*args, **kwargs)
+
+    Qwen2ForCausalLM.from_pretrained = classmethod(load)
+    try:
+        yield
+    finally:
+        if owned is None:
+            del Qwen2ForCausalLM.from_pretrained
+        else:
+            Qwen2ForCausalLM.from_pretrained = owned
+
+
+def _qwen_attention_mask(xs, masks, cache):
+    """Include cached prompt tokens in upstream's unpadded incremental mask."""
+    if cache is None or masks.shape[-1] != xs.shape[1]:
+        return masks
+    length = cache.get_seq_length() if hasattr(cache, "get_seq_length") else cache[0][0].shape[-2]
+    if not length:
+        return masks
+    import torch
+
+    prefix = masks.new_ones((*masks.shape[:-1], length))
+    return torch.cat((prefix, masks), dim=-1)
+
+
+def _repair_qwen_cache(model):
+    from cosyvoice.llm import llm as llm_module
+
+    Qwen2Encoder = getattr(llm_module, "Qwen2Encoder", None)
+    if Qwen2Encoder is None:
+        return
+    components = getattr(model, "model", model)
+    encoder = getattr(getattr(components, "llm", None), "llm", None)
+    if not isinstance(encoder, Qwen2Encoder):
+        return  # CosyVoice 1 uses a different encoder.
+    original = encoder.forward_one_step
+
+    def forward_one_step(xs, masks, cache=None):
+        return original(xs, _qwen_attention_mask(xs, masks, cache), cache)
+
+    # Modern Transformers interprets a one-token mask literally, hiding the
+    # cached text/voice prompt. Adapt only this instance, preserving full masks.
+    encoder.forward_one_step = forward_one_step
+
+
 def _load_model(stdout):
     global _MODEL
     if _MODEL is not None:
@@ -156,7 +224,20 @@ def _load_model(stdout):
     with _heartbeat(stdout, "loading_model"):
         from cosyvoice.cli.cosyvoice import AutoModel  # type: ignore[import-not-found]  # noqa: PLC0415
 
-        _MODEL = AutoModel(model_dir=model_dir)
+        import torch  # noqa: PLC0415
+
+        with _qwen_full_precision_load():
+            model = AutoModel(model_dir=model_dir)
+        _repair_qwen_cache(model)
+        if not torch.cuda.is_available():
+            # Upstream's Qwen weights may load as bf16 even though its CPU
+            # token inputs are fp32. Keep CUDA's chosen precision unchanged.
+            components = getattr(model, "model", model)
+            for name in ("llm", "flow", "hift"):
+                component = getattr(components, name, None)
+                if component is not None and hasattr(component, "float"):
+                    component.float()
+        _MODEL = model
     _send(stdout, {"op": "progress", "stage": "loading_model", "percent": 100})
     return _MODEL
 

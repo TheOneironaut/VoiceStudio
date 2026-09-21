@@ -340,6 +340,7 @@
     "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
+    "device_family_gpu": "GPU",
     "device_load_failed": "Aygıt ayarı yüklenemedi",
     "perf_save_failed": "Ayar kaydedilemedi",
     "generate_budget_title": "Hesaplama süresi bütçesi",
@@ -360,7 +361,10 @@
     "theme_auto": "Sistem Otomatik",
     "theme_light": "Açık",
     "reduce_motion": "Hareketi azalt",
-    "reduce_motion_desc": "Arka plan animasyonlarını ve geçişleri durdurur. Sistem ayarınız kendi başına geçerlidir; bu ona eklenir."
+    "reduce_motion_desc": "Arka plan animasyonlarını ve geçişleri durdurur. Sistem ayarınız kendi başına geçerlidir; bu ona eklenir.",
+    "perf_torch_compile": "torch.compile devre dışı",
+    "perf_torch_compile_note": "Triton bellek hatalarını önlemek için doğrudan yürütme kullanır.",
+    "perf_torch_compile_hint": "Triton bellek hatalarını önlemek için doğrudan yürütme kullanır. <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>"
   },
   "bootstrap": {
     "title": "VoiceStudio",
@@ -425,6 +429,10 @@
     "importFailed": "Bu dosya okunamadı.",
     "addLine": "Satır Ekle",
     "addChapter": "Bölüm Ekle",
+    "clearScript": "Senaryoyu temizle",
+    "clearScriptHint": "Senaryodaki tüm satırları ve bölümleri kaldır (kadro kalır)",
+    "clearConfirm": "{{count}} senaryo girdisinin tamamı ve bekleyen içe aktarılmış metin silinsin mi? Bu işlem geri alınamaz.",
+    "cleared": "Senaryo temizlendi",
     "chapterN": "Bölüm {{n}}",
     "stems": "Kaynaklanıyor",
     "stemsDone": "Dışa aktarılan {{count}} karakter kökü/kökleri",
@@ -445,6 +453,11 @@
     "pasteAbove": "Metni yukarıya yapıştır",
     "cancel": "İptal",
     "splitIntoTracks": "Çizgilere bölünmüş",
+    "splitMode": "Bölme ölçütü",
+    "split_sentences": "Cümleler",
+    "split_paragraphs": "Paragraflar",
+    "split_chapters": "Bölümler",
+    "splitModeHint": "Her satır ayrı bir çekim olarak okunur. Tek anlatıcı için paragraflar veya tüm bölümler cümlelerden daha akıcıdır.",
     "emptyText": "Hikayenize diyalog ve anlatım satırları ekleyerek başlayın. Cast'ta her karaktere bir ses atayın.",
     "addFirst": "İlk Satırı Ekle",
     "linePlaceholder": "Diyaloğa veya anlatıma girin… sessiz bir ara için [0,5 saniye duraklat] kullanın",
@@ -860,7 +873,9 @@
     "familyDesc_asr": "Sesi; transkripsiyon, dublaj, altyazı ve dikte için metne dönüştürür.",
     "familyDesc_llm": "Çeviri ve yeniden yazma için isteğe bağlı metin yardımcısıdır. “Kapalı” bu adımları atlar.",
     "mpsLongText": "{{engine}} burada Apple Silicon (MPS) üzerinde çalışıyor ve bu metin uzun — üretim süre bütçesini aşabilir. Daha kısa bir metin ya da birkaç parçaya bölmek çok daha hızlı olacaktır.",
-    "inMemory": "Bellekte"
+    "inMemory": "Bellekte",
+    "localInstallRequired": "Bu motoru arka uç bilgisayarında localhost veya kurulum kılavuzu üzerinden yükleyin. Uzaktan kurulum devre dışıdır.",
+    "argosRuntimeUnavailable": "Argos çalışma ortamı kullanılamıyor. Arka ucu yeniden yükleyin veya NLLB seçin."
   },
   "capture": {
     "desc": "Genel kısayol tuşları yalnızca masaüstü uygulamasında çalışır. Web kullanıcı arayüzü, pencere odaktayken sayfa içi <1>Ctrl+Shift+Space</1> kısayolunu kullanır.",
@@ -1552,6 +1567,7 @@
     "h_ago": "{{count}}sa önce"
   },
   "setup": {
+    "ready_desc": "İlk sesinizi oluşturmaya hazırsınız. Dikteyi şimdi veya daha sonra Ayarlar’dan yapılandırabilirsiniz.",
     "welcome": "Hoş geldiniz",
     "system_check": "Sistem kontrolü",
     "install_models": "Modelleri yükle",
@@ -1606,7 +1622,7 @@
     "choose_method": "Nasıl vereceğinizi seçin",
     "choose_method_amount": "${{amount}} ile devam et",
     "goal": {
-      "title": "Claude Max'e fon sağlayın",
+      "title": "VoiceStudio geliştirmelerini destekleyin",
       "of": "arasında",
       "per_month": "/ ay",
       "aria": "{{raised}} / {{goal}} aylık hedef",
@@ -1615,7 +1631,7 @@
       "social_proof": "Yerel yapay zekayı finanse eden {{count}} destekçilerine katılın"
     },
     "postcard": {
-      "title": "Claude Max'e fon sağlayın",
+      "title": "VoiceStudio geliştirmelerini destekleyin",
       "lead_default": "İşe yaradığına sevindim! VoiceStudio ücretsizdir ve tamamen yereldir. Size zaman kazandıracaksa, aylık küçük bir chip-in, arkasındaki Claude Max'e fon sağlar.",
       "lead_first_clone": "İlk ses klonunuz tamamlandı — güzel! VoiceStudio tamamen makinenizde çalışır ve desteğiniz de bu şekilde kalmasını sağlar.",
       "lead_tenth_dub": "On dublaj - açıkça işe koyuyorsunuz. Küçük bir aylık chip-in, bu özellikleri sunan Claude Max'e fon sağlıyor.",
@@ -1797,7 +1813,8 @@
     "backend_shutting_down": "VoiceStudio kapanıyor. Uygulamayı yeniden açıp tekrar dene.",
     "crash_broken_env": "Kendi Python bağımlılıklarını yüklerken sonlandı; yani sorun bellek ya da ekran kartınız değil — ortam eksik veya yarım güncellenmiş durumda. Ayarlar → Günlükler → Arka uç bölümündeki \"Temizle ve Yeniden Dene\" seçeneğini kullanın: ortamı sıfırdan yeniden kurar ve seslerinize ya da projelerinize dokunmadan yerinde onarır. Yine de başarısız olursa, çökme ayrıntıları içe aktarılamayan paketin adını verir.",
     "crash_vram_default": "Küçük GPU'larda en yaygın neden, TTS modeli yüklüyken ASR modelini de yüklerken VRAM'in tükenmesidir: önce TTS modelini bellekten kaldırın veya Model kataloğu → Modeller bölümünden daha küçük bir ASR modeli seçin.",
-    "stream_cut_backend_alive": "Akış erken sona erdi ama arka uç hâlâ çalışıyor — yani çökmedi. Sunucu veya konteyner kurulumlarında bunun nedeni genellikle bir ters vekilin (reverse proxy) ya da yük dengeleyicinin bağlantıyı arabelleğe alması veya zaman aşımına uğratmasıdır: bu yol için yanıt arabelleğe almayı kapatın (nginx: proxy_buffering off; X-Accel-Buffering: no) ve okuma zaman aşımını artırın. Masaüstü uygulamasını doğrudan ya da vekil olmadan localhost üzerinde çalıştırmak bunu doğrular."
+    "stream_cut_backend_alive": "Akış erken sona erdi ama arka uç hâlâ çalışıyor — yani çökmedi. Sunucu veya konteyner kurulumlarında bunun nedeni genellikle bir ters vekilin (reverse proxy) ya da yük dengeleyicinin bağlantıyı arabelleğe alması veya zaman aşımına uğratmasıdır: bu yol için yanıt arabelleğe almayı kapatın (nginx: proxy_buffering off; X-Accel-Buffering: no) ve okuma zaman aşımını artırın. Masaüstü uygulamasını doğrudan ya da vekil olmadan localhost üzerinde çalıştırmak bunu doğrular.",
+    "stream_cut_backend_alive_local": "Akış erken sona erdi ancak arka uç hâlâ çalışıyor — yani çökmedi. Uygulama, iş sürerken arka uçla bağlantısını kaybetti; bu, uzun bir adım dakikalarca hiçbir şey göndermediğinde olur ve arka uç genellikle işi yine de tamamlar. Birkaç dakika bekleyip işi geçmişten yeniden açın veya arka ucun ne yaptığını görmek için arka uç günlüğüne (Ayarlar → Günlükler → Arka uç) bakın."
   },
   "keyboard": {
     "title": "Klavye kısayolları",
@@ -2211,6 +2228,7 @@
     "session_expired": "Bu dub oturumunun süresi doldu veya temizlendi. Yeni bir video başlatmak için videonuzu yeniden yükleyin."
   },
   "tts_errors": {
+    "profile_language_rejected": "Otomatik, bu motorun desteklemediği ses profili dilini ({{language}}) kullanır. Profil dilini değiştirin, desteklenen bir dil seçin veya motoru değiştirin.",
     "enter_text": "Lütfen metni girin",
     "upload_or_select": "Bir ses yükleyin veya bir ses profili seçin",
     "trim_hint": "Ses {{duration}}s — en iyi klonlama için ≤{{max}}s'ye kırpın",
@@ -2224,7 +2242,10 @@
     "instruct_category_conflict": "Aynı kategoride birbiriyle çelişen iki ses tasarımı seçeneği seçildi (ör. iki cinsiyet). Yeniden oluşturmadan önce birini temizleyin.",
     "ref_audio_unusable": "Referans seste konuşma duyulamadı — klip sessiz ya da neredeyse sessiz, bu yüzden klonlanacak bir ses yok. Mikrofona daha yakın şekilde yeniden kayıt yapın (doğru giriş aygıtının seçili olduğundan ve seviyenin hareket ettiğinden emin olun) veya başka bir klip seçin.",
     "ref_audio_too_long": "Bir referans, transkriptle en fazla 20 saniye; transkriptsiz en fazla 75 saniye olabilir. Sesi 3–10 saniyelik net bir konuşma bölümüne kırpın; metin sağlıyorsanız transkripti de aynı bölüme kırpın.",
-    "ref_audio_no_speech": "Otomatik konuşma algılama referansta söylenmiş kelime bulamadı. Sesi 3–10 saniyelik net bir konuşma bölümüne kırpın veya eşleşen bir transkript sağlayın."
+    "ref_audio_no_speech": "Otomatik konuşma algılama referansta söylenmiş kelime bulamadı. Sesi 3–10 saniyelik net bir konuşma bölümüne kırpın veya eşleşen bir transkript sağlayın.",
+    "gpu_arch_unsupported": "Bu PyTorch derlemesi GPU’nuzu desteklemiyor. Ayarlar → Performans ve Cihaz bölümünden CPU’yu seçin veya uyumlu bir PyTorch derlemesi yükleyin.",
+    "windows_app_control_blocked": "Windows uygulama denetimi gerekli bir dosyayı engelledi. Yöneticinizden güvenilir VoiceStudio çalışma ortamına izin vermesini isteyin, ardından uygulamayı yeniden başlatın.",
+    "audio_io_failed": "Ses okunamadı veya kaydedilemedi. Dosya biçimini, boş disk alanını ve dosya izinlerini kontrol edin. Ayarlar → Depolama bölümündeki klasörü inceleyin."
   },
   "sharing": {
     "title": "Paylaşım ve Uzaktan Erişim",
@@ -2624,6 +2645,11 @@
     "seed_ph": "Otomatik",
     "vary_repeats": "Tekrarlanan satırları değiştirin",
     "vary_repeats_help": "Özdeş satırlara bir kaydı yeniden kullanmak yerine farklı çekişler verin.",
+    "line_gap": "Satırlar arası boşluk",
+    "joins_help": "Satırlar arası boşluk, kendi [pause] etiketi olmayan satırların arasına; paragraflar arası boşluk ise boş satırlara eklenir. Kırpma açıkken önce her satırın kendi baş ve son sessizliği kesilir; böylece ayarladığınız boşluk, duyduğunuz boşluk olur.",
+    "paragraph_gap": "Paragraflar arası boşluk",
+    "trim_edges": "Motor sessizliğini kırp",
+    "trim_edges_help": "Motorun her satıra eklediği sessizliği birleştirmeden önce keser. Ham kayıtları korumak için kapatın.",
     "emotion_help": "Dereceli duygu — yalnızca IndexTTS2 motoru tarafından uygulanır.",
     "emotion_text": "Duygu açıklaması",
     "emotion_text_ph": "örn. tükenmiş ve üzgün geliyor",
@@ -2816,6 +2842,7 @@
     "none_selected": "Ses seçilmedi — birini tarif edin, ses dosyası bırakın veya aşağıdan seçin."
   },
   "convert": {
+    "cloning_required": "Ses klonlamayı destekleyen, kullanıma hazır bir metinden konuşmaya modeli seçin.",
     "source_kicker": "Kaynak klip",
     "drop_audio": "Dönüştürülecek klibi bırakın — veya tıklayın. WAV, MP3, M4A…",
     "target_voice": "Hedef ses",
@@ -2831,5 +2858,56 @@
   "player": {
     "pause": "Duraklat",
     "play": "Oynat"
+  },
+  "dubIntegrity": {
+    "missingSpeech": "Konuşma eksik veya okunamıyor. Dışa aktarmadan önce ilgili bölümü yeniden oluşturun.",
+    "timingOverflow": "Konuşma ayrılan süreyi aşıyor. Çeviriyi kısaltın veya kesin zaman aralığını ya da videoyu uzatmayı seçin.",
+    "backgroundUnavailable": "Özgün ses korunamadı. Arka plan ayrımını ve diyalog zamanlarını kontrol edip yeniden deneyin veya yalnızca konuşmayı dışa aktarmayı seçin."
+  },
+  "dubStyle": {
+    "label": "Çeviri üslubu talimatları",
+    "help": "Tonu, hedef kitleyi ve uyarlamayı açıklayın; örneğin şakaları koruyun ve deyimleri doğal biçimde aktarın. Projeye kaydedilir, çeviri ve süre düzenlemelerinde kullanılır. Varsayılan üslup için boş bırakın."
+  },
+  "dubActivity": {
+    "output": "Çeviriler",
+    "waiting": "Henüz çıktı alınmadı.",
+    "progress": "{{done}} / {{total}} bölüm doğrulandı",
+    "cancelled": "İptal edildi",
+    "fitting": "Zamanlama ayarlanıyor"
+  },
+  "sponsorSlot": {
+    "book": "Yerinizi ayırtın",
+    "preview": "Sponsor önizlemesi",
+    "message": "Markanız, web siteniz ve mesajınız",
+    "email_app": "E-posta uygulamasını aç",
+    "copy_email": "E-postayı kopyala",
+    "preview_detail": "Logonuz, bağlantınız ve tanıtımınız burada görünebilir."
+  },
+  "supportPlans": {
+    "remove": "Sponsor çubuğunu kaldır",
+    "title": "Ücretsiz ve Pro",
+    "free": "Ücretsiz",
+    "pro": "Pro",
+    "sponsor_bar": "Sponsor çubuğu",
+    "visible": "Görünür",
+    "hideable": "Gizlenebilir",
+    "unavailable": "Pro etkinleştirmesi henüz yapılandırılmadı.",
+    "telemetry": "Telemetri",
+    "opt_in": "İsteğe bağlı, onay ile",
+    "disabled": "Devre dışı",
+    "badge": "Pro rozeti",
+    "advanced": "Gelişmiş araçlar",
+    "standard": "Standart",
+    "included": "Dahil"
+  },
+  "integrationCatalog": {
+    "title": "Entegrasyonlar",
+    "featured": "Öne çıkan",
+    "description": "Entegrasyonları ve öne çıkan iş ortaklarını keşfedin.",
+    "n8nHint": "Bu iş akışını n8n içine aktarın, isteği düzenleyip çalıştırın. VoiceStudio açık kalsın. Docker ve uzak n8n için erişilebilir bir arka uç adresi ve gerekli kimlik bilgileri gerekir."
+  },
+  "directoryExamples": {
+    "example": "Dizin örneği",
+    "notice": "Yalnızca dizin örnekleri; sponsor veya bağlı entegrasyon değildir."
   }
 }

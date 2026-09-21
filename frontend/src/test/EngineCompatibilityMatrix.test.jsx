@@ -955,12 +955,11 @@ describe('EngineCompatibilityMatrix', () => {
     await waitForRow('mlx-audio');
     openDetails('mlx-audio');
     const select = screen.getByTestId('curated-model-select-mlx-audio');
-    expect(select).toHaveValue('outetts');
-    expect(
-      within(select).getByRole('option', { name: 'Kokoro (default, fast)' }),
-    ).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: 'CSM (voice cloning)' })).toBeInTheDocument();
-    expect(within(select).getByRole('option', { name: 'OuteTTS' })).toBeInTheDocument();
+    expect(select).toHaveTextContent('OuteTTS');
+    fireEvent.click(select);
+    expect(screen.getByRole('option', { name: 'Kokoro (default, fast)' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'CSM (voice cloning)' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'OuteTTS' })).toBeInTheDocument();
   });
 
   it('picking a different curated model calls onSelect with the model key and refreshes', async () => {
@@ -979,13 +978,14 @@ describe('EngineCompatibilityMatrix', () => {
     );
     await waitForRow('mlx-audio');
     openDetails('mlx-audio');
-    fireEvent.change(screen.getByTestId('curated-model-select-mlx-audio'), {
-      target: { value: 'csm' },
-    });
+    fireEvent.click(screen.getByTestId('curated-model-select-mlx-audio'));
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'CSM (voice cloning)' }));
     await waitFor(() => expect(onSelect).toHaveBeenCalledWith('tts', 'mlx-audio', 'csm'));
     // Reloaded after the pick — the panel stays open and reflects the new model.
     await waitFor(() =>
-      expect(screen.getByTestId('curated-model-select-mlx-audio')).toHaveValue('csm'),
+      expect(screen.getByTestId('curated-model-select-mlx-audio')).toHaveTextContent(
+        'CSM (voice cloning)',
+      ),
     );
     expect(apiListEngines.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
@@ -1052,12 +1052,13 @@ describe('EngineCompatibilityMatrix', () => {
     await waitForRow('gemini-3.1-flash-tts');
     openDetails('gemini-3.1-flash-tts');
     const select = screen.getByTestId('curated-voice-select-gemini-3.1-flash-tts');
-    fireEvent.change(select, { target: { value: 'Puck' } });
+    fireEvent.click(select);
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'Puck' }));
 
     await waitFor(() => {
       expect(onSelect).toHaveBeenCalledWith('tts', 'gemini-3.1-flash-tts', undefined, 'Puck');
     });
-    await waitFor(() => expect(select).toHaveValue('Puck'));
+    await waitFor(() => expect(select).toHaveTextContent('Puck'));
   });
 
   // ── Family modes ────────────────────────────────────────────────────────

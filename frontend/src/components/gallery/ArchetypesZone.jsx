@@ -18,7 +18,8 @@ import {
   VolumeX,
   LayoutGrid,
 } from 'lucide-react';
-import { Button, Input, Select, Segmented } from '../../ui';
+import { Button, Input, Segmented } from '../../ui';
+import SearchableSelect from '../SearchableSelect';
 import { useArchetypeCategories, useArchetypes } from '../../api/hooks';
 import { titleCase, facetLabel, GALLERY_GRID } from './constants';
 import ArchetypeCard from './ArchetypeCard';
@@ -259,20 +260,21 @@ export default function ArchetypesZone({
           </div>
           <span className="inline-flex min-w-0 shrink-0 items-center gap-[5px]">
             <LayoutGrid size={13} aria-hidden="true" className={facetIconCls} />
-            <Select
+            <SearchableSelect
               size="sm"
-              className="w-auto min-w-[118px] max-w-[170px]"
-              aria-label={t('gallery.zone_archetypes', { defaultValue: 'Archetypes' })}
+              buttonClassName="input-base w-auto min-w-[118px] max-w-[170px]"
+              ariaLabel={t('gallery.zone_archetypes', { defaultValue: 'Archetypes' })}
               value={filters.use_case ?? ''}
-              onChange={(e) => setFilter('use_case', e.target.value || null)}
-            >
-              <option value="">{t('gallery.all', { defaultValue: 'All' })}</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {t(`archetypes.use_${c.id}`, { defaultValue: c.name })}
-                </option>
-              ))}
-            </Select>
+              onChange={(value) => setFilter('use_case', value || null)}
+              options={[
+                { value: '', label: t('gallery.all', { defaultValue: 'All' }) },
+                ...categories.map((c) => ({
+                  value: c.id,
+                  label: t(`archetypes.use_${c.id}`, { defaultValue: c.name }),
+                })),
+              ]}
+              menuPortal
+            />
           </span>
           <Button
             variant="ghost"
@@ -328,22 +330,23 @@ export default function ArchetypesZone({
               return (
                 <span key={dim} className="inline-flex shrink-0 items-center gap-[5px]">
                   <DimIcon size={13} aria-hidden="true" className={facetIconCls} />
-                  <Select
+                  <SearchableSelect
                     size="sm"
-                    className="w-auto min-w-[88px] max-w-[124px]"
-                    aria-label={t(`archetypes.facet_${dim}`, { defaultValue: titleCase(dim) })}
+                    buttonClassName="input-base w-auto min-w-[88px] max-w-[124px]"
+                    ariaLabel={t(`archetypes.facet_${dim}`, { defaultValue: titleCase(dim) })}
                     value={filters[dim] ?? ''}
-                    onChange={(e) => setFilter(dim, e.target.value || null)}
-                  >
-                    <option value="">
-                      {t(`archetypes.facet_${dim}`, { defaultValue: titleCase(dim) })}
-                    </option>
-                    {FACETS[dim].map((opt) => (
-                      <option key={opt} value={opt}>
-                        {facetLabel(opt)}
-                      </option>
-                    ))}
-                  </Select>
+                    onChange={(value) => setFilter(dim, value || null)}
+                    options={[
+                      {
+                        value: '',
+                        label: t(`archetypes.facet_${dim}`, {
+                          defaultValue: titleCase(dim),
+                        }),
+                      },
+                      ...FACETS[dim].map((opt) => ({ value: opt, label: facetLabel(opt) })),
+                    ]}
+                    menuPortal
+                  />
                 </span>
               );
             })}

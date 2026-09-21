@@ -1,8 +1,5 @@
 <div align="center">
-
-  <h3>NOTE: Electron Rewrite Ongoing: Please dont't create desktop app related issues and pr</h3>
- 
-  <p><img src="docs/logo.png" alt="VoiceStudio logo" width="120" height="120" /></p>
+  <img src="docs/logo.png" alt="VoiceStudio" width="88" />
   <h1>VoiceStudio</h1>
   <p>
     <a href="https://trendshift.io/repositories/28176?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-28176" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/28176" alt="VoiceStudio ranking on Trendshift" width="220" height="48" /></a>
@@ -12,20 +9,15 @@
   <p>18 TTS engines · 11 ASR engines · 646-language catalogue · macOS, Windows, and Linux</p>
   <p><strong>Local-first.</strong> No account, API key, subscription, or usage meter for the core workflow.</p>
 
+  <p><strong>Open-source voice cloning, voice design, video dubbing, dictation, transcription & audiobook creation in 646 languages.</strong></p>
   <p>
-    <a href="#install">Install</a> ·
-    <a href="#features">Features</a> ·
-    <a href="#comparison">Compare</a> ·
-    <a href="#requirements">Requirements</a> ·
-    <a href="#hardware-recommendations">Hardware</a> ·
-    <a href="#engines">Engines</a> ·
-    <a href="#architecture">Architecture</a> ·
-    <a href="#api">API</a> ·
+    <a href="https://voicestudio.sh/?utm_source=github&utm_medium=readme&utm_campaign=project">Website</a> ·
+    <a href="https://github.com/debpalash/VoiceStudio/releases/latest">Download</a> ·
+    <a href="#get-started">Get started</a> ·
     <a href="#documentation">Docs</a> ·
-    <a href="#faq">FAQ</a> ·
-    <a href="README_CN.md"><strong>简体中文</strong></a>
+    <a href="https://discord.gg/bzQavDfVV9">Discord</a> ·
+    <a href="README_CN.md">简体中文</a>
   </p>
-
   <p>
     <a href="https://github.com/debpalash/VoiceStudio/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/debpalash/VoiceStudio/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status" /></a>
     <a href="https://github.com/debpalash/VoiceStudio/stargazers"><img src="https://img.shields.io/github/stars/debpalash/VoiceStudio?style=flat-square&color=f59e0b" alt="GitHub stars" /></a>
@@ -44,12 +36,9 @@
   </p>
 </div>
 
-<div align="center">
-  <img src="docs/media/0.5.0/quick-switch.gif" alt="Switching TTS engines from the VoiceStudio status bar" width="100%" />
-</div>
+![A tour of the Electron app: voice cloning, voice design, dubbing, and model management](docs/media/electron/voicestudio.gif)
 
-> [!WARNING]
-> **Active beta.** Use the [latest release](https://github.com/debpalash/VoiceStudio/releases/latest) for stable work. `main` contains the newest fixes and may change between releases. Report problems through [GitHub Issues](https://github.com/debpalash/VoiceStudio/issues).
+## Your voice. Your workflow.
 
 > [!NOTE]
 > **Gemini edition.** New installations use **Gemini 3.1 Flash TTS Preview** by default. Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` before generating speech. VoiceStudio does not download a local TTS checkpoint unless you explicitly select a local engine; an existing saved engine choice is preserved.
@@ -67,21 +56,40 @@
 | **Storage** | Voices, projects, settings, and outputs stay on the machine by default |
 | **License** | AGPL-3.0 application; downloaded models keep their upstream terms |
 
-The Voice workspace starts with three tabs: **From audio** for cloning, **By design** for creating a voice, and **Convert** for speech-to-speech conversion. Each tab displays its own workflow, with Synthesize Audio or Convert pinned below the scrolling form. The top-bar **Engines** panel combines engine selection, loaded models, and unload/flush controls; <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+<kbd>E</kbd> opens it. The searchable language picker shares Dubbing’s flags and language list layout, selects one output language, and retains Auto and the full cloning catalogue. Language options flow into multiple columns when space allows. Expand **Workspaces** in the sidebar to reveal navigation labels; Escape collapses it.
+| Create | Produce | Connect |
+| :--- | :--- | :--- |
+| Clone a voice or design your own | Dub videos with timed speech | Local API & MCP for agents |
+| Dictate with a floating widget | Stories, audiobooks & batch jobs | Optional remote workers |
 
-Dubbing starts with file upload or URL import and nearby language choices. Its **Projects** panel lists previous dubs so they can be reopened by clicking anywhere on a card; action buttons operate independently. Advanced import options include captions and optional YouTube sign-in. Dubbing places playback controls over the video with background blur and combines the waveform and timed transcript in one compact editing surface. Drag the zoomed waveform left or right to pan; click to seek. Translation language and ISO-code controls stay synchronized; Auto clears any previous language code and dialect. Transcript items group editable text, timing and status, and voice controls into three readable rows that wrap with the panel width. Output Options stays compact with the active settings shown in its summary; expand it to change output, timing, or voice matching. Transcript, glossary, and paste controls share a toolbar above the segment editor. Project details, workflow steps, and Generate/Verify/Export actions use an unfilled header.
+Start with **VoiceStudio** (default, powered by k2-fsa/OmniVoice), or choose another engine. [Features & engine catalog](docs/feature-catalog.md).
 
-The Audiobook Script editor fills the available workspace beneath its markup toolbar; Voices and Book settings stay in their own tabs.
+Local workflows run on your hardware. Remote services are optional; usage analytics requires consent.
 
-Output settings use aligned rows; review status appears before the collapsible transcript and glossary. Glossary terms have labelled entry fields and an explicit edit action. Launchpad arranges recent files and saved voices side by side when space allows, with responsive card grids and visible Open actions.
+<details>
+<summary><strong>Explore the workspaces</strong> · Clone, dub, design & models</summary>
 
-The casting board shows icon-based voice cards and searchable selectors for each speaker. Drag a card onto a speaker or choose a voice from that speaker’s menu.
+<table>
+  <tr>
+    <td><img src="docs/media/electron/voice-cloning.png" alt="Electron voice cloning workspace with the bundled demo voice" width="100%" /></td>
+    <td><img src="docs/media/electron/dubbing.png" alt="Electron video dubbing workspace" width="100%" /></td>
+  </tr>
+  <tr><td align="center">Voice cloning</td><td align="center">Video dubbing</td></tr>
+  <tr>
+    <td><img src="docs/media/electron/voice-design.png" alt="Describe a voice in the Electron voice design workspace" width="100%" /></td>
+    <td><img src="docs/media/electron/models.png" alt="Install and manage local speech models" width="100%" /></td>
+  </tr>
+  <tr><td align="center">Voice design</td><td align="center">Local models</td></tr>
+</table>
 
-<a id="install"></a>
+<img width="2628" height="1950" alt="VoiceStudio desktop workspace" src="https://github.com/user-attachments/assets/b474497d-a453-49a3-a2dd-f023ec6b7659" />
 
-## Install
+</details>
 
-Download a package from the [latest release](https://github.com/debpalash/VoiceStudio/releases/latest), then follow the platform guide.
+## Get started
+
+Download from [Releases](https://github.com/debpalash/VoiceStudio/releases/latest), then follow your platform guide:
+
+**[macOS](docs/install/macos.md) · [Windows](docs/install/windows.md) · [Linux](docs/install/linux.md) · [Docker](docs/install/docker.md)**
 
 | Platform | Package | Guide |
 |---|---|---|
@@ -92,59 +100,62 @@ Download a package from the [latest release](https://github.com/debpalash/VoiceS
 
 Download this fork's [Windows Gemini MSI](https://github.com/TheOneironaut/VoiceStudio/releases/download/gemini-windows/VoiceStudio-Gemini-Windows-x64.msi). First launch creates a managed Python environment, but the Gemini default does not download local TTS model weights. Local engines remain available as an explicit choice.
 
-> [!NOTE]
-> On macOS, first launch needs a one-time right-click, then **Open** approval. Intel Macs cannot run the local Python backend; use a [remote backend](docs/install/macos.md) instead.
+Open **Voice cloning**, choose a voice or add a clean reference recording, enter your text, and generate. Install the required model when prompted. Hardware needs vary by engine; see [performance](docs/performance.md).
 
-### Quick Docker run
+### Install with prompt
 
-The published images are **`linux/amd64` only**. On Apple Silicon, use the
-[native macOS app](docs/install/macos.md) for GPU acceleration. ARM64 hosts
-should read the [architecture requirements](docs/install/docker.md#architecture)
-before pulling an image.
+Copy this prompt into your coding agent to install VoiceStudio and configure it for your device:
 
-```bash
-docker run -d -p 127.0.0.1:3900:3900 -v omnivoice-data:/app/omnivoice_data --name voicestudio palashdeb/omnivoice-studio:stable
+```text
+Install and configure the VoiceStudio Electron desktop app on this device,
+then verify it works. Tauri is archived; do not install or launch it.
+Repository: https://github.com/debpalash/VoiceStudio
+
+Read the repository's install guide for my OS, docs/performance.md, and
+skills/voicestudio/SKILL.md. Install the voicestudio audio-workflow skill
+with `npx skills add debpalash/VoiceStudio` if your agent supports skills;
+otherwise follow that SKILL.md directly.
+
+Detect my OS, CPU architecture, GPU, available RAM/VRAM, free disk space,
+and any existing VoiceStudio installation, backend, or downloaded models.
+Reuse existing data and models. Prefer the latest stable Electron installer
+for my OS and architecture; select an asset named VoiceStudio-Electron.
+For source setup, follow electron/README.md: bun install, bun run setup:api, then bun run dev
+from the repository root. Let Electron supervise the backend; do not start
+a second backend or use legacy tauri scripts.
+If migrating from Tauri, follow docs/electron-migration.md and back up first.
+
+Configure local voice cloning using a supported engine and acceleration
+that fit this device. Keep working defaults and verify the actual execution
+device rather than assuming GPU support. Install required dependencies;
+reuse a suitable installed model, or explain the download size and license
+and ask before downloading one. Keep cloud services and analytics opt-in.
+
+Start the app, check /health at the configured backend address (default
+http://localhost:3900), and discover its API through /openapi.json. Generate
+a short test with a bundled or authorized voice and verify the audio file.
+Report the installed version, engine, actual device, data location, audio
+output path, and how to reopen the app. Complete the setup, not just a plan;
+identify any permissions or manual steps you cannot perform.
 ```
 
-### First voice
-
-1. Launch VoiceStudio and open **Voice Cloning**.
-2. Add a clean voice sample. Three seconds works; 5 to 15 seconds usually gives a better prompt.
-3. Enter text, choose a language, then select **Generate**.
-
-> [!TIP]
-> **Try without installing:** Run VoiceStudio in the cloud via the [Google Colab notebook](https://colab.research.google.com/github/debpalash/VoiceStudio/blob/main/notebooks/OmniVoice_Studio_Colab.ipynb). Explore audio quality comparisons in [benchmarks](docs/benchmarks.md) and prompt design tips in [expressive speech](docs/expressive-speech.md).
-
-### Audio samples
-
-Listen to sample outputs produced locally with VoiceStudio:
-
-| Workflow | Prompt / Reference Audio | Generated Audio |
-|---|---|---|
-| **Voice Cloning** | [demo_voice.wav](backend/assets/samples/demo_voice.wav) | [demo_clone_output.wav](backend/assets/samples/demo_clone_output.wav) |
-| **Voice Design** (US News Anchor) | *"Clear, authoritative American broadcast tone"* | [demo_voice_design_us_news_anchor.wav](backend/assets/samples/voice_design/demo_voice_design_us_news_anchor.wav) |
-| **Voice Design** (UK Audiobook) | *"Warm, expressive British storytelling voice"* | [demo_voice_design_audiobook_uk_narrator.wav](backend/assets/samples/voice_design/demo_voice_design_audiobook_uk_narrator.wav) |
-| **Video Dubbing** (Multilingual) | [source.src.wav](backend/assets/samples/demo/dubbing/source.src.wav) | [Spanish](backend/assets/samples/demo/dubbing/dubbed_es.src.wav) · [French](backend/assets/samples/demo/dubbing/dubbed_fr.src.wav) · [Japanese](backend/assets/samples/demo/dubbing/dubbed_ja.src.wav) · [Chinese](backend/assets/samples/demo/dubbing/dubbed_zh.src.wav) |
-
-### Run from source
-
-Install the [development prerequisites](.github/CONTRIBUTING.md#development-setup) (Node 20+/Bun and Python 3.11+), then:
+<details>
+<summary><strong>Run the Electron preview from source</strong></summary>
 
 ```bash
 git clone https://github.com/debpalash/VoiceStudio.git
 cd VoiceStudio
 bun install
-bun run desktop
+bun run setup:api  # prepare Python dependencies before starting Electron
+bun run dev
 ```
 
-The desktop launcher configures Python dependencies on first run via `uv` automatically. Use `bun run dev` for the browser UI. See [Contributing](.github/CONTRIBUTING.md) for services, tests, and platform packages.
+See [Electron setup](electron/README.md) for prerequisites and backend configuration.
 
-### If setup fails
+Use `bun run smoke-test` to build and launch an isolated packaged Electron app.
+Add `-- --install` for the networked managed-runtime installation check.
 
-- Run **Settings → About → Run self-check** or `uv run python backend/main.py --diagnose --deep`.
-- Check [install troubleshooting](docs/install/troubleshooting.md).
-- Save a scrubbed diagnostic bundle from the app when opening an issue.
-- For slow generation, compare [measured benchmarks](docs/benchmarks.md) and [performance settings](docs/performance.md).
+</details>
 
 <a id="features"></a>
 
@@ -290,9 +301,9 @@ WhisperX and Faster-Whisper retry with `int8` when efficient `float16` is unavai
 ## Architecture
 
 ```text
-Tauri v2 desktop shell (Rust)
-        │ IPC
-React + Vite UI
+Electron desktop shell
+        │ typed preload bridge
+React + Vite renderer
         │ HTTP · SSE · WebSocket on localhost:3900
 FastAPI backend
         ├── TTS / ASR engine registries
@@ -303,8 +314,8 @@ FastAPI backend
 
 | Layer | Path | Responsibility |
 |---|---|---|
-| Desktop shell | `frontend/src-tauri/` | Window lifecycle, tray, shortcuts, updater, sidecar bootstrap |
-| Frontend | `frontend/src/` | React UI, Zustand state, API and event clients, i18n |
+| Desktop shell | `electron/src/main/` | Window lifecycle, shortcuts, updater, and backend supervision |
+| Frontend | `electron/src/renderer/` | React UI, API and event clients, i18n |
 | API | `backend/api/` | REST routes, schemas, auth boundaries, streaming |
 | Core services | `backend/services/` | Generation, dubbing, audio processing, persistence |
 | Engines | `backend/engines/` | Isolated and optional engine adapters |
@@ -414,98 +425,27 @@ See the [MCP guide](docs/mcp.md) for tools (`generate_speech`, `clone_voice`, `t
 The [notebook](notebooks/OmniVoice_Studio_Colab.ipynb) runs the app and web UI on a Colab GPU. Colab is remote compute, so uploaded audio and project data do not remain local to your machine.
 
 <a id="documentation"></a>
+> **Electron is the only maintained desktop app.** Version 0.5.3 was the final Tauri release. Existing Tauri users must [install Electron separately](docs/electron-migration.md). Root development, build, test, and release commands target Electron; Tauri source is archived and receives no further updates.
 
 ## Documentation
 
-| Need | Read |
+| Need | Start here |
 |---|---|
-| Install | [macOS](docs/install/macos.md) · [Windows](docs/install/windows.md) · [Linux](docs/install/linux.md) · [Docker](docs/install/docker.md) |
-| Fix setup | [Troubleshooting](docs/install/troubleshooting.md) · [model downloads](docs/downloading-models.md) · [Hugging Face token](docs/setup/huggingface-token.md) |
-| Choose an engine | [Engine guides](docs/engines/README.md) · [benchmarks](docs/benchmarks.md) · [expressive speech](docs/expressive-speech.md) |
-| Tune hardware | [Performance](docs/performance.md) · [remote workers](docs/remote-workers.md) |
-| Build integrations | [Speech platform](docs/speech-platform.md) · [Private production API](docs/production-private-api.md) · [API auth](docs/api-auth.md) · [MCP](docs/mcp.md) · [examples](examples/README.md) |
-| Build VoiceStudio | [Contributing](.github/CONTRIBUTING.md) · [engine acceptance](docs/engine-acceptance.md) |
-| Track changes | [Changelog](CHANGELOG.md) · [roadmap](docs/ROADMAP.md) · [latest release](https://github.com/debpalash/VoiceStudio/releases/latest) |
-| Remove everything | [Uninstall guide](docs/install/uninstall.md) |
+| Setup help | [Troubleshooting](docs/install/troubleshooting.md) · [Model downloads](docs/downloading-models.md) |
+| Models & audio quality | [Engine guides](docs/engines/README.md) · [Benchmarks](docs/benchmarks.md) |
+| Integrations | [Local API](docs/speech-platform.md) · [MCP](docs/mcp.md) · [Examples](examples/README.md) |
+| Development | [Contributing](.github/CONTRIBUTING.md) · [Electron](electron/README.md) · [Changelog](CHANGELOG.md) |
 
-<a id="faq"></a>
+Agent skills: `npx skills add debpalash/VoiceStudio` — choose **voicestudio** for audio workflows or **voicestudio-maintainer** for repository maintenance.
 
-## FAQ
+## Sponsors
 
-<details>
-<summary><strong>Does it work on Apple Silicon and Intel Macs?</strong></summary>
+<a href="https://forms.gle/2PYCvd39hbwijzX37"><img src="docs/media/sponsor-slot.svg" alt="Your brand — apply for a featured VoiceStudio sponsor slot" width="640" /></a>
 
-Apple Silicon is supported with MPS and MLX options. Intel Macs cannot run the local backend because current PyTorch wheels are unavailable; they can connect to a remote backend. See [macOS installation](docs/install/macos.md).
-</details>
+**Become a featured partner.** [Apply for a paid placement](https://forms.gle/2PYCvd39hbwijzX37) · [Email us](mailto:partner@voicestudio.sh)
 
-<details>
-<summary><strong>How much VRAM do I need?</strong></summary>
+Support development: [Ko-fi](https://ko-fi.com/debpalash) · [PayPal](https://paypal.me/palashCoder) · [Sponsorship details](SPONSORS.md)
 
-A GPU is optional. Use 4 GB VRAM as the minimum for accelerated work and 8 GB+ for the default multi-stage workflow. Large optional engines can require 12 to 16 GB or more. Check the [benchmarks](docs/benchmarks.md) and engine guide.
-</details>
+## License & responsible use
 
-<details>
-<summary><strong>Why does a longer reference clip not always improve the clone?</strong></summary>
-
-Cloning is zero-shot: the clip is a prompt, not training data. Use 5 to 15 seconds of one speaker, close to the microphone, without music, noise, or reverb. Match the tone and pace you want in the output. For training, see [data preparation](docs/data_preparation.md) and [training](docs/training.md).
-</details>
-
-<details>
-<summary><strong>Can I use generated audio commercially?</strong></summary>
-
-VoiceStudio's application license does not restrict generated audio, but it does not grant rights under a model's separate terms. The default OmniVoice repository labels its pretrained weights CC-BY-NC and includes a tokenizer under separate community terms. Review the selected model terms before commercial use.
-</details>
-
-<details>
-<summary><strong>Does VoiceStudio collect data?</strong></summary>
-
-Not unless you opt in. Analytics is off by default and skipping consent keeps it off. When enabled, the app sends allowlisted, content-free usage metadata. Text, audio, file names, voices, and projects are excluded. Change this at **Settings → Privacy**.
-</details>
-
-<details>
-<summary><strong>How do I remove VoiceStudio and its data?</strong></summary>
-
-Use `scripts/uninstall.sh` on macOS/Linux or `scripts\uninstall.ps1` on Windows. Both show a dry run before deletion. See the [uninstall guide](docs/install/uninstall.md) for every path.
-</details>
-
-## Community and contributing
-
-- [GitHub Issues](https://github.com/debpalash/VoiceStudio/issues) for reproducible bugs and feature requests.
-- [Discord](https://discord.gg/bzQavDfVV9) for setup help and project discussion.
-- [Good first issues](https://github.com/debpalash/VoiceStudio/labels/good%20first%20issue) for a scoped starting point.
-- [Contributing guide](.github/CONTRIBUTING.md) for setup, tests, and pull requests.
-
-<p align="center">
-  <a href="https://star-history.com/#debpalash/VoiceStudio&Date">
-    <img src="https://api.star-history.com/svg?repos=debpalash/VoiceStudio&type=Date" alt="Star History Chart" width="100%" />
-  </a>
-</p>
-
-## Support development
-
-VoiceStudio is free and has no paid tier. Donations fund development and infrastructure.
-
-[Ko-fi](https://ko-fi.com/debpalash) · [PayPal](https://paypal.me/palashCoder) · [Sponsorship details](SPONSORS.md)
-
-## Responsible use and safety
-
-VoiceStudio enables zero-shot voice cloning and speech generation on personal hardware. Please use it responsibly:
-- **Consent:** Only clone or synthesize voices with explicit permission from the speaker.
-- **Audio provenance:** VoiceStudio integrates [AudioSeal](https://github.com/facebookresearch/audioseal) imperceptible watermarking by default to detect and identify synthetic speech without altering sound quality.
-- **Local privacy:** For the default local workflow, audio recordings, transcripts, voices, and projects remain strictly on your local disk; data leaves your device only when you explicitly configure remote workers or external ASR endpoints.
-
-## License
-
-VoiceStudio is licensed under [AGPL-3.0](LICENSE). You may run it, modify it, and use it internally. The application license itself does not restrict selling generated audio, but downloaded model and tokenizer terms may. If you modify VoiceStudio and provide that modified version as a network service, AGPL requires you to offer the corresponding source under the same license. A commercial license for VoiceStudio-owned code is available for proprietary embedding; it does not relicense third-party models. Contact **VoiceStudio@palash.dev**. See [LICENSE-NOTICE.md](LICENSE-NOTICE.md) for the plain-language scope.
-
-Optional engines and downloaded models retain their own licenses. The bundled `omnivoice/` Python code is Apache-2.0 upstream; the default downloaded weights and audio tokenizer use separate terms.
-
-## Acknowledgments
-
-VoiceStudio builds on [OmniVoice](https://github.com/k2-fsa/OmniVoice), [WhisperX](https://github.com/m-bain/whisperX), [Demucs](https://github.com/facebookresearch/demucs), [Pyannote](https://github.com/pyannote/pyannote-audio), [CTranslate2](https://github.com/OpenNMT/CTranslate2), [AudioSeal](https://github.com/facebookresearch/audioseal), [Tauri](https://tauri.app), [Supertonic](https://huggingface.co/Supertone/supertonic-3), [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx), [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS), and [PocketTTS](https://kyutai.org).
-
-<div align="center">
-  <strong><a href="https://github.com/debpalash/VoiceStudio/releases/latest">Download VoiceStudio</a></strong> ·
-  <a href="https://github.com/debpalash/VoiceStudio">Star the project</a> ·
-  <a href="https://discord.gg/bzQavDfVV9">Join Discord</a>
-</div>
+[AGPL-3.0](LICENSE). Models have their own licenses; review them before commercial use. Clone voices only with permission. See [license details](LICENSE-NOTICE.md).

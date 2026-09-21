@@ -340,6 +340,7 @@
     "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
+    "device_family_gpu": "GPU",
     "device_load_failed": "Không tải được cài đặt thiết bị",
     "perf_save_failed": "Không lưu được cài đặt",
     "generate_budget_title": "Ngân sách thời gian tính toán",
@@ -360,7 +361,10 @@
     "theme_auto": "Tự động theo hệ thống",
     "theme_light": "Sáng",
     "reduce_motion": "Giảm chuyển động",
-    "reduce_motion_desc": "Dừng hoạt ảnh nền và hiệu ứng chuyển tiếp. Cài đặt hệ thống vẫn có hiệu lực riêng; mục này bổ sung thêm."
+    "reduce_motion_desc": "Dừng hoạt ảnh nền và hiệu ứng chuyển tiếp. Cài đặt hệ thống vẫn có hiệu lực riêng; mục này bổ sung thêm.",
+    "perf_torch_compile": "Tắt torch.compile",
+    "perf_torch_compile_note": "Thực thi trực tiếp để tránh lỗi bộ nhớ Triton.",
+    "perf_torch_compile_hint": "Thực thi trực tiếp để tránh lỗi bộ nhớ Triton. <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>"
   },
   "bootstrap": {
     "title": "VoiceStudio",
@@ -425,6 +429,10 @@
     "importFailed": "Không thể đọc tập tin đó.",
     "addLine": "Thêm dòng",
     "addChapter": "Thêm chương",
+    "clearScript": "Xóa kịch bản",
+    "clearScriptHint": "Xóa mọi dòng và chương khỏi kịch bản (dàn nhân vật vẫn giữ)",
+    "clearConfirm": "Xóa toàn bộ {{count}} mục kịch bản và văn bản đã nhập đang chờ xử lý? Không thể hoàn tác thao tác này.",
+    "cleared": "Đã xóa kịch bản",
     "chapterN": "Chương {{n}}",
     "stems": "thân cây",
     "stemsDone": "Đã xuất {{count}} gốc ký tự",
@@ -445,6 +453,11 @@
     "pasteAbove": "Dán văn bản ở trên",
     "cancel": "Hủy bỏ",
     "splitIntoTracks": "Chia thành dòng",
+    "splitMode": "Tách theo",
+    "split_sentences": "Câu",
+    "split_paragraphs": "Đoạn văn",
+    "split_chapters": "Chương",
+    "splitModeHint": "Mỗi dòng được đọc như một lần thu riêng. Với một người đọc, đoạn văn hoặc cả chương nghe liền mạch hơn câu.",
     "emptyText": "Bắt đầu câu chuyện của bạn bằng cách thêm lời thoại và lời kể. Gán cho mỗi nhân vật một giọng nói trong Cast.",
     "addFirst": "Thêm dòng đầu tiên",
     "linePlaceholder": "Nhập đoạn hội thoại hoặc tường thuật… sử dụng [tạm dừng 0,5 giây] để nghỉ im lặng",
@@ -860,7 +873,9 @@
     "familyDesc_asr": "Chuyển âm thanh thành văn bản để phiên âm, lồng tiếng, tạo phụ đề và đọc chính tả.",
     "familyDesc_llm": "Trợ lý văn bản tùy chọn cho dịch thuật và viết lại. “Tắt” sẽ bỏ qua các bước này.",
     "mpsLongText": "{{engine}} chạy trên Apple Silicon (MPS) ở đây và văn bản này dài — quá trình tạo có thể vượt quá giới hạn thời gian. Văn bản ngắn hơn, hoặc chia thành vài phần, sẽ nhanh hơn nhiều.",
-    "inMemory": "Trong bộ nhớ"
+    "inMemory": "Trong bộ nhớ",
+    "localInstallRequired": "Cài đặt công cụ này trên máy chủ qua localhost hoặc hướng dẫn thiết lập. Cài đặt từ xa đã bị tắt.",
+    "argosRuntimeUnavailable": "Không thể sử dụng môi trường chạy Argos. Hãy cài lại backend hoặc chọn NLLB."
   },
   "capture": {
     "desc": "Phím nóng chung chỉ hoạt động trong ứng dụng máy tính để bàn. Giao diện người dùng web sử dụng phím tắt <1>Ctrl+Shift+Space</1> trong trang trong khi cửa sổ đang có tiêu điểm.",
@@ -1552,6 +1567,7 @@
     "h_ago": "{{count}}giờ trước"
   },
   "setup": {
+    "ready_desc": "Bạn đã sẵn sàng tạo giọng nói đầu tiên. Có thể thiết lập nhập liệu bằng giọng nói ngay hoặc sau này trong Cài đặt.",
     "welcome": "Chào mừng",
     "system_check": "Kiểm tra hệ thống",
     "install_models": "Cài đặt mô hình",
@@ -1606,7 +1622,7 @@
     "choose_method": "Chọn cách cho đi",
     "choose_method_amount": "Tiếp tục với ${{amount}}",
     "goal": {
-      "title": "Quỹ Claude Max",
+      "title": "Hỗ trợ phát triển VoiceStudio",
       "of": "của",
       "per_month": "/ tháng",
       "aria": "{{raised}} trong số {{goal}} mục tiêu hàng tháng",
@@ -1615,7 +1631,7 @@
       "social_proof": "Tham gia cùng những người ủng hộ {{count}} tài trợ cho AI địa phương"
     },
     "postcard": {
-      "title": "Quỹ Claude Max",
+      "title": "Hỗ trợ phát triển VoiceStudio",
       "lead_default": "Vui mừng vì nó đã hiệu quả! VoiceStudio là miễn phí và hoàn toàn cục bộ. Nếu việc này giúp bạn tiết kiệm thời gian, một khoản chip-in nhỏ hàng tháng sẽ tài trợ cho Claude Max đằng sau nó.",
       "lead_first_clone": "Bản sao giọng nói đầu tiên của bạn đã hoàn tất - thật tuyệt! VoiceStudio chạy hoàn toàn trên máy của bạn và bộ phận hỗ trợ của bạn sẽ duy trì hoạt động đó.",
       "lead_tenth_dub": "Mười bản lồng tiếng - rõ ràng bạn đang thực hiện nó. Một khoản chip-in nhỏ hàng tháng sẽ tài trợ cho Claude Max cung cấp các tính năng này.",
@@ -1797,7 +1813,8 @@
     "backend_shutting_down": "VoiceStudio đang tắt. Mở lại ứng dụng rồi thử lại.",
     "crash_broken_env": "Nó dừng khi đang nạp các phụ thuộc Python của chính mình, nên đây không phải chuyện bộ nhớ hay GPU — môi trường bị thiếu hoặc cập nhật dở dang. Hãy dùng \"Dọn dẹp & Thử lại\" trong Cài đặt → Nhật ký → Backend: nó dựng lại từ đầu và sửa ngay tại chỗ, không đụng đến giọng nói hay dự án của bạn. Nếu vẫn lỗi, phần chi tiết sự cố sẽ nêu đúng gói không nạp được.",
     "crash_vram_default": "Trên các GPU nhỏ hơn, nguyên nhân thường gặp là hết VRAM khi tải mô hình ASR chồng lên mô hình TTS: hãy giải phóng mô hình TTS trước, hoặc chọn mô hình ASR nhỏ hơn trong Danh mục mô hình → Mô hình.",
-    "stream_cut_backend_alive": "Luồng kết thúc sớm, nhưng backend vẫn đang chạy — nên nó không hề sập. Trong môi trường chạy qua server hoặc container, nguyên nhân thường là reverse proxy hoặc load balancer đang đệm hoặc ngắt kết nối do hết thời gian chờ: hãy tắt đệm phản hồi cho tuyến này (nginx: proxy_buffering off; X-Accel-Buffering: no) và tăng thời gian chờ đọc của nó. Chạy trực tiếp ứng dụng desktop, hoặc chạy trên localhost không qua proxy, sẽ xác nhận điều đó."
+    "stream_cut_backend_alive": "Luồng kết thúc sớm, nhưng backend vẫn đang chạy — nên nó không hề sập. Trong môi trường chạy qua server hoặc container, nguyên nhân thường là reverse proxy hoặc load balancer đang đệm hoặc ngắt kết nối do hết thời gian chờ: hãy tắt đệm phản hồi cho tuyến này (nginx: proxy_buffering off; X-Accel-Buffering: no) và tăng thời gian chờ đọc của nó. Chạy trực tiếp ứng dụng desktop, hoặc chạy trên localhost không qua proxy, sẽ xác nhận điều đó.",
+    "stream_cut_backend_alive_local": "Luồng đã kết thúc sớm, nhưng backend vẫn đang chạy — nên đây không phải là sự cố treo. Ứng dụng đã mất kết nối với backend giữa lúc xử lý; điều này xảy ra khi một bước dài không gửi gì trong nhiều phút, và backend thường vẫn hoàn tất công việc. Hãy chờ vài phút rồi mở lại công việc từ lịch sử, hoặc xem nhật ký backend (Cài đặt → Nhật ký → Phần phụ trợ) để biết nó đang làm gì."
   },
   "keyboard": {
     "title": "Phím tắt",
@@ -2211,6 +2228,7 @@
     "session_expired": "Phiên lồng tiếng này đã hết hạn hoặc đã bị xóa - hãy tải lại video của bạn lên để bắt đầu một video mới."
   },
   "tts_errors": {
+    "profile_language_rejected": "Tự động sử dụng ngôn ngữ của hồ sơ giọng nói ({{language}}), nhưng bộ máy này không hỗ trợ. Đổi ngôn ngữ hồ sơ, chọn ngôn ngữ được hỗ trợ hoặc đổi bộ máy.",
     "enter_text": "Vui lòng nhập văn bản",
     "upload_or_select": "Tải lên âm thanh hoặc chọn cấu hình giọng nói",
     "trim_hint": "Âm thanh là {{duration}}s — cắt thành ≤{{max}}s để sao chép tốt nhất",
@@ -2224,7 +2242,10 @@
     "instruct_category_conflict": "Đã chọn hai tùy chọn thiết kế giọng nói xung đột trong cùng một danh mục (ví dụ: hai giới tính). Hãy xóa một trong hai trước khi tạo lại.",
     "ref_audio_unusable": "Không nghe thấy giọng nói trong âm thanh tham chiếu — đoạn clip im lặng hoặc gần như im lặng nên không có giọng để nhân bản. Hãy thu âm lại gần micro hơn (kiểm tra đã chọn đúng thiết bị đầu vào và mức âm có dao động) hoặc chọn một clip khác.",
     "ref_audio_too_long": "Âm thanh tham chiếu dài tối đa 20 giây khi có bản chép lời hoặc 75 giây khi không có. Hãy cắt thành đoạn lời nói rõ dài 3–10 giây; nếu cung cấp văn bản, hãy cắt bản chép lời theo đúng đoạn đó.",
-    "ref_audio_no_speech": "Tính năng phát hiện tự động không tìm thấy lời nói trong âm thanh tham chiếu. Hãy cắt thành đoạn lời nói rõ dài 3–10 giây hoặc cung cấp bản chép lời khớp."
+    "ref_audio_no_speech": "Tính năng phát hiện tự động không tìm thấy lời nói trong âm thanh tham chiếu. Hãy cắt thành đoạn lời nói rõ dài 3–10 giây hoặc cung cấp bản chép lời khớp.",
+    "gpu_arch_unsupported": "Bản dựng PyTorch này không hỗ trợ GPU của bạn. Chọn CPU trong Cài đặt → Hiệu năng và thiết bị hoặc cài đặt bản dựng PyTorch tương thích.",
+    "windows_app_control_blocked": "Tính năng kiểm soát ứng dụng của Windows đã chặn một tệp cần thiết. Nhờ quản trị viên cho phép môi trường chạy VoiceStudio đáng tin cậy, rồi khởi động lại ứng dụng.",
+    "audio_io_failed": "Không thể đọc hoặc lưu âm thanh. Kiểm tra định dạng tệp, dung lượng đĩa trống và quyền truy cập tệp. Kiểm tra thư mục trong Cài đặt → Lưu trữ."
   },
   "sharing": {
     "title": "Chia sẻ & Truy cập từ xa",
@@ -2624,6 +2645,11 @@
     "seed_ph": "Tự động",
     "vary_repeats": "Thay đổi dòng lặp lại",
     "vary_repeats_help": "Cung cấp các bản ghi khác nhau cho các dòng giống nhau thay vì sử dụng lại một bản ghi.",
+    "line_gap": "Khoảng nghỉ giữa các dòng",
+    "joins_help": "Khoảng nghỉ giữa các dòng được đặt giữa những dòng không có [pause] riêng; khoảng nghỉ giữa các đoạn được đặt tại các dòng trống. Khi bật cắt, khoảng lặng đầu và cuối của mỗi dòng được cắt trước, nên khoảng nghỉ bạn đặt chính là khoảng nghỉ bạn nghe.",
+    "paragraph_gap": "Khoảng nghỉ giữa các đoạn",
+    "trim_edges": "Cắt khoảng lặng của engine",
+    "trim_edges_help": "Cắt bỏ khoảng lặng mà engine thêm vào mỗi dòng trước khi ghép. Tắt để giữ nguyên bản render thô.",
     "emotion_help": "Cảm xúc dần dần — chỉ được áp dụng bởi công cụ IndexTTS2.",
     "emotion_text": "Mô tả cảm xúc",
     "emotion_text_ph": "ví dụ: nghe vẻ mệt mỏi và buồn",
@@ -2816,6 +2842,7 @@
     "none_selected": "Chưa chọn giọng nào — hãy mô tả một giọng, thả tệp âm thanh, hoặc chọn bên dưới."
   },
   "convert": {
+    "cloning_required": "Chọn mô hình chuyển văn bản thành giọng nói sẵn sàng sử dụng và hỗ trợ nhân bản giọng nói.",
     "source_kicker": "Clip nguồn",
     "drop_audio": "Thả clip cần chuyển đổi vào đây — hoặc nhấp. WAV, MP3, M4A…",
     "target_voice": "Giọng đích",
@@ -2831,5 +2858,56 @@
   "player": {
     "pause": "Tạm dừng",
     "play": "Phát"
+  },
+  "dubIntegrity": {
+    "missingSpeech": "Lời nói bị thiếu hoặc không đọc được. Hãy tạo lại đoạn bị ảnh hưởng trước khi xuất.",
+    "timingOverflow": "Lời nói vượt quá thời gian được phân bổ. Hãy rút ngắn bản dịch hoặc chọn khung thời gian nghiêm ngặt hay kéo dài video.",
+    "backgroundUnavailable": "Không thể giữ âm thanh gốc. Hãy kiểm tra việc tách âm nền và thời gian hội thoại rồi thử lại, hoặc chọn chỉ xuất giọng nói."
+  },
+  "dubStyle": {
+    "label": "Hướng dẫn phong cách dịch",
+    "help": "Mô tả giọng điệu, đối tượng và cách chuyển thể, ví dụ giữ câu đùa và dịch thành ngữ tự nhiên. Được lưu trong dự án, dùng cho dịch và chỉnh thời lượng. Để trống để dùng phong cách mặc định."
+  },
+  "dubActivity": {
+    "output": "Bản dịch",
+    "waiting": "Chưa nhận được đầu ra.",
+    "progress": "Đã xác thực {{done}} / {{total}} đoạn",
+    "cancelled": "Đã hủy",
+    "fitting": "Đang điều chỉnh thời gian"
+  },
+  "sponsorSlot": {
+    "book": "Đặt vị trí của bạn",
+    "preview": "Xem trước nhà tài trợ",
+    "message": "Thương hiệu, trang web và lời nhắn",
+    "email_app": "Mở ứng dụng email",
+    "copy_email": "Sao chép email",
+    "preview_detail": "Logo, liên kết và phần giới thiệu của bạn có thể xuất hiện ở đây."
+  },
+  "supportPlans": {
+    "remove": "Xóa thanh nhà tài trợ",
+    "title": "Miễn phí và Pro",
+    "free": "Miễn phí",
+    "pro": "Pro",
+    "sponsor_bar": "Thanh nhà tài trợ",
+    "visible": "Hiển thị",
+    "hideable": "Có thể ẩn",
+    "unavailable": "Chưa cấu hình kích hoạt Pro.",
+    "telemetry": "Dữ liệu sử dụng",
+    "opt_in": "Tùy chọn, cần đồng ý",
+    "disabled": "Tắt",
+    "badge": "Huy hiệu Pro",
+    "advanced": "Công cụ nâng cao",
+    "standard": "Tiêu chuẩn",
+    "included": "Bao gồm"
+  },
+  "integrationCatalog": {
+    "title": "Tích hợp",
+    "featured": "Nổi bật",
+    "description": "Khám phá các tích hợp và đối tác nổi bật.",
+    "n8nHint": "Nhập quy trình này vào n8n, chỉnh sửa yêu cầu rồi chạy. Giữ VoiceStudio hoạt động. Docker và n8n từ xa cần địa chỉ máy chủ có thể truy cập và thông tin xác thực cần thiết."
+  },
+  "directoryExamples": {
+    "example": "Ví dụ trong danh mục",
+    "notice": "Chỉ là ví dụ trong danh mục, không phải nhà tài trợ hay tích hợp đã kết nối."
   }
 }

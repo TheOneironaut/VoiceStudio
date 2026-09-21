@@ -83,6 +83,51 @@ def _effective_max_chars(text: str, max_chars: int) -> int:
     return max_chars
 
 
+#: Edge-silence trim defaults: engines pad each render with their own lead-in
+#: and tail (GPT-SoVITS ~70 ms / ~300 ms, others similar). Left in, every
+#: chunk or line boundary becomes a hole; trimmed, the join is decided by the
+#: deliberate gaps the caller asks for. -40 dBFS is well below speech and above
+#: the noise floor of a clean render; 40 ms keeps a natural onset/decay.
+DEFAULT_TRIM_THRESHOLD_DB = -40.0
+DEFAULT_TRIM_KEEP_MS = 40
+
+
+def trim_edge_silence(audio, sample_rate: int, *, threshold_db: float = DEFAULT_TRIM_THRESHOLD_DB,
+                      keep_ms: int = DEFAULT_TRIM_KEEP_MS):
+    """Strip near-silent lead-in and tail from one rendered chunk.
+
+    Works on the last axis of a 1-D or (channels, samples) tensor. Keeps
+    ``keep_ms`` of the quiet edge on both sides so onsets and decays are not
+    clipped. A chunk that is silent throughout is returned unchanged (its
+    caller decides what an empty render means).
+    """
+    import torch
+
+    if audio is None or audio.shape[-1] == 0:
+        return audio
+    level = audio.abs()
+    if level.dim() > 1:
+        level = level.reshape(-1, level.shape[-1]).amax(dim=0)
+    threshold = 10.0 ** (threshold_db / 20.0)
+    loud = torch.nonzero(level > threshold).flatten()
+    if loud.numel() == 0:
+        return audio
+    keep = int(sample_rate * keep_ms / 1000)
+    start = max(0, int(loud[0]) - keep)
+    end = min(audio.shape[-1], int(loud[-1]) + 1 + keep)
+    if start == 0 and end == audio.shape[-1]:
+        return audio
+    return audio[..., start:end]
+
+
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n+")
+
+
+def split_paragraphs(text: str) -> List[str]:
+    """Paragraphs of *text* (blank-line separated), each stripped, empties dropped."""
+    return [p.strip() for p in _PARAGRAPH_BREAK.split(text or "") if p and p.strip()]
+
+
 def split_text_into_chunks(text: str, max_chars: int = DEFAULT_MAX_CHUNK_CHARS) -> List[str]:
     """Split *text* at natural boundaries into chunks of at most *max_chars*.
 
@@ -337,7 +382,7 @@ def report_dropped_chunks(dropped: list, total: int, texts=None, sink=None) -> N
 
 def join_rendered_chunks(rendered: list, sample_rate: int, *,
                          crossfade_ms: int = DEFAULT_CROSSFADE_MS,
-                         texts=None, sink=None):
+                         texts=None, sink=None, trim_edges: bool = False):
     """Join what a multi-chunk render produced, reporting whatever it lost.
 
     ``None`` when nothing rendered — the caller's dead-render handling owns
@@ -350,9 +395,17 @@ def join_rendered_chunks(rendered: list, sample_rate: int, *,
     silent-truncation bug (#1330) one branch over. Keeping the decision in one
     function means there is one place that can be wrong, and it is testable.
     """
+    # `set(dropped)` sat inside the comprehension's condition, so it was rebuilt
+    # for every element — O(n) construction n times, to answer a question a
+    # single set answers once.
     dropped = [i for i, r in enumerate(rendered)
                if r is None or getattr(r, "shape", (0,))[-1] == 0]
-    kept = [r for i, r in enumerate(rendered) if i not in set(dropped)]
+    dropped_indices = set(dropped)
+    kept = [r for i, r in enumerate(rendered) if i not in dropped_indices]
+    if trim_edges:
+        # The engine's own lead-in/tail would otherwise become a hole at every
+        # chunk boundary; the caller adds the gaps it actually wants.
+        kept = [trim_edge_silence(r, sample_rate) for r in kept]
     if not kept:
         if dropped:
             report_dropped_chunks(dropped, len(rendered), texts, sink)
@@ -363,9 +416,10 @@ def join_rendered_chunks(rendered: list, sample_rate: int, *,
         if dropped:
             report_dropped_chunks(dropped, len(rendered), texts, sink)
         return kept[0]
-    return concatenate_audio_chunks(rendered, sample_rate,
-                                    crossfade_ms=crossfade_ms, texts=texts,
-                                    sink=sink)
+    if dropped:
+        report_dropped_chunks(dropped, len(rendered), texts, sink)
+    return concatenate_audio_chunks(kept, sample_rate,
+                                    crossfade_ms=crossfade_ms)
 
 
 def concatenate_audio_chunks(chunks: list, sample_rate: int,
@@ -407,17 +461,48 @@ def concatenate_audio_chunks(chunks: list, sample_rate: int,
     chunks = _normalize_chunk_shapes(chunks)
 
     crossfade_samples = int(sample_rate * crossfade_ms / 1000)
-    result = chunks[0]
+    first = chunks[0]
 
-    for chunk in chunks[1:]:
-        chunk = chunk.to(device=result.device, dtype=result.dtype)
-        overlap = min(crossfade_samples, result.shape[-1], chunk.shape[-1])
+    # Growing the output with `result = torch.cat([result, chunk])` re-copied
+    # every sample already joined, once per chunk: joining N chunks moved N/2
+    # times the finished audio. A chapter splits into ~100 chunks and a book
+    # into ~500 (DEFAULT_MAX_CHUNK_CHARS is 800), so the copying — not the
+    # synthesis — came to dominate the join, and each step also held the old
+    # and new buffers at once.
+    #
+    # Same arithmetic, one buffer. The overlaps depend only on lengths, so
+    # price them in an integer pass first, allocate the finished length once,
+    # then write each chunk into its own slice. Crossfading in place against
+    # the tail already written is what keeps this identical to the old result
+    # rather than merely similar: `overlap` is capped by the length joined SO
+    # FAR, so a run of chunks shorter than the crossfade blends back across a
+    # boundary, and a version that faded chunk-against-chunk would quietly
+    # produce different audio there.
+    lengths = [chunk.shape[-1] for chunk in chunks]
+    joined = lengths[0]
+    overlaps: list[int] = []
+    for length in lengths[1:]:
+        overlap = max(0, min(crossfade_samples, joined, length))
+        overlaps.append(overlap)
+        joined += length - overlap
+
+    out = torch.empty(*first.shape[:-1], joined, dtype=first.dtype, device=first.device)
+    out[..., :lengths[0]] = first
+    filled = lengths[0]
+
+    for chunk, overlap in zip(chunks[1:], overlaps, strict=True):
+        chunk = chunk.to(device=out.device, dtype=out.dtype)
         if overlap > 0:
-            fade_out = torch.linspace(1.0, 0.0, overlap, dtype=result.dtype, device=result.device)
-            fade_in = torch.linspace(0.0, 1.0, overlap, dtype=result.dtype, device=result.device)
-            blended = result[..., -overlap:] * fade_out + chunk[..., :overlap] * fade_in
-            result = torch.cat([result[..., :-overlap], blended, chunk[..., overlap:]], dim=-1)
-        else:
-            result = torch.cat([result, chunk], dim=-1)
+            fade_out = torch.linspace(1.0, 0.0, overlap, dtype=out.dtype, device=out.device)
+            fade_in = torch.linspace(0.0, 1.0, overlap, dtype=out.dtype, device=out.device)
+            tail = out[..., filled - overlap:filled]
+            tail.mul_(fade_out).add_(chunk[..., :overlap] * fade_in)
+        remainder = chunk.shape[-1] - overlap
+        if remainder > 0:
+            out[..., filled:filled + remainder] = chunk[..., overlap:]
+        filled += remainder
 
-    return result
+    # Every sample is written: the first chunk fills [0, lengths[0]), and each
+    # step writes [filled, filled + remainder) before advancing by exactly
+    # `remainder`, so `filled` lands on `joined` with no gap left uninitialized.
+    return out

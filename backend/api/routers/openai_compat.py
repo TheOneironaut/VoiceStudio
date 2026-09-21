@@ -638,11 +638,12 @@ async def create_transcription(
 
         if response_format == "vtt":
             from fastapi.responses import PlainTextResponse
+            from services.srt_parser import escape_webvtt_text
             vtt_lines = ["WEBVTT\n"]
             for seg in segments:
                 start = seg.get("start", 0.0)
                 end = seg.get("end", 0.0)
-                text = seg.get("text", "").strip()
+                text = escape_webvtt_text(seg.get("text", "").strip(), preserve_markup=False)
                 vtt_lines.append(
                     f"{_format_ts_vtt(start)} --> {_format_ts_vtt(end)}\n{text}\n"
                 )
@@ -721,17 +722,11 @@ def list_voices():
 
 def _format_ts_srt(seconds: float) -> str:
     """Format seconds as SRT timestamp: HH:MM:SS,mmm"""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    from services.srt_parser import format_cue_timestamp
+    return format_cue_timestamp(seconds, ",")
 
 
 def _format_ts_vtt(seconds: float) -> str:
     """Format seconds as VTT timestamp: HH:MM:SS.mmm"""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    from services.srt_parser import format_cue_timestamp
+    return format_cue_timestamp(seconds, ".")

@@ -4186,6 +4186,7 @@ html[data-window='widget'] body:has(.capture-pill) {
 .seg-lang-select {
   width: 100%; min-width: 0; font-size: 0.6rem; padding: 1px 2px;
 }
+.seg-lang-col { display: flex; min-width: 0; width: 100%; }
 .seg-profile-select {
   width: 100%; min-width: 0; font-size: 0.6rem; padding: 1px 4px;
   overflow: hidden; text-overflow: ellipsis;
@@ -4318,7 +4319,7 @@ html[data-window='widget'] body:has(.capture-pill) {
   min-width: 0;
 }
 .segment-table .seg-speaker-input { flex: 1 1 90px; width: 90px; }
-.segment-table .seg-lang-select { flex: 0 0 64px; width: 64px; }
+.segment-table .seg-lang-col { flex: 0 0 64px; width: 64px; }
 .segment-table .seg-voice-col { flex: 2 1 140px; width: 140px; }
 .segment-table .seg-gain-slider { flex: 0 0 60px; width: 60px; }
 .segment-table .seg-controls .seg-speaker-input,
@@ -5279,7 +5280,7 @@ button.dub-stepper__action:focus-visible {
 
 /* ═══ from src/components/donate/DonateGoal.css ═══ */
 /* ════════════════════════════════════════════════════════════════════════
-   "Fund Claude Max" goal bar + Pip mascot (spec 007).
+   "Support VoiceStudio development" goal bar + Pip mascot (spec 007).
    Reuses real design tokens from index.css / tokens.css:
    --chrome-*, --space-*, --ease-spring, --font-serif, --chrome-font-mono.
    ════════════════════════════════════════════════════════════════════════ */
@@ -5409,7 +5410,7 @@ button.dub-stepper__action:focus-visible {
 
 /* ═══ from src/components/donate/Postcard.css ═══ */
 /* ════════════════════════════════════════════════════════════════════════
-   "Fund Claude Max" kawaii postcard toast (spec 007, Phase 2).
+   "Support VoiceStudio development" kawaii postcard toast (spec 007, Phase 2).
    Non-blocking — lives in the toast layer, no backdrop, never covers results.
    Uses real tokens: --chrome-*, --space-*, --ease-spring, --z-toast.
    ════════════════════════════════════════════════════════════════════════ */

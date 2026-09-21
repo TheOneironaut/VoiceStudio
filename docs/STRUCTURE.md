@@ -8,7 +8,7 @@ Every folder has a single job. Every file at the root earns its place.
 VoiceStudio/
 │
 ├── README.md / README_CN.md     ⟵ user-facing overview (English / Chinese)
-├── CHANGELOG.md                 ⟵ release history; release.yml extracts the tag's section verbatim
+├── CHANGELOG.md                 ⟵ release history; Electron releases use the tagged section
 ├── CLAUDE.md / AGENTS.md        ⟵ the working contract for AI agents — keep the two in sync
 ├── LICENSE, LICENSE-NOTICE.md, SPONSORS.md
 │
@@ -35,11 +35,11 @@ VoiceStudio/
 ├── backend/                     ⟵ FastAPI server
 │   ├── main.py                  the one entry point; its boot order is load-bearing —
 │   │                            read the comments before reordering anything
-│   ├── api/routers/             40 routers, auto-included; thin HTTP/WS surface
+│   ├── api/routers/             41 routers, auto-included; thin HTTP/WS surface
 │   │   └── setup/               first-run wizard, model download
 │   ├── core/                    config, db, job queue, event bus, auth/CSRF, path security,
 │   │                            opt-in analytics, version, diagnostics
-│   ├── services/                80 modules of business logic — TTS, dubbing pipeline,
+│   ├── services/                90 modules of business logic — TTS, dubbing pipeline,
 │   │                            audio DSP, GPU gateway, engine routing, model lifecycle
 │   ├── engines/                 per-engine adapters: indextts, supertonic3, confucius4,
 │   │                            dots_tts, moss_tts_v15, pockettts, audiocpp,
@@ -57,8 +57,17 @@ VoiceStudio/
 │   ├── config/models.yaml       model catalogue
 │   └── tests/                   the isolated pytest session — see "Where tests live"
 │
-├── frontend/                    ⟵ React 19 + Vite + Tauri desktop
-│   ├── package.json             THE app version — every other version file mirrors it
+├── electron/                    ⟵ maintained Electron desktop: main, preload, renderer
+│   ├── src/main/                lifecycle, backend supervisor, updater, native IPC
+│   ├── src/preload/             typed renderer bridge
+│   ├── src/renderer/            React 19 desktop UI
+│   ├── tests/                   packaged and workflow smoke tests
+│   └── electron-builder.config.mjs
+│
+├── native/desktop-bridge/       ⟵ Rust helper used by Electron
+│
+├── frontend/                    ⟵ legacy web UI plus shared app metadata
+│   ├── package.json             THE maintained app version
 │   ├── src/
 │   │   ├── pages/               one file per top-level view
 │   │   ├── components/          reusable UI (+ audiobook/ clone/ dub/ gallery/ settings/ …)
@@ -70,8 +79,7 @@ VoiceStudio/
 │   │   ├── config/, data/, assets/, utils/
 │   │   └── test/                vitest setup + visual-test helpers
 │   ├── e2e/, e2e-perf/, e2e-prod/   Playwright suites: functional, perf, packaged bundle
-│   ├── src-tauri/               Rust desktop shell — backend spawn/bootstrap, updater
-│   │   │                        channel, dictation shortcut, crash/reset/uninstall
+│   ├── src-tauri/               archived v0.5.3 Tauri shell and retained shared assets
 │   │   ├── capabilities/, icons/, wix/, debian/, appimage/   packaging inputs
 │   │   └── tests/
 │   └── public/
@@ -104,7 +112,7 @@ VoiceStudio/
 │
 ├── .agents/skills/              ⟵ canonical skill copies (vite, fastapi-python), pinned by
 │                                   skills-lock.json — followed by path, never symlinked
-├── skills/                      ⟵ skills this repo publishes (omnivoice, oss-maintainer)
+├── skills/                      ⟵ skills this repo publishes (voicestudio, voicestudio-maintainer)
 │
 ├── infra/                       ⟵ edge/deploy workers (not the Docker deploy path)
 │   └── install-redirect/        voicestudio.sh/install — UA-sniffing installer worker
@@ -213,7 +221,7 @@ VoiceStudio/
 ├── apps/
 │   ├── api/                 ← was backend/
 │   ├── web/                 ← was frontend/
-│   └── desktop/             ← could extract src-tauri/ here later
+│   └── desktop/             ← was electron/
 ├── packages/
 │   ├── omnivoice-model/     ← was omnivoice/
 │   └── tts-adapters/        ← new; the pluggable TTS interface from ROADMAP phase 3
@@ -229,9 +237,9 @@ VoiceStudio/
 - `package.json` workspaces and scripts
 - `turbo.json`, `Dockerfile`, `docker-compose.yml` paths
 - `backend.spec` (`['backend/main.py']`, `pathex=['.']`)
-- `frontend/src-tauri/tauri.*.conf.json` sidecar paths
+- Electron Builder, native-helper, updater and packaged-smoke paths
 - every import that reads `from backend.main import …` (tests, scripts)
-- `frontend/package.json` as the version source of truth, and the mirrors that track it
+- `frontend/package.json` as the version source of truth and its active mirrors
 
 Migrate when adding the second `apps/*` or the second `packages/*`. Not before.
 

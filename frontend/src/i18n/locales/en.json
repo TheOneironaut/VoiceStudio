@@ -98,6 +98,10 @@
     "importFailed": "Couldn't read that file.",
     "addLine": "Add Line",
     "addChapter": "Add Chapter",
+    "clearScript": "Clear script",
+    "clearScriptHint": "Remove every line and chapter from the script (the cast stays)",
+    "clearConfirm": "Clear all {{count}} script entries and any pending imported text? This cannot be undone.",
+    "cleared": "Script cleared",
     "chapterN": "Chapter {{n}}",
     "stems": "Stems",
     "stemsDone": "Exported {{count}} character stem(s)",
@@ -118,6 +122,11 @@
     "pasteAbove": "Paste text above",
     "cancel": "Cancel",
     "splitIntoTracks": "Split into lines",
+    "splitMode": "Split by",
+    "split_sentences": "Sentences",
+    "split_paragraphs": "Paragraphs",
+    "split_chapters": "Chapters",
+    "splitModeHint": "Every line is read as its own take. For one narrator, paragraphs or whole chapters flow better than sentences.",
     "emptyText": "Start your story by adding dialogue and narration lines. Assign each character a voice in the Cast.",
     "addFirst": "Add First Line",
     "linePlaceholder": "Enter dialogue or narration… use [pause 0.5s] for a silent break",
@@ -276,6 +285,11 @@
     "seed_ph": "Auto",
     "vary_repeats": "Vary repeated lines",
     "vary_repeats_help": "Give identical lines distinct takes instead of reusing one recording.",
+    "line_gap": "Gap between lines",
+    "joins_help": "The line gap goes between lines that have no [pause] of their own; the paragraph gap goes at blank lines. With trimming on, each line's own lead-in and tail silence is cut first, so the gap you set is the gap you hear.",
+    "paragraph_gap": "Gap between paragraphs",
+    "trim_edges": "Trim engine silence",
+    "trim_edges_help": "Cut the silence each engine pads onto a line before joining. Turn off to keep the raw renders.",
     "emotion_help": "Graded emotion — applied by the IndexTTS2 engine only.",
     "emotion_text": "Emotion description",
     "emotion_text_ph": "e.g. sounds exhausted and sad",
@@ -819,10 +833,10 @@
     "history_retention_save_failed": "Could not save",
     "history_retention_invalid": "Enter 0 or more",
     "perf_title": "Performance",
-    "perf_torch_compile": "Disable torch.compile (Windows)",
+    "perf_torch_compile": "Disable torch.compile",
     "perf_torch_compile_na": "Windows only — not needed on this platform",
-    "perf_torch_compile_note": "Falls back to eager mode — fixes Triton OOM on <16 GB GPUs.",
-    "perf_torch_compile_hint": "Workaround for <issueLink>#65</issueLink> — Windows users may hit Triton / <code>torch.compile</code> OOM during model load on GPUs with less than 16 GB VRAM. Enabling this sets <code>TORCH_COMPILE_DISABLE=1</code> on engine subprocesses, which falls back to eager mode. macOS and Linux are unaffected.",
+    "perf_torch_compile_note": "Uses eager execution to avoid Triton memory errors.",
+    "perf_torch_compile_hint": "Uses eager execution to avoid Triton memory errors. <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>",
     "perf_load_failed": "Failed to load performance settings",
     "perf_save_failed": "Failed to save setting",
     "generate_budget_title": "Compute-time budget",
@@ -959,6 +973,7 @@
     "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
+    "device_family_gpu": "GPU",
     "device_load_failed": "Failed to load device setting",
     "generate_timeout_shadowed_badge": "Overridden externally",
     "generate_timeout_shadowed_note": "An environment variable outside VoiceStudio (shell, .env file, or container) is currently setting this — your saved value here is ignored until that variable is removed.",
@@ -1815,6 +1830,7 @@
     "empty_search": "No transcriptions match your search."
   },
   "setup": {
+    "ready_desc": "You’re ready to create your first voice. You can set up dictation now or later in Settings.",
     "welcome": "Welcome",
     "system_check": "System check",
     "install_models": "Install models",
@@ -1881,7 +1897,7 @@
     "choose_method": "Choose how to give",
     "choose_method_amount": "Continue with ${{amount}}",
     "goal": {
-      "title": "Fund Claude Max",
+      "title": "Support VoiceStudio development",
       "of": "of",
       "per_month": "/ month",
       "aria": "{{raised}} of {{goal}} monthly goal",
@@ -1890,7 +1906,7 @@
       "social_proof": "Join {{count}} supporters funding local AI"
     },
     "postcard": {
-      "title": "Fund Claude Max",
+      "title": "Support VoiceStudio development",
       "lead_default": "Glad that worked! VoiceStudio is free and fully local. If it saves you time, a small monthly chip-in funds the Claude Max behind it.",
       "lead_first_clone": "Your first voice clone is done — nice! VoiceStudio runs entirely on your machine, and your support keeps it that way.",
       "lead_tenth_dub": "Ten dubs in — you're clearly putting it to work. A small monthly chip-in funds the Claude Max that ships these features.",
@@ -2235,7 +2251,9 @@
     "generateCaveat": "{{engine}} may be slow on this machine — {{reason}}",
     "cpuLongText": "{{engine}} runs on the CPU here, and this text is long — the generation may exceed the time budget. Shorter text, or a CPU-tuned engine (OmniVoice GGUF, Supertonic-3), will be much faster.",
     "cpuLongTextTuned": "{{engine}} runs on the CPU here, and this text is long — the generation may exceed the time budget. Shorter text, or splitting it into a few takes, will be much faster.",
-    "mpsLongText": "{{engine}} runs on Apple Silicon (MPS) here, and this text is long — the generation may exceed the time budget. Shorter text, or splitting it into a few takes, will be much faster."
+    "mpsLongText": "{{engine}} runs on Apple Silicon (MPS) here, and this text is long — the generation may exceed the time budget. Shorter text, or splitting it into a few takes, will be much faster.",
+    "localInstallRequired": "Install this engine on the backend computer using localhost or its setup guide. Remote installation is disabled.",
+    "argosRuntimeUnavailable": "Argos runtime unavailable. Reinstall the backend or select NLLB."
   },
   "errors": {
     "title": "This tab hit a snag.",
@@ -2252,7 +2270,8 @@
     "backend_shutting_down": "VoiceStudio is shutting down. Reopen the app and try again.",
     "crash_broken_env": "It died while loading its own Python dependencies, so this is not about memory or your GPU — the environment is incomplete or was left half-updated. Use \"Clean & Retry\" in Settings → Logs → Backend, which rebuilds it from scratch; that repairs it in place, without touching your voices or projects. If it still fails afterwards, the crash details name the exact package that would not import.",
     "crash_vram_default": "On smaller GPUs the usual cause is running out of VRAM while loading the ASR model on top of the TTS model: flush the TTS model first, or pick a smaller ASR model in the engine's Weights list in Model Catalogue.",
-    "stream_cut_backend_alive": "The stream ended early, but the backend is still running — so it did not crash. In a served or containerised setup this is usually a reverse proxy or load balancer buffering or timing out the connection: disable response buffering for this route (nginx: proxy_buffering off; X-Accel-Buffering: no) and raise its read timeout. Running the desktop app directly, or on localhost without a proxy, will confirm it."
+    "stream_cut_backend_alive": "The stream ended early, but the backend is still running — so it did not crash. In a served or containerised setup this is usually a reverse proxy or load balancer buffering or timing out the connection: disable response buffering for this route (nginx: proxy_buffering off; X-Accel-Buffering: no) and raise its read timeout. Running the desktop app directly, or on localhost without a proxy, will confirm it.",
+    "stream_cut_backend_alive_local": "The stream ended early, but the backend is still running — so it did not crash. The app lost its connection to the backend mid-job; that happens when a long step goes quiet for minutes, and the backend usually finishes the job anyway. Give it a few minutes and reopen the job from its history, or check the backend log (Settings → Logs → Backend) for what it was doing."
   },
   "crash": {
     "notice": "The voice backend crashed ({{exit}}) {{ago}} ago and is being restarted automatically.",
@@ -2885,6 +2904,7 @@
     "upgrading_preview": "Upgrading {{count}} preview-quality segment(s) to full quality…"
   },
   "tts_errors": {
+    "profile_language_rejected": "Auto uses the voice profile’s language ({{language}}), which this engine does not support. Change the profile language, choose a supported language, or switch engines.",
     "enter_text": "Please enter text",
     "upload_or_select": "Upload an audio or select a voice profile",
     "trim_hint": "Audio is {{duration}}s — trim to ≤{{max}}s for best cloning",
@@ -2898,7 +2918,10 @@
     "instruct_category_conflict": "Two conflicting voice-design options were selected in the same category (e.g. two genders). Clear one before generating again.",
     "ref_audio_unusable": "No speech could be heard in the reference audio — the clip is silent or nearly silent, so there is no voice to clone. Record again closer to the microphone (check that the right input device is selected and its level moves while you speak), or choose a different clip.",
     "ref_audio_too_long": "A reference can be at most 20 seconds with a supplied transcript, or 75 seconds without one. Trim it to a clear 3–10 second speech passage; if you supply text, trim the transcript to the same passage.",
-    "ref_audio_no_speech": "Automatic speech detection found no spoken words in the reference. Trim it to a clear 3–10 second speech passage, or supply a matching transcript."
+    "ref_audio_no_speech": "Automatic speech detection found no spoken words in the reference. Trim it to a clear 3–10 second speech passage, or supply a matching transcript.",
+    "gpu_arch_unsupported": "This PyTorch build does not support your GPU. Choose CPU in Settings → Performance & Device, or install a compatible PyTorch build.",
+    "windows_app_control_blocked": "Windows application control blocked a required file. Ask your administrator to allow the trusted VoiceStudio runtime, then restart the app.",
+    "audio_io_failed": "Audio could not be read or saved. Check the file format, free disk space, and file permissions. Review the folder in Settings → Storage."
   },
   "tts": {
     "routingFallback": "Running on CPU — this engine has no GPU path on your machine, so generation will be slower. {{reason}}",
@@ -3301,6 +3324,7 @@
     "none_selected": "No voice selected — describe one, drop audio, or pick below."
   },
   "convert": {
+    "cloning_required": "Choose a ready text-to-speech model that supports voice cloning.",
     "source_kicker": "Source clip",
     "drop_audio": "Drop the clip to convert — or click. WAV, MP3, M4A…",
     "target_voice": "Target voice",
@@ -3312,5 +3336,56 @@
     "transcript": "What it heard",
     "result_kicker": "Converted take",
     "need_source_and_voice": "Add a source clip and pick a target voice first."
+  },
+  "dubIntegrity": {
+    "missingSpeech": "Speech is missing or unreadable. Regenerate the affected segment before exporting.",
+    "timingOverflow": "Speech exceeds its time slot. Shorten the translation or choose Strict Slot or Stretch Video.",
+    "backgroundUnavailable": "Original sound could not be preserved. Check background separation and dialogue timing, then retry, or explicitly export speech only."
+  },
+  "dubStyle": {
+    "label": "Translation style prompt",
+    "help": "Describe tone, audience and adaptation style—for example: conversational Bengali, preserve jokes, adapt idioms naturally. Saved with this project; used for translation and timing rewrites. Leave blank for the default style."
+  },
+  "dubActivity": {
+    "output": "Translations",
+    "waiting": "No output received yet.",
+    "progress": "{{done}} / {{total}} segments validated",
+    "cancelled": "Cancelled",
+    "fitting": "Adjusting timing"
+  },
+  "sponsorSlot": {
+    "book": "Book your slot",
+    "preview": "Sponsor preview",
+    "message": "Your brand, website & message",
+    "email_app": "Open email app",
+    "copy_email": "Copy email",
+    "preview_detail": "Your logo, link and introduction could appear here."
+  },
+  "supportPlans": {
+    "remove": "Remove sponsor bar",
+    "title": "Free vs Pro",
+    "free": "Free",
+    "pro": "Pro",
+    "sponsor_bar": "Sponsor bar",
+    "visible": "Visible",
+    "hideable": "Can be hidden",
+    "unavailable": "Pro activation is not configured yet.",
+    "telemetry": "Telemetry",
+    "opt_in": "Optional, opt-in",
+    "disabled": "Disabled",
+    "badge": "Pro badge",
+    "advanced": "Advanced tools",
+    "standard": "Standard",
+    "included": "Included"
+  },
+  "integrationCatalog": {
+    "title": "Integrations",
+    "featured": "Featured",
+    "description": "Discover integrations and featured partners.",
+    "n8nHint": "Import this workflow into n8n, edit the request, and run it. Keep VoiceStudio running. Docker and remote n8n need a reachable backend address and any required credentials."
+  },
+  "directoryExamples": {
+    "example": "Directory example",
+    "notice": "Directory examples only — not sponsors or connected integrations."
   }
 }

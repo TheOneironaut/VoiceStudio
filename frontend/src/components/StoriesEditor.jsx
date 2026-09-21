@@ -46,6 +46,7 @@ import { useTranslation } from 'react-i18next';
 import { Button, Menu } from '../ui';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import VoiceSelector from './VoiceSelector';
+import SearchableSelect from './SearchableSelect';
 import { useAppStore } from '../store';
 import { recordValueMoment } from '../utils/donationMoments';
 import {
@@ -56,8 +57,16 @@ import {
 } from '../utils/storyTokens';
 import { parseScript } from '../utils/parseScript';
 import { importToText } from '../utils/importStory';
+import {
+  DEFAULT_SPLIT_MODE,
+  DEFAULT_SPLIT_MAX,
+  SPLIT_MODES,
+  splitStoryText,
+} from '../utils/splitStoryText';
+import { readTextFile } from '../utils/readTextFile';
 import { generateSpeech, audioUrl } from '../api/generate';
 import { playBlobAudio } from '../utils/media';
+import { stopActivePlayback } from '../utils/playback';
 import { downloadMedia } from '../utils/mediaDownload';
 import { encodeAudio } from '../api/stories';
 import { longformRender } from '../api/audiobook';
@@ -82,6 +91,10 @@ const SPEED_RANGE = 'w-[120px]';
 const TRACK_BTN =
   'w-[26px] h-[26px] flex items-center justify-center bg-transparent text-fg-subtle cursor-pointer rounded-md [transition:color_0.15s,background_0.15s,opacity_0.15s] p-0 hover:bg-white/[0.06] focus-visible:[box-shadow:var(--focus-ring)]';
 
+function releasePreview(track) {
+  if (track.audioUrl) URL.revokeObjectURL(track.audioUrl);
+}
+
 // Trigger a browser download for a Blob.
 function download(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -101,46 +114,6 @@ function download(blob, filename) {
 // it must stay a chapter while the user edits the title — otherwise clearing the
 // text would flip the bar back into a voiced line card mid-edit.
 const isChapterText = (s) => /^\s*#{1,6}(\s|$)/.test(s || '');
-
-// Sentence-aware splitter for the "Paste & auto-split" panel. Walks the text
-// and breaks at the closest sentence boundary that keeps each chunk under
-// `maxChars`. Falls back to whitespace, then to the hard cap.
-function splitIntoChunks(text, maxChars) {
-  const out = [];
-  const clean = String(text || '')
-    .replace(/\r\n/g, '\n')
-    .trim();
-  if (!clean) return out;
-  const max = Math.max(40, Math.min(2000, maxChars | 0));
-  let i = 0;
-  while (i < clean.length) {
-    const remain = clean.length - i;
-    if (remain <= max) {
-      out.push(clean.slice(i).trim());
-      break;
-    }
-    const window = clean.slice(i, i + max);
-    let cut = -1;
-    for (let j = window.length - 1; j > Math.floor(max * 0.4); j--) {
-      if (/[.!?。！？]/.test(window[j])) {
-        cut = j + 1;
-        break;
-      }
-    }
-    if (cut < 0) {
-      for (let j = window.length - 1; j > Math.floor(max * 0.4); j--) {
-        if (/\s/.test(window[j])) {
-          cut = j;
-          break;
-        }
-      }
-    }
-    if (cut < 0) cut = max;
-    out.push(clean.slice(i, i + cut).trim());
-    i += cut;
-  }
-  return out.filter(Boolean);
-}
 
 let _trackId = 0;
 function makeTrack(character = 'narrator', text = '') {
@@ -209,10 +182,15 @@ export default function StoriesEditor({ profiles = [] }) {
   }, []);
 
   const [activeTrack, setActiveTrack] = useState(null);
+  // Bumped by clearScript so a preview that was still generating when the
+  // script went away never plays or writes audio back for a deleted line.
+  const previewGenRef = useRef(0);
+  const playingPreviewRef = useRef(null);
   const [activeTab, setActiveTab] = useState('script');
   const [splitOpen, setSplitOpen] = useState(false);
   const [splitText, setSplitText] = useState('');
-  const [splitMax, setSplitMax] = useState(180);
+  const [splitMode, setSplitMode] = useState(DEFAULT_SPLIT_MODE);
+  const [splitMax, setSplitMax] = useState(DEFAULT_SPLIT_MAX.sentences);
   const [exporting, setExporting] = useState(false);
   const [exportPct, setExportPct] = useState(0);
   const [expandedLine, setExpandedLine] = useState(null);
@@ -312,7 +290,7 @@ export default function StoriesEditor({ profiles = [] }) {
       e.target.value = '';
       if (!file) return;
       try {
-        const text = importToText(file.name, await file.text());
+        const text = importToText(file.name, await readTextFile(file));
         setSplitText(text);
         setSplitOpen(true);
       } catch (err) {
@@ -418,14 +396,42 @@ export default function StoriesEditor({ profiles = [] }) {
     setTracks((prev) => [...prev, makeTrack('narrator', `# ${t('stories.chapterN', { n })}`)]);
   }, [tracks, setTracks, t]);
 
+  // Clear every line and chapter at once (an import can add hundreds; the
+  // per-line trash icon was the only way to undo one). Cast is kept.
+  const clearScript = useCallback(async () => {
+    const count = tracks.length + (splitText.trim() ? 1 : 0);
+    if (!count) return;
+    const ok = await askConfirm(t('stories.clearConfirm', { count }), t('stories.clearScript'));
+    if (!ok) return;
+    // Invalidate previews still generating for lines that are about to go,
+    // and stop whatever is playing (#2203 review).
+    previewGenRef.current += 1;
+    stopActivePlayback();
+    // An empty script is exactly what the first-run bootstrap below treats as
+    // "pristine", so mark the sample as shown or it would reseed the demo.
+    sampleBootstrapRef.current = true;
+    try {
+      localStorage.setItem(DEFAULT_SAMPLE_KEY, '1');
+    } catch {
+      // Storage unavailable: the ref alone covers this mounted session.
+    }
+    setTracks((prev) => {
+      prev.forEach(releasePreview);
+      return [];
+    });
+    setSplitText('');
+    setSplitOpen(false);
+    toast.success(t('stories.cleared'));
+  }, [tracks.length, splitText, setTracks, t]);
+
   // ── Paste & auto-split ───────────────────────────────────────────────────
   const applySplit = useCallback(() => {
-    const chunks = splitIntoChunks(splitText, splitMax);
+    const chunks = splitStoryText(splitText, splitMode, splitMax);
     if (!chunks.length) return;
     setTracks((prev) => [...prev, ...chunks.map((tx) => makeTrack('narrator', tx))]);
     setSplitText('');
     setSplitOpen(false);
-  }, [splitText, splitMax, setTracks]);
+  }, [splitText, splitMode, splitMax, setTracks]);
 
   const setVoiceForSelection = useCallback(
     (trackId, voiceId) => {
@@ -463,13 +469,18 @@ export default function StoriesEditor({ profiles = [] }) {
 
   const addTrack = useCallback(() => setTracks((prev) => [...prev, makeTrack()]), [setTracks]);
   const removeTrack = useCallback(
-    (id) =>
+    (id) => {
+      if (playingPreviewRef.current?.id === id) {
+        stopActivePlayback();
+        playingPreviewRef.current = null;
+      }
       setTracks((prev) =>
         prev.filter((tk) => {
-          if (tk.id === id && tk.audioUrl) URL.revokeObjectURL(tk.audioUrl); // free the preview blob
+          if (tk.id === id) releasePreview(tk);
           return tk.id !== id;
         }),
-      ),
+      );
+    },
     [setTracks],
   );
   const updateTrack = useCallback(
@@ -493,6 +504,14 @@ export default function StoriesEditor({ profiles = [] }) {
     async (track) => {
       const raw = (track.text || '').trim();
       if (!raw) return;
+      const gen = previewGenRef.current;
+      const stale = () =>
+        previewGenRef.current !== gen ||
+        !useAppStore.getState().storyTracks.some((tk) => tk.id === track.id);
+      const playback = { id: track.id };
+      const releasePlayback = () => {
+        if (playingPreviewRef.current === playback) playingPreviewRef.current = null;
+      };
       const pid = effectiveProfile(track, cast);
       const spd = effectiveSpeed(track, globalSpeed);
       setTracks((prev) =>
@@ -502,17 +521,21 @@ export default function StoriesEditor({ profiles = [] }) {
       if (!hasStoryMarkers(raw)) {
         try {
           const blob = await fetchChunkBlob(raw, pid, spd);
+          if (stale()) return;
           const url = URL.createObjectURL(blob);
           setTracks((prev) =>
-            prev.map((tk) =>
-              tk.id === track.id ? { ...tk, audioUrl: url, generating: false } : tk,
-            ),
+            prev.map((tk) => {
+              if (tk.id !== track.id) return tk;
+              releasePreview(tk);
+              return { ...tk, audioUrl: url, generating: false };
+            }),
           );
           // Shared playback path (labelled with the line text): registers with
           // the single-playback manager + global mini-player, and — unlike the
           // old bare `new Audio(blobUrl)` — actually plays under Tauri's
           // WebKit, where blob: URLs are dead in media elements.
-          playBlobAudio(blob, { label: raw }).catch(() => {});
+          playingPreviewRef.current = playback;
+          playBlobAudio(blob, { label: raw, onDone: releasePlayback }).catch(releasePlayback);
         } catch (err) {
           console.warn('Stories preview failed:', err);
           if (err?.code === 'tts_generation_busy') {
@@ -533,15 +556,19 @@ export default function StoriesEditor({ profiles = [] }) {
             seg.type === 'chunk' ? await fetchChunkBlob(seg.text, seg.profileId, spd) : null,
           );
         }
+        if (stale()) return;
         let cursor = 0;
         const finish = () => {
           setTracks((prev) =>
-            prev.map((tk) =>
-              tk.id === track.id ? { ...tk, generating: false, audioUrl: null } : tk,
-            ),
+            prev.map((tk) => {
+              if (tk.id !== track.id) return tk;
+              releasePreview(tk);
+              return { ...tk, generating: false, audioUrl: null };
+            }),
           );
         };
         const step = () => {
+          if (stale()) return;
           while (cursor < parsed.length) {
             const seg = parsed[cursor];
             const blob = chunkBlobs[cursor];
@@ -555,10 +582,17 @@ export default function StoriesEditor({ profiles = [] }) {
               // the global manager (mini-player shows the line), a natural
               // end (or a broken chunk) advances the chain, and stopping from
               // the player/another claim cancels the rest of the chain.
+              playingPreviewRef.current = playback;
               playBlobAudio(blob, {
                 label: raw,
-                onDone: (reason) => (reason === 'stopped' ? finish() : step()),
-              }).catch(() => step());
+                onDone: (reason) => {
+                  releasePlayback();
+                  return reason === 'stopped' ? finish() : step();
+                },
+              }).catch(() => {
+                releasePlayback();
+                step();
+              });
               return;
             }
           }
@@ -793,6 +827,16 @@ export default function StoriesEditor({ profiles = [] }) {
                 <Bookmark size={13} aria-hidden="true" />
                 {t('stories.addChapter')}
               </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={clearScript}
+                disabled={!tracks.length && !splitText.trim()}
+                title={t('stories.clearScriptHint')}
+              >
+                <Trash2 size={13} aria-hidden="true" />
+                {t('stories.clearScript')}
+              </Button>
             </div>
           )}
         </div>
@@ -955,19 +999,24 @@ export default function StoriesEditor({ profiles = [] }) {
                 name="story-global-speed"
                 className="w-full"
               />
-              <label className="stories-rail-label">
+              <div className="stories-rail-label">
                 <Download size={12} aria-hidden="true" />
                 <span>{t('stories.format')}</span>
-                <select
-                  className="input-base ml-auto w-auto [font-size:var(--text-xs)] px-[6px] py-[3px]"
-                  value={exportFormat}
-                  onChange={(e) => setExportFormat(e.target.value)}
-                  name="story-export-format"
-                >
-                  <option value="m4b">M4B</option>
-                  <option value="mp3">MP3</option>
-                </select>
-              </label>
+                <span className="ml-auto min-w-[88px]">
+                  <SearchableSelect
+                    value={exportFormat}
+                    onChange={setExportFormat}
+                    options={[
+                      { value: 'm4b', label: 'M4B' },
+                      { value: 'mp3', label: 'MP3' },
+                    ]}
+                    ariaLabel={t('stories.format')}
+                    menuPortal
+                    size="sm"
+                    buttonClassName="input-base w-full [font-size:var(--text-xs)] px-[6px] py-[3px]"
+                  />
+                </span>
+              </div>
               <div className="flex flex-wrap items-center gap-[6px]">
                 <Button
                   variant="primary"
@@ -1010,26 +1059,48 @@ export default function StoriesEditor({ profiles = [] }) {
                 />
                 <div className="flex items-center gap-[12px] flex-wrap">
                   <label className="flex items-center gap-[6px] [font-size:var(--text-xs)] text-fg-muted">
-                    {t('stories.maxChars')}
-                    <input
-                      type="number"
-                      min={60}
-                      max={1000}
-                      step={10}
-                      value={splitMax}
-                      onChange={(e) => setSplitMax(parseInt(e.target.value, 10) || 180)}
-                      name="story-segment-length"
-                      inputMode="numeric"
-                      className="w-[64px] px-[6px] py-[4px] bg-bg-elev-2 border border-border rounded-sm text-fg [font-family:var(--font-mono)] [font-size:var(--text-xs)]"
+                    {t('stories.splitMode')}
+                    <SearchableSelect
+                      value={splitMode}
+                      onChange={setSplitMode}
+                      options={SPLIT_MODES.map((mode) => ({
+                        value: mode,
+                        label: t(`stories.split_${mode}`),
+                      }))}
+                      ariaLabel={t('stories.splitMode')}
+                      menuPortal
+                      size="sm"
                     />
                   </label>
+                  {splitMode === 'sentences' && (
+                    <label className="flex items-center gap-[6px] [font-size:var(--text-xs)] text-fg-muted">
+                      {t('stories.maxChars')}
+                      <input
+                        type="number"
+                        min={60}
+                        max={1000}
+                        step={10}
+                        value={splitMax}
+                        onChange={(e) =>
+                          setSplitMax(parseInt(e.target.value, 10) || DEFAULT_SPLIT_MAX.sentences)
+                        }
+                        name="story-segment-length"
+                        inputMode="numeric"
+                        className="w-[64px] px-[6px] py-[4px] bg-bg-elev-2 border border-border rounded-sm text-fg [font-family:var(--font-mono)] [font-size:var(--text-xs)]"
+                      />
+                    </label>
+                  )}
                   <span className="flex-1 [font-size:var(--text-xs)] text-fg-subtle">
-                    {splitText
-                      ? t('stories.segmentsHint', {
-                          count: splitIntoChunks(splitText, splitMax).length,
-                          max: splitMax,
-                        })
-                      : t('stories.pasteAbove')}
+                    {!splitText
+                      ? t('stories.pasteAbove')
+                      : splitMode === 'sentences'
+                        ? t('stories.segmentsHint', {
+                            count: splitStoryText(splitText, splitMode, splitMax).length,
+                            max: splitMax,
+                          })
+                        : t('stories.lines', {
+                            count: splitStoryText(splitText, splitMode).length,
+                          })}
                   </span>
                   <Button
                     size="sm"
@@ -1218,19 +1289,15 @@ export default function StoriesEditor({ profiles = [] }) {
                           className="w-[10px] h-[10px] rounded-full shrink-0"
                           style={{ background: member ? member.color : '#a89984' }}
                         />
-                        <select
-                          className={`${SELECT_CHROME} flex-1`}
+                        <SearchableSelect
+                          buttonClassName={`${SELECT_CHROME} flex-1`}
                           value={track.character}
-                          onChange={(e) => updateTrack(track.id, 'character', e.target.value)}
-                          aria-label={t('stories.character')}
-                          name={`story-character-for-line-${track.id}`}
-                        >
-                          {cast.map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={(value) => updateTrack(track.id, 'character', value)}
+                          options={cast.map((c) => ({ value: c.id, label: c.name }))}
+                          ariaLabel={t('stories.character')}
+                          menuPortal
+                          size="sm"
+                        />
                       </div>
 
                       {/* Per-line voice override → shared gallery-enabled picker

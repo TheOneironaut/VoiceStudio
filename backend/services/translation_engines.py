@@ -23,8 +23,25 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 
 logger = logging.getLogger("omnivoice.translation_engines")
+
+_NLLB_REPO_ID = "facebook/nllb-200-distilled-600M"
+_ARGOS_INSTALL_LOCK = threading.Lock()
+_ARGOS_LANG_ALIASES = {
+    "cmn": "zh",
+    "zho": "zh",
+    "in": "id",
+    "iw": "he",
+    "fil": "tl",
+}
+# Human names (and the UI's own labels) that are not ISO 639-1 tokens.
+_ARGOS_NAME_ALIASES = {
+    "chinese": "zh",
+    "chinese (simplified)": "zh",
+    "mandarin": "zh",
+}
 
 
 # Engine ID → registry entry. Keyed by the `provider` string sent from the
@@ -34,11 +51,16 @@ REGISTRY: dict[str, dict] = {
         "id": "argos",
         "display_name": "Argos (Local, Fast)",
         "pip_package": "argostranslate",
-        "probe_module": "argostranslate",
+        # `argostranslate.translate`, not the bare package: the translator runs
+        # on CTranslate2, and the bare package imports fine on a host whose
+        # kernel rejects CTranslate2's native library (#692) — so a shallow
+        # probe advertised Argos as ready and every translate 500'd. Probe the
+        # module that actually pulls the native dep (same lesson as #1185).
+        "probe_module": "argostranslate.translate",
         "category": "offline",
         "needs_key": False,
         "builtin": True,
-        "notes": "Pure-CPU offline translator. Downloads a ~50MB language pack on first use per pair.",
+        "notes": "Pure-CPU offline translator. Install the required language pack explicitly for each pair.",
     },
     "nllb": {
         "id": "nllb",
@@ -115,15 +137,44 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False) or os.environ.get("OMNIVOICE_FROZEN"))
 
 
-def _probe(entry: dict) -> tuple[bool, str]:
+def _probe(entry: dict) -> tuple[bool, str | None]:
     mod = entry.get("probe_module")
     if not mod:
-        return True, "no module required"
+        return True, None
+    if mod.startswith("argostranslate"):
+        # Repair CTranslate2's exec-stack request before the import that would
+        # be rejected by it (#692) — otherwise Argos, the default offline
+        # engine, is unusable on kernels that refuse an executable stack.
+        try:
+            from core.execstack import ensure_ctranslate2_loadable
+
+            ok, detail = ensure_ctranslate2_loadable()
+            if not ok:
+                return False, detail
+        except Exception as e:  # noqa: BLE001 — a broken repair must not hide the engine
+            logger.debug("exec-stack repair unavailable (%s) — probing anyway", e)
     try:
         importlib.import_module(mod)
-        return True, "ready"
+        if entry.get("id") == "nllb":
+            # Transformers being importable only proves the runtime exists.
+            # The weights are a separate explicit model install; do not report
+            # NLLB ready and let from_pretrained download 2.4 GB silently.
+            from api.routers.setup.models import cache_is_complete, is_cached
+
+            model = {"repo_id": _NLLB_REPO_ID}
+            if not is_cached(_NLLB_REPO_ID) or not cache_is_complete(model):
+                return False, "NLLB model weights are not installed"
+        # availability_reason is failure-only metadata. Returning a success
+        # label here made every healthy provider look unavailable after the
+        # public diagnostic scrubber intentionally replaced non-null details.
+        return True, None
     except ImportError as e:
         return False, f"import {mod!r} failed: {e}"
+    except Exception as e:  # noqa: BLE001
+        # A native library that refuses to load raises OSError, not ImportError
+        # (#692). An availability probe must report "unusable here", never take
+        # the engine list down with it.
+        return False, f"import {mod!r} failed ({type(e).__name__}): {e}"
 
 
 def install_command(engine: "str | dict | None") -> str | None:
@@ -164,23 +215,38 @@ def _llm_configured() -> tuple[bool, "str | None"]:
     return False, None
 
 
+def _configured(entry: dict) -> tuple[bool, str | None]:
+    """Whether an installed engine has the configuration needed to run."""
+    engine_id = entry.get("id")
+    if engine_id == "openai":
+        return _llm_configured()
+    if engine_id == "deepl":
+        return bool(os.environ.get("DEEPL_API_KEY") or os.environ.get("TRANSLATE_API_KEY")), None
+    if engine_id == "microsoft":
+        return bool(os.environ.get("MICROSOFT_API_KEY") or os.environ.get("TRANSLATE_API_KEY")), None
+    return True, None
+
+
 def list_engines() -> list[dict]:
     """Return a UI-ready list with per-engine availability stamped in."""
     out = []
     for e in REGISTRY.values():
         installed, reason = _probe(e)
+        configured, via = _configured(e)
+        ready = installed and configured
         entry = {
             **e,
             "installed": installed,
-            "availability_reason": reason,
+            "configured": configured,
+            "configured_via": via,
+            "ready": ready,
+            "availability_reason": reason or (
+                None if configured else "Translation provider is not configured"
+            ),
             "install_command": install_command(e),
         }
         # LLM engines additionally need a provider/key — surface configured-ness
         # so the UI can distinguish "importable" from "actually ready to call".
-        if e.get("category") == "llm":
-            configured, via = _llm_configured()
-            entry["configured"] = configured
-            entry["configured_via"] = via
         out.append(entry)
     return out
 
@@ -254,6 +320,119 @@ def is_installed(engine_id: str) -> bool:
         return False
     ok, _ = _probe(entry)
     return ok
+
+
+def is_ready(engine_id: str) -> bool:
+    """True only when both runtime/model and required configuration exist."""
+    entry = REGISTRY.get(engine_id)
+    if not entry:
+        return False
+    installed, _ = _probe(entry)
+    configured, _ = _configured(entry)
+    return installed and configured
+
+
+def argos_lang_code(value: str) -> str:
+    """Return the base language token used by Argos package metadata.
+
+    Accepts ISO 639-1 codes (e.g. ``"zh"``), BCP-47 tags with a region or script
+    suffix (e.g. ``"zh-CN"``, ``"cmn-Hans"``), human names from the dub UI's own
+    label list (e.g. ``"Chinese"``, ``"Mandarin"``), legacy / deprecated ISO
+    639-1 codes still seen in older corpora (``"in"``→``"id"`` for Indonesian,
+    ``"iw"``→``"he"`` for Hebrew), and ISO 639-2/T (e.g. ``"zho"``→``"zh"``,
+    ``"fil"``→``"tl"`` for Tagalog). Empty or whitespace-only input raises
+    ``ValueError`` so the caller sees an actionable error instead of a
+    silently-empty language token.
+    """
+    raw = str(value or "").strip()
+    key = raw.lower()
+    parts = key.replace("_", "-").split("-")
+    if key == "chinese (traditional)" or (
+        parts[0] in {"zh", "zho", "cmn"} and
+        any(part in {"hant", "tw", "hk", "mo"} for part in parts[1:])
+    ):
+        raise ValueError("Argos does not provide Traditional Chinese; choose NLLB for this script")
+    named = _ARGOS_NAME_ALIASES.get(key)
+    if named:
+        return named
+    code = parts[0]
+    code = _ARGOS_LANG_ALIASES.get(code, code)
+    named = _ARGOS_NAME_ALIASES.get(code)
+    if named:
+        return named
+    if not re.fullmatch(r"[a-z]{2,3}", code):
+        raise ValueError("Choose a valid source and target language")
+    return code
+
+
+def _configure_argos_cache() -> None:
+    cache_dir = os.environ.get("OMNIVOICE_CACHE_DIR")
+    if not cache_dir:
+        return
+    argos_cache = os.path.join(cache_dir, "argos-translate")
+    os.makedirs(argos_cache, exist_ok=True)
+    os.environ.setdefault("ARGOS_PACKAGES_DIR", argos_cache)
+    os.environ.setdefault("ARGOS_DATA_DIR", argos_cache)
+
+
+def argos_pack_status(source_lang: str, target_langs: list[str]) -> dict:
+    """Report installed Argos pairs without refreshing the remote index."""
+    _configure_argos_cache()
+    import argostranslate.package
+
+    source = argos_lang_code(source_lang)
+    targets = list(dict.fromkeys(argos_lang_code(code) for code in target_langs))
+    installed = {
+        (package.from_code, package.to_code)
+        for package in argostranslate.package.get_installed_packages()
+    }
+    return {
+        "source_lang": source,
+        "pairs": [
+            {
+                "source_lang": source,
+                "target_lang": target,
+                "installed": source == target or (source, target) in installed,
+            }
+            for target in targets
+        ],
+    }
+
+
+def install_argos_packs(source_lang: str, target_langs: list[str]) -> dict:
+    """Explicitly download and install the requested Argos language pairs."""
+    _configure_argos_cache()
+    import argostranslate.package
+
+    source = argos_lang_code(source_lang)
+    targets = list(dict.fromkeys(argos_lang_code(code) for code in target_langs))
+    with _ARGOS_INSTALL_LOCK:
+        status = argos_pack_status(source, targets)
+        missing = {
+            pair["target_lang"]
+            for pair in status["pairs"]
+            if not pair["installed"]
+        }
+        if missing:
+            argostranslate.package.update_package_index()
+            available = argostranslate.package.get_available_packages()
+            for target in targets:
+                if target not in missing:
+                    continue
+                package = next(
+                    (
+                        item
+                        for item in available
+                        if item.from_code == source and item.to_code == target
+                    ),
+                    None,
+                )
+                if package is None:
+                    raise ValueError(
+                        f"No Argos language pack is available for {source} → {target}"
+                    )
+                argostranslate.package.install_from_path(package.download())
+        return argos_pack_status(source, targets)
 
 
 def _in_virtualenv() -> bool:

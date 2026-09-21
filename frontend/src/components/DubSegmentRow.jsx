@@ -20,6 +20,7 @@ import { formatTime } from '../utils/format';
 import { LANG_CODES } from '../utils/languages';
 import { MIN_SEG_DUR } from '../utils/timeline';
 import { Menu } from '../ui';
+import SearchableSelect from './SearchableSelect';
 import VoiceSelector from './VoiceSelector';
 
 const CHAR_BUDGET_RATIO = 1.3;
@@ -188,17 +189,23 @@ function DubSegmentRow({
   // its edge produce identical results — including the speed recompute that
   // keeps the dubbed audio inside a resized slot. The numeric start field used
   // to write `start` raw and skip that compensation, so the two UIs disagreed.
+  // The fields show tenths, so leaving one untouched must not commit that
+  // rounding; only a field typed into since it was focused commits.
+  const editedTimeRef = useRef({});
   const timeKeyDown = (edge) => (e) => {
     if (e.key === 'Enter') e.target.blur();
     if (e.key === 'Escape') {
+      editedTimeRef.current[edge] = false;
       e.target.value = formatTime(seg[edge]);
       e.target.blur();
     }
   };
 
   const commitTime = (edge) => (e) => {
-    const v = parseTime(e.target.value);
     const current = seg[edge];
+    if (!editedTimeRef.current[edge]) return;
+    editedTimeRef.current[edge] = false;
+    const v = parseTime(e.target.value);
     const inRange =
       edge === 'start'
         ? v >= 0 && v <= seg.end - MIN_SEG_DUR + TIME_EPSILON
@@ -380,6 +387,12 @@ function DubSegmentRow({
                 edge === 'start' ? 'segment.time_edit_title' : 'segment.time_edit_end_title',
               )}
               onClick={(e) => e.stopPropagation()}
+              onFocus={() => {
+                editedTimeRef.current[edge] = false;
+              }}
+              onChange={() => {
+                editedTimeRef.current[edge] = true;
+              }}
               onKeyDown={timeKeyDown(edge)}
               onBlur={commitTime(edge)}
             />
@@ -498,20 +511,21 @@ function DubSegmentRow({
           </datalist>
         )}
 
-        <select
-          className="input-base seg-lang-select"
-          aria-label={t('segment.lang')}
-          value={seg.target_lang || ''}
-          disabled={disabled}
-          onChange={(e) => onEditField(seg.id, 'target_lang', e.target.value)}
-        >
-          <option value="">{t('segment.lang_default')}</option>
-          {LANG_CODES.map((lc) => (
-            <option key={lc.code} value={lc.code}>
-              {lc.code.toUpperCase()}
-            </option>
-          ))}
-        </select>
+        <span className="seg-lang-col min-w-0" data-noseek onClick={(e) => e.stopPropagation()}>
+          <SearchableSelect
+            value={seg.target_lang || ''}
+            onChange={(value) => onEditField(seg.id, 'target_lang', value)}
+            options={[
+              { value: '', label: t('segment.lang_default') },
+              ...LANG_CODES.map((lc) => ({ value: lc.code, label: lc.code.toUpperCase() })),
+            ]}
+            ariaLabel={t('segment.lang')}
+            disabled={disabled}
+            size="sm"
+            menuPortal
+            buttonClassName="input-base seg-lang-select"
+          />
+        </span>
 
         {/* Shared gallery-enabled picker (#1220). `data-noseek` + stopPropagation
           keep a voice pick from also seeking the player (handleRowClick). The

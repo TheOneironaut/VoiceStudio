@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import json
 import logging
 import os
@@ -63,6 +64,23 @@ from core import failure
 from core.logging_utils import log_safe
 
 logger = logging.getLogger("omnivoice.dub_pipeline")
+
+
+def _media_process_error(tool: str, returncode: int, stderr: bytes, *, paths=()) -> str:
+    """Keep the actionable end of native diagnostics without leaking paths."""
+    from core.scrub import scrub_text
+    detail = stderr.decode(errors="replace")
+    # Input/output may live outside home directories (mounted media, Windows
+    # drive roots). Remove the exact command paths before generic scrubbing.
+    for path in sorted((str(p) for p in paths if p), key=len, reverse=True):
+        for variant in {path, path.replace("\\", "/"), path.replace("/", "\\")}:
+            detail = detail.replace(variant, "[redacted path]")
+    detail = scrub_text(detail).strip()
+    tail = detail[-2000:]
+    if len(detail) > 2000:
+        tail = "…" + tail
+    return f"{tool} exited with code {returncode}" + (f": {tail}" if tail else ". No diagnostic output.")
+
 
 # ── Module-level state ──────────────────────────────────────────────────────
 # These used to live in dub_core.py. The router now re-exports them for
@@ -1084,9 +1102,7 @@ def yt_download_sync(
         if sub_langs:
             langs = list(sub_langs)
         else:
-            orig = (info.get("language") or "").strip()
-            manual = list((info.get("subtitles") or {}).keys())
-            langs = sorted({*manual, *([orig] if orig else [])})
+            langs = _default_caption_languages(info)
         if not langs:
             logger.info("No captions available on %s (skipping subtitle pass)", log_safe(url))
         else:
@@ -1113,6 +1129,48 @@ def yt_download_sync(
             base = os.path.splitext(video_path)[0]
             sub_files = sorted(glob.glob(base + ".*.vtt"))
     return video_path, title, sub_files
+
+
+def _default_caption_languages(info: dict) -> list[str]:
+    """Return original-language caption tracks without translated auto-captions.
+
+    Some extractors omit ``language`` even though yt-dlp exposes an original
+    automatic-caption track such as ``en-orig``.  Treat that explicit suffix as
+    source metadata so caption-first ingest still works instead of needlessly
+    loading ASR.  Manual tracks remain eligible because they are authored source
+    material and yt-dlp's ``skip=translated_subs`` guard still applies.
+    """
+    original = str(info.get("language") or "").strip()
+    manual = {
+        str(language).strip()
+        for language in (info.get("subtitles") or {})
+        if str(language).strip()
+    }
+    automatic = {
+        str(language).strip()
+        for language in (info.get("automatic_captions") or {})
+        if str(language).strip()
+    }
+    selected = set(manual)
+    if original:
+        primary = original.split("-", 1)[0]
+        has_source_manual = any(
+            language == original or language.split("-", 1)[0] == primary
+            for language in manual
+        )
+        if not has_source_manual:
+            for candidate in (
+                f"{original}-orig",
+                f"{primary}-orig",
+                original,
+                primary,
+            ):
+                if candidate in automatic:
+                    selected.add(candidate)
+                    break
+    else:
+        selected.update(language for language in automatic if language.endswith("-orig"))
+    return sorted(selected)
 
 
 def parse_vtt_segments(vtt_path: str) -> list[dict]:
@@ -1167,6 +1225,9 @@ def parse_vtt_segments(vtt_path: str) -> list[dict]:
         text = " ".join(ln.strip() for ln in lines[1:]).strip()
         # Strip inline styling like <c.colorE5E5E5>foo</c> or <00:00:01.200>
         text = re.sub(r"<[^>]+>", "", text)
+        # WebVTT escapes `&`, `<` and `>` in cue text ("Q&amp;A"); decode
+        # them once the markup is gone so the dub gets the words.
+        text = html.unescape(text).strip()
         if text:
             segments.append({"start": start, "end": end, "text": text})
     return segments
@@ -1286,7 +1347,7 @@ async def ingest_pipeline(
                 "-ar", "16000", "-ac", "1", audio_path, "-y",
             ])
             if p.returncode != 0:
-                msg = (stderr.decode(errors="replace") or f"ffmpeg returned exit code {p.returncode}").strip()[:500]
+                msg = _media_process_error("FFmpeg", p.returncode, stderr, paths=(video_path, audio_path, job_dir))
                 raise Exception(msg)
             # Second, FULL-QUALITY extraction for source separation. audio.wav
             # is deliberately 16 kHz mono — that's what ASR wants — but Demucs
@@ -1436,7 +1497,7 @@ async def ingest_pipeline(
                     elif evt[0] == "done":
                         rc, stderr_full = evt[1], evt[2]
                 if rc != 0:
-                    raise Exception(stderr_full.decode(errors="replace")[:500])
+                    raise Exception(_media_process_error("Demucs", rc, stderr_full, paths=(audio_hq_path, audio_path, job_dir)))
                 # Stems land under the INPUT's basename ("audio_hq" when the
                 # full-quality extraction succeeded, "audio" on its fallback).
                 demucs_out = os.path.join(

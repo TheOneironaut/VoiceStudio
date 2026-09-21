@@ -340,6 +340,7 @@
     "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
+    "device_family_gpu": "GPU",
     "device_load_failed": "No se pudo cargar el ajuste del dispositivo",
     "perf_save_failed": "No se pudo guardar el ajuste",
     "generate_budget_title": "Presupuesto de tiempo de cómputo",
@@ -360,7 +361,10 @@
     "theme_auto": "Automático del sistema",
     "theme_light": "Claro",
     "reduce_motion": "Reducir movimiento",
-    "reduce_motion_desc": "Detiene las animaciones de fondo y las transiciones. Tu ajuste del sistema se respeta por sí solo; esto se suma."
+    "reduce_motion_desc": "Detiene las animaciones de fondo y las transiciones. Tu ajuste del sistema se respeta por sí solo; esto se suma.",
+    "perf_torch_compile": "Desactivar torch.compile",
+    "perf_torch_compile_note": "Usa ejecución directa para evitar errores de memoria de Triton.",
+    "perf_torch_compile_hint": "Usa ejecución directa para evitar errores de memoria de Triton. <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>"
   },
   "bootstrap": {
     "title": "VoiceStudio",
@@ -425,6 +429,10 @@
     "importFailed": "No se pudo leer ese archivo.",
     "addLine": "Agregar línea",
     "addChapter": "Agregar capítulo",
+    "clearScript": "Vaciar guion",
+    "clearScriptHint": "Quitar todas las líneas y capítulos del guion (el reparto se conserva)",
+    "clearConfirm": "¿Borrar las {{count}} entradas del guion y cualquier texto importado pendiente? Esta acción no se puede deshacer.",
+    "cleared": "Guion vaciado",
     "chapterN": "Capítulo {{n}}",
     "stems": "Tallos",
     "stemsDone": "Raíz(s) de caracteres {{count}} exportados",
@@ -445,6 +453,11 @@
     "pasteAbove": "Pegar texto arriba",
     "cancel": "Cancelar",
     "splitIntoTracks": "Dividir en líneas",
+    "splitMode": "Dividir por",
+    "split_sentences": "Frases",
+    "split_paragraphs": "Párrafos",
+    "split_chapters": "Capítulos",
+    "splitModeHint": "Cada línea se lee como una toma independiente. Para un solo narrador, los párrafos o capítulos completos fluyen mejor que las frases.",
     "emptyText": "Comience su historia agregando diálogos y líneas de narración. Asigna a cada personaje una voz en el elenco.",
     "addFirst": "Agregar primera línea",
     "linePlaceholder": "Ingrese un diálogo o narración... use [pausa 0,5 s] para un descanso en silencio",
@@ -860,7 +873,9 @@
     "familyDesc_asr": "Convierte audio en texto para transcripciones, doblaje, subtítulos y dictado.",
     "familyDesc_llm": "Asistente de texto opcional para traducciones y reescrituras. «Desactivado» omite esos pasos.",
     "mpsLongText": "{{engine}} se ejecuta en Apple Silicon (MPS) aquí y este texto es largo: la generación puede superar el límite de tiempo. Un texto más corto, o dividirlo en varias tomas, será mucho más rápido.",
-    "inMemory": "En memoria"
+    "inMemory": "En memoria",
+    "localInstallRequired": "Instala este motor en el equipo del servidor mediante localhost o su guía de configuración. La instalación remota está desactivada.",
+    "argosRuntimeUnavailable": "El entorno de ejecución de Argos no está disponible. Reinstala el backend o selecciona NLLB."
   },
   "capture": {
     "desc": "Las teclas de acceso rápido globales solo funcionan en la aplicación de escritorio. La interfaz de usuario web utiliza un acceso directo <1>Ctrl+Shift+Espacio</1> en la página mientras la ventana tiene el foco.",
@@ -1552,6 +1567,7 @@
     "h_ago": "Hace {{count}}h"
   },
   "setup": {
+    "ready_desc": "Ya puedes crear tu primera voz. Puedes configurar el dictado ahora o más tarde en Ajustes.",
     "welcome": "Bienvenido",
     "system_check": "Verificación del sistema",
     "install_models": "Instalar modelos",
@@ -1606,7 +1622,7 @@
     "choose_method": "Elige cómo regalar",
     "choose_method_amount": "Continuar con ${{amount}}",
     "goal": {
-      "title": "Fondo Claude Max",
+      "title": "Apoya el desarrollo de VoiceStudio",
       "of": "de",
       "per_month": "/ mes",
       "aria": "{{raised}} de {{goal}} meta mensual",
@@ -1615,7 +1631,7 @@
       "social_proof": "Únase a los partidarios de {{count}} que financian la IA local"
     },
     "postcard": {
-      "title": "Fondo Claude Max",
+      "title": "Apoya el desarrollo de VoiceStudio",
       "lead_default": "¡Me alegro de que haya funcionado! VoiceStudio es gratuito y totalmente local. Si le ahorra tiempo, un pequeño aporte mensual financia el Claude Max detrás de él.",
       "lead_first_clone": "Tu primer clon de voz está listo, ¡bien! VoiceStudio se ejecuta completamente en su máquina y su soporte lo mantiene así.",
       "lead_tenth_dub": "Diez doblajes: claramente lo estás poniendo a funcionar. Un pequeño aporte mensual financia el Claude Max que incluye estas funciones.",
@@ -1797,7 +1813,8 @@
     "backend_shutting_down": "VoiceStudio se está cerrando. Vuelve a abrir la aplicación e inténtalo de nuevo.",
     "crash_broken_env": "Murió mientras cargaba sus propias dependencias de Python, así que no es cuestión de memoria ni de tu GPU: el entorno está incompleto o quedó a medio actualizar. Usa «Limpiar y reintentar» en Configuración → Registros → Backend, que lo reconstruye desde cero y lo repara sin tocar tus voces ni tus proyectos. Si sigue fallando, los detalles del fallo indican el paquete exacto que no se pudo importar.",
     "crash_vram_default": "En GPU más pequeñas, la causa habitual es quedarse sin VRAM al cargar el modelo ASR junto con el modelo TTS: libera primero el modelo TTS de la memoria, o elige un modelo ASR más pequeño en Catálogo de modelos → Modelos.",
-    "stream_cut_backend_alive": "El stream terminó antes de tiempo, pero el backend sigue en ejecución — así que no se bloqueó. En una instalación servida o en contenedor, esto suele deberse a un proxy inverso o balanceador de carga que almacena en búfer la conexión o la corta por tiempo de espera: desactiva el almacenamiento en búfer de la respuesta para esta ruta (nginx: proxy_buffering off; X-Accel-Buffering: no) y aumenta su tiempo de espera de lectura. Ejecutar la aplicación de escritorio directamente, o en localhost sin proxy, lo confirmará."
+    "stream_cut_backend_alive": "El stream terminó antes de tiempo, pero el backend sigue en ejecución — así que no se bloqueó. En una instalación servida o en contenedor, esto suele deberse a un proxy inverso o balanceador de carga que almacena en búfer la conexión o la corta por tiempo de espera: desactiva el almacenamiento en búfer de la respuesta para esta ruta (nginx: proxy_buffering off; X-Accel-Buffering: no) y aumenta su tiempo de espera de lectura. Ejecutar la aplicación de escritorio directamente, o en localhost sin proxy, lo confirmará.",
+    "stream_cut_backend_alive_local": "La transmisión terminó antes de tiempo, pero el backend sigue en ejecución, así que no se bloqueó. La app perdió la conexión con el backend a mitad del trabajo; ocurre cuando un paso largo pasa minutos sin enviar datos, y normalmente el backend termina el trabajo de todos modos. Espera unos minutos y vuelve a abrir el trabajo desde el historial, o revisa el registro del backend (Configuración → Registros → backend) para ver qué estaba haciendo."
   },
   "keyboard": {
     "title": "Atajos de teclado",
@@ -2211,6 +2228,7 @@
     "session_expired": "Esta sesión de doblaje expiró o se limpió: vuelve a subir tu video para comenzar uno nuevo."
   },
   "tts_errors": {
+    "profile_language_rejected": "Automático usa el idioma del perfil de voz ({{language}}), que este motor no admite. Cambia el idioma del perfil, elige uno compatible o cambia de motor.",
     "enter_text": "Por favor ingresa texto",
     "upload_or_select": "Sube un audio o selecciona un perfil de voz",
     "trim_hint": "El audio es {{duration}}s; recórtelo a ≤{{max}}s para una mejor clonación.",
@@ -2224,7 +2242,10 @@
     "instruct_category_conflict": "Se seleccionaron dos opciones de diseño de voz conflictivas en la misma categoría (por ejemplo, dos géneros). Borra una antes de generar de nuevo.",
     "ref_audio_unusable": "No se detectó voz en el audio de referencia: el clip está en silencio o casi en silencio, así que no hay voz que clonar. Graba de nuevo más cerca del micrófono (comprueba que está seleccionado el dispositivo de entrada correcto y que el nivel se mueve) o elige otro clip.",
     "ref_audio_too_long": "Una referencia puede durar como máximo 20 segundos con transcripción o 75 segundos sin ella. Recórtala a un fragmento de voz claro de 3–10 segundos; si aportas texto, recorta la transcripción al mismo fragmento.",
-    "ref_audio_no_speech": "La detección automática no encontró palabras habladas en la referencia. Recórtala a un fragmento de voz claro de 3–10 segundos o proporciona una transcripción coincidente."
+    "ref_audio_no_speech": "La detección automática no encontró palabras habladas en la referencia. Recórtala a un fragmento de voz claro de 3–10 segundos o proporciona una transcripción coincidente.",
+    "gpu_arch_unsupported": "Esta versión de PyTorch no es compatible con tu GPU. Elige CPU en Ajustes → Rendimiento y dispositivo o instala una versión compatible de PyTorch.",
+    "windows_app_control_blocked": "El control de aplicaciones de Windows bloqueó un archivo necesario. Pide al administrador que permita el entorno de ejecución de confianza de VoiceStudio y reinicia la aplicación.",
+    "audio_io_failed": "No se pudo leer o guardar el audio. Comprueba el formato, el espacio libre y los permisos del archivo. Revisa la carpeta en Ajustes → Almacenamiento."
   },
   "sharing": {
     "title": "Compartir y acceso remoto",
@@ -2624,6 +2645,11 @@
     "seed_ph": "Automático",
     "vary_repeats": "Variar líneas repetidas",
     "vary_repeats_help": "Proporcione tomas distintas a líneas idénticas en lugar de reutilizar una grabación.",
+    "line_gap": "Pausa entre líneas",
+    "joins_help": "La pausa entre líneas va entre líneas sin su propio [pause]; la pausa entre párrafos, en las líneas en blanco. Con el recorte activado, primero se quita el silencio inicial y final de cada línea, así la pausa que eliges es la que se oye.",
+    "paragraph_gap": "Pausa entre párrafos",
+    "trim_edges": "Recortar silencio del motor",
+    "trim_edges_help": "Quita el silencio que el motor añade a cada línea antes de unirlas. Desactívalo para conservar las tomas sin recortar.",
     "emotion_help": "Emoción graduada — aplicada solo por el motor IndexTTS2.",
     "emotion_text": "Descripción de emoción",
     "emotion_text_ph": "p. ej. suena agotado y triste",
@@ -2816,6 +2842,7 @@
     "none_selected": "Ninguna voz seleccionada — describe una, suelta un audio o elige abajo."
   },
   "convert": {
+    "cloning_required": "Elige un modelo de texto a voz listo para usar que permita clonar voces.",
     "source_kicker": "Clip de origen",
     "drop_audio": "Suelta el clip a convertir — o haz clic. WAV, MP3, M4A…",
     "target_voice": "Voz de destino",
@@ -2831,5 +2858,56 @@
   "player": {
     "pause": "Pausar",
     "play": "Reproducir"
+  },
+  "dubIntegrity": {
+    "missingSpeech": "Falta audio de voz o no se puede leer. Regenera el segmento afectado antes de exportar.",
+    "timingOverflow": "La voz supera su intervalo de tiempo. Acorta la traducción o elige un intervalo estricto o alargar el vídeo.",
+    "backgroundUnavailable": "No se pudo conservar el sonido original. Revisa la separación del fondo y los tiempos del diálogo e inténtalo de nuevo, o exporta solo la voz explícitamente."
+  },
+  "dubStyle": {
+    "label": "Instrucciones de estilo de traducción",
+    "help": "Describe el tono, el público y la adaptación, por ejemplo conservar los chistes y adaptar los modismos con naturalidad. Se guarda en el proyecto y se aplica a la traducción y los ajustes de duración. Déjalo vacío para el estilo predeterminado."
+  },
+  "dubActivity": {
+    "output": "Traducciones",
+    "waiting": "Aún no se ha recibido ninguna salida.",
+    "progress": "{{done}} / {{total}} segmentos validados",
+    "cancelled": "Cancelado",
+    "fitting": "Ajustando tiempos"
+  },
+  "sponsorSlot": {
+    "book": "Reserva tu espacio",
+    "preview": "Vista previa del patrocinador",
+    "message": "Tu marca, sitio web y mensaje",
+    "email_app": "Abrir correo",
+    "copy_email": "Copiar correo",
+    "preview_detail": "Aquí podrían aparecer tu logo, enlace y presentación."
+  },
+  "supportPlans": {
+    "remove": "Quitar barra de patrocinadores",
+    "title": "Gratis vs Pro",
+    "free": "Gratis",
+    "pro": "Pro",
+    "sponsor_bar": "Barra de patrocinadores",
+    "visible": "Visible",
+    "hideable": "Se puede ocultar",
+    "unavailable": "La activación de Pro aún no está configurada.",
+    "telemetry": "Telemetría",
+    "opt_in": "Opcional, con consentimiento",
+    "disabled": "Desactivada",
+    "badge": "Insignia Pro",
+    "advanced": "Herramientas avanzadas",
+    "standard": "Estándar",
+    "included": "Incluidas"
+  },
+  "integrationCatalog": {
+    "title": "Integraciones",
+    "featured": "Destacado",
+    "description": "Descubre integraciones y socios destacados.",
+    "n8nHint": "Importa este flujo en n8n, edita la solicitud y ejecútalo. Mantén VoiceStudio abierto. Docker y n8n remoto necesitan una dirección de backend accesible y las credenciales requeridas."
+  },
+  "directoryExamples": {
+    "example": "Ejemplo del directorio",
+    "notice": "Solo ejemplos del directorio; no son patrocinadores ni integraciones conectadas."
   }
 }

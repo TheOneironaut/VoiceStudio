@@ -27,10 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from services.subprocess_backend import (
-    RECV_TIMEOUT_S,
-    SubprocessBackend,
-)
+from services.subprocess_backend import RECV_TIMEOUT_S, SubprocessBackend
 from services.tts_backend import OmniVoiceBackend, get_backend_class, list_backends
 from engines.omnivoice_subprocess import (
     OmniVoiceMPSSubprocessBackend,
@@ -73,6 +70,10 @@ while True:
         sys.exit(0)
     elif op == "synthesize":
         t = m.get("text", "")
+        if t == "ERROR":
+            _send({"op": "error", "stage": "synthesize", "message": "bad model",
+                   "traceback": "Traceback: useful child frame"})
+            continue
         if t == "CRASH":
             os._exit(137)
         if t == "HANG":
@@ -317,11 +318,14 @@ class _PlainBackend(SubprocessBackend):
         return ["multi"]
 
 
-def test_base_default_recv_timeout_is_60s():
-    # A subclass that does NOT override keeps the conservative default, so the
-    # existing subprocess engines (IndexTTS, dots.tts, ...) are byte-identical.
-    assert SubprocessBackend.recv_timeout_s == RECV_TIMEOUT_S == 60.0
-    assert _PlainBackend().recv_timeout_s == 60.0
+def test_base_default_recv_timeout_covers_a_generation():
+    # A sidecar that does not choose gets a deadline that outlasts the
+    # wall-clock budget its own job was granted (#2103).
+    from services.subprocess_backend import GENERATE_RECV_TIMEOUT_S
+    assert SubprocessBackend.recv_timeout_s == GENERATE_RECV_TIMEOUT_S == 600.0
+    assert _PlainBackend().recv_timeout_s == 600.0
+    # The ping budget itself is unchanged: health_check() still wants 60s.
+    assert RECV_TIMEOUT_S == 60.0
 
 
 def test_sidecar_spawn_delegates_all_containment_to_nested_owner(monkeypatch, tmp_path):
@@ -408,6 +412,189 @@ def test_omnivoice_subprocess_recv_timeout_floors_at_30s(monkeypatch):
     # A misconfigured tiny value must still leave time for a real handshake.
     monkeypatch.setenv("OMNIVOICE_SIDECAR_RECV_TIMEOUT_S", "1")
     assert OmniVoiceSubprocessBackend().recv_timeout_s == 30.0
+
+
+def test_subprocess_sidecar_timeout_error_message(monkeypatch):
+    """When a sidecar hits its receive timeout, generate() must report the
+    timeout and deadline rather than describing a generic pipe-closed crash (#2103)."""
+    b = _PlainBackend()
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+    b._proc = _FakeProc()
+    monkeypatch.setattr(b, "_send", lambda msg: None)
+
+    def fake_recv_timeout(timeout_s):
+        b._last_recv_timed_out = True
+        return None
+
+    monkeypatch.setattr(b, "_recv_with_timeout", fake_recv_timeout)
+    monkeypatch.setattr(b, "_reap_unusable_process", lambda proc: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        b.generate("hello")
+    assert "600s" in str(exc.value)
+    assert "stopped it" in str(exc.value)
+    b._proc = None
+
+
+def test_subprocess_sidecar_initial_empty_crash_reports_pipe_closed(monkeypatch):
+    """When a sidecar process terminates without timing out, generate() reports pipe closure (#2103)."""
+    b = _PlainBackend()
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+    b._proc = _FakeProc()
+    monkeypatch.setattr(b, "_send", lambda msg: None)
+
+    def fake_recv_crash(timeout_s):
+        b._last_recv_timed_out = False
+        return None
+
+    monkeypatch.setattr(b, "_recv_with_timeout", fake_recv_crash)
+    monkeypatch.setattr(b, "_reap_unusable_process", lambda proc: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        b.generate("hello")
+    assert "sidecar closed pipe mid-generate" in str(exc.value)
+    b._proc = None
+
+
+def test_subprocess_engine_timeouts_raised():
+    """All large subprocess TTS engines must declare generous timeouts rather
+    than inheriting the 60s class default (#2103)."""
+    from engines.confucius4 import Confucius4Backend
+    from engines.dots_tts import DotsTTSBackend
+    from engines.moss_tts_v15 import MossTTSV15Backend
+    from engines.supertonic3.backend import Supertonic3Backend
+
+    assert Confucius4Backend().recv_timeout_s >= 300.0
+    assert DotsTTSBackend().recv_timeout_s >= 300.0
+    assert MossTTSV15Backend().recv_timeout_s >= 300.0
+    assert Supertonic3Backend().recv_timeout_s >= 300.0
+
+
+def test_subprocess_engine_timeout_env_overrides(monkeypatch):
+    """Subprocess TTS engines honor their engine-specific receive timeout env overrides (#2103)."""
+    from engines.confucius4 import Confucius4Backend
+    from engines.dots_tts import DotsTTSBackend
+    from engines.moss_tts_v15 import MossTTSV15Backend
+    from engines.supertonic3.backend import Supertonic3Backend
+
+    monkeypatch.setenv("OMNIVOICE_CONFUCIUS4_RECV_TIMEOUT_S", "1200")
+    monkeypatch.setenv("OMNIVOICE_DOTS_TTS_RECV_TIMEOUT_S", "1000")
+    monkeypatch.setenv("OMNIVOICE_MOSS_TTS_V15_RECV_TIMEOUT_S", "1100")
+    monkeypatch.setenv("OMNIVOICE_SUPERTONIC3_RECV_TIMEOUT_S", "500")
+
+    assert Confucius4Backend().recv_timeout_s == 1200.0
+    assert DotsTTSBackend().recv_timeout_s == 1000.0
+    assert MossTTSV15Backend().recv_timeout_s == 1100.0
+    assert Supertonic3Backend().recv_timeout_s == 500.0
+
+
+def test_subprocess_asr_recv_timeout_env_override(monkeypatch):
+    """SubprocessASRBackend.recv_timeout_s honors OMNIVOICE_ASR_RECV_TIMEOUT_S
+    and safely rejects non-finite, malformed, zero, or negative inputs (#2103)."""
+    from pathlib import Path
+    from services.subprocess_asr import SubprocessASRBackend
+
+    class _FakeASR(SubprocessASRBackend):
+        id = "fake-asr"
+        display_name = "fake-asr"
+        gpu_compat = ("cuda", "mps", "cpu")
+
+        @classmethod
+        def is_available(cls): return True, "ok"
+        @classmethod
+        def venv_python(cls): return Path(sys.executable)
+        @classmethod
+        def sidecar_script(cls): return Path("fake")
+
+    b = _FakeASR()
+    assert b.recv_timeout_s == 600.0
+
+    # Valid override
+    monkeypatch.setenv("OMNIVOICE_ASR_RECV_TIMEOUT_S", "750")
+    assert b.recv_timeout_s == 750.0
+
+    # Malformed value falls back to default
+    monkeypatch.setenv("OMNIVOICE_ASR_RECV_TIMEOUT_S", "not-a-number")
+    assert b.recv_timeout_s == 600.0
+
+    # Non-finite values fall back to default
+    for invalid in ("nan", "inf", "-inf"):
+        monkeypatch.setenv("OMNIVOICE_ASR_RECV_TIMEOUT_S", invalid)
+        assert b.recv_timeout_s == 600.0
+
+    # Zero or negative values clamped to 30.0 minimum
+    for low in ("0", "-10", "15"):
+        monkeypatch.setenv("OMNIVOICE_ASR_RECV_TIMEOUT_S", low)
+        assert b.recv_timeout_s == 30.0
+
+
+def test_subprocess_asr_timeout_error_message(monkeypatch):
+    """SubprocessASRBackend.transcribe() raises actionable timeout guidance when watchdog fires (#2103)."""
+    from pathlib import Path
+    from services.subprocess_asr import SubprocessASRBackend
+
+    class _FakeASR(SubprocessASRBackend):
+        id = "fake-asr"
+        display_name = "fake-asr"
+        gpu_compat = ("cuda", "mps", "cpu")
+
+        @classmethod
+        def is_available(cls): return True, "ok"
+        @classmethod
+        def venv_python(cls): return Path(sys.executable)
+        @classmethod
+        def sidecar_script(cls): return Path("fake")
+
+    class _FakeProc:
+        def poll(self): return None
+        def wait(self, timeout=None): return 0
+        def kill(self): pass
+        def terminate(self): pass
+
+    b = _FakeASR()
+    b._proc = _FakeProc()
+    monkeypatch.setattr(b, "_spawn", lambda: None)
+    monkeypatch.setattr(b, "_send", lambda msg: None)
+
+    def fake_recv_timeout(timeout_s):
+        b._last_recv_timed_out = True
+        return None
+
+    monkeypatch.setattr(b, "_recv_with_timeout", fake_recv_timeout)
+    monkeypatch.setattr(b, "shutdown", lambda: None)
+    monkeypatch.setattr("services.model_manager.running_on_gpu_pool", lambda: True)
+
+    with pytest.raises(RuntimeError) as exc:
+        b.transcribe("test.wav")
+    assert "fake-asr ASR sidecar exceeded receive timeout" in str(exc.value)
+    assert "OMNIVOICE_ASR_RECV_TIMEOUT_S" in str(exc.value)
+
+
+def test_generate_timeout_s_coordinates_with_engine_recv_timeout():
+    """Outer generation timeout must coordinate with engine sidecar timeout with bounded grace (#2103)."""
+    from services.model_manager import generate_timeout_s
+
+    class _SlowEngine:
+        recv_timeout_s = 900.0
+
+    # With 900s sidecar timeout, outer budget must include at least 5s grace (>= 905s).
+    budget = generate_timeout_s("short text", engine=_SlowEngine())
+    assert budget >= 905.0
+
+    class _FastEngine:
+        recv_timeout_s = 60.0
+
+    # For fast engines, the default GPU/CPU budget still applies as the floor.
+    budget_fast = generate_timeout_s("short text", engine=_FastEngine(), execution_device="cuda")
+    assert budget_fast >= 300.0
 
 
 # ── roundtrip via the stub sidecar ─────────────────────────────────────────
@@ -532,6 +719,55 @@ def test_generate_does_not_deadlock_when_called_on_gpu_pool_worker(stub_sidecar,
         assert tensor.shape[1] == 24000
     finally:
         b.shutdown()
+
+
+def test_sidecar_traceback_is_preserved_in_backend_log(stub_sidecar, monkeypatch, caplog):
+    _use_stub(monkeypatch, stub_sidecar)
+    b = OmniVoiceSubprocessBackend()
+    try:
+        with caplog.at_level("ERROR"), pytest.raises(
+            RuntimeError, match="sidecar synthesize error: bad model"
+        ):
+            b.generate("ERROR")
+        assert "Traceback: useful child frame" in caplog.text
+    finally:
+        b.shutdown()
+
+
+def test_cached_model_load_emits_periodic_heartbeats(monkeypatch):
+    """A slow cached MPS load has no HF progress events but is still alive."""
+    from engines.omnivoice_subprocess import main as sidecar
+    from services import model_manager
+    from utils import hf_progress
+
+    frames = []
+
+    class FakeTorch:
+        float16 = object()
+
+    class FakeOmniVoice:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            time.sleep(0.06)
+            return object()
+
+    monkeypatch.setattr(sidecar, "_model", None)
+    monkeypatch.setattr(sidecar, "_LOAD_HEARTBEAT_S", 0.01)
+    monkeypatch.setattr(sidecar, "_send", lambda _stream, frame: frames.append(frame))
+    monkeypatch.setattr(model_manager, "_lazy_torch", lambda: FakeTorch())
+    monkeypatch.setattr(model_manager, "_lazy_omnivoice", lambda: FakeOmniVoice)
+    monkeypatch.setattr(model_manager, "resolve_omnivoice_checkpoint", lambda: "cached")
+    monkeypatch.setattr(model_manager, "get_best_device", lambda: "mps")
+    monkeypatch.setattr(model_manager, "should_preload_tts_asr", lambda: False)
+    monkeypatch.setattr(hf_progress, "register_listener", lambda _listener: 1)
+    monkeypatch.setattr(hf_progress, "unregister_listener", lambda _listener_id: None)
+
+    sidecar._load_model(object())
+
+    loading = [frame for frame in frames if frame.get("stage") == "loading_model"]
+    assert loading[0]["percent"] == 0
+    assert loading[-1]["percent"] == 100
+    assert len(loading) >= 3, "cached model load went silent between 0% and 100%"
 
 
 def test_sidecar_forwards_native_controls_and_applies_seed(monkeypatch):

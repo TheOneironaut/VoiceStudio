@@ -49,17 +49,28 @@ const baseProps = {
 describe('ArchetypesZone filter toolbar', () => {
   it('keeps categories in one menu and reveals advanced filters on demand', () => {
     const setFilter = vi.fn();
-    render(<ArchetypesZone {...baseProps} setFilter={setFilter} />);
+    const { container } = render(<ArchetypesZone {...baseProps} setFilter={setFilter} />);
 
-    const categoryMenu = screen.getByRole('combobox', { name: 'Archetypes' });
-    expect(screen.getAllByRole('combobox')).toHaveLength(1);
+    const categoryMenu = screen.getByRole('button', { name: 'Archetypes' });
+    expect(container.querySelectorAll('button[aria-haspopup="listbox"]')).toHaveLength(1);
 
-    fireEvent.change(categoryMenu, { target: { value: 'social' } });
+    fireEvent.click(categoryMenu);
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'Social Media' }));
     expect(setFilter).toHaveBeenCalledWith('use_case', 'social');
 
     fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
-    expect(screen.getAllByRole('combobox')).toHaveLength(6);
+    expect(container.querySelectorAll('button[aria-haspopup="listbox"]')).toHaveLength(6);
     expect(screen.getByRole('checkbox', { name: 'Whisper' })).toBeInTheDocument();
+  });
+
+  it('portals advanced searchable filters outside the clipping toolbar', () => {
+    render(<ArchetypesZone {...baseProps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Gender' }));
+    const listbox = screen.getByRole('listbox');
+    expect(listbox.parentElement).toBe(document.body);
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'Female' }));
+    expect(baseProps.setFilter).toHaveBeenCalledWith('gender', 'female');
   });
 });
 

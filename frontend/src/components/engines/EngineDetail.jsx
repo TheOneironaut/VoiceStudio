@@ -2,9 +2,10 @@ import React from 'react';
 import { Mic, Activity, RefreshCw, Volume2, Copy, Check } from 'lucide-react';
 import { useAppStore } from '../../store';
 import { openExternal } from '../../api/external';
-import { Badge, Button, Select } from '../../ui';
+import { Badge, Button } from '../../ui';
 import { cn } from '@/lib/utils';
 import EngineMark from '../EngineMark';
+import SearchableSelect from '../SearchableSelect';
 import EngineWeights from './EngineWeights';
 import {
   LABEL,
@@ -181,42 +182,35 @@ export default function EngineDetail({
       {b.curated_models && b.curated_models.length > 0 && (
         <label className="flex flex-col gap-[4px]">
           <span className={LABEL}>{t('engines.curatedModelLabel')}</span>
-          <Select
+          <SearchableSelect
             size="sm"
-            className="w-full"
+            buttonClassName="input-base w-full"
             value={b.active_model_id || ''}
             disabled={!onSelect || !b.available}
-            onChange={(e) => inv.changeModel(b.id, e.target.value)}
-            aria-label={t('engines.curatedModelAria', { engine: b.display_name })}
-            data-testid={`curated-model-select-${b.id}`}
-          >
-            {b.curated_models.map((m) => (
-              <option key={m.key} value={m.key}>
-                {m.label}
-              </option>
-            ))}
-          </Select>
+            onChange={(value) => inv.changeModel(b.id, value)}
+            ariaLabel={t('engines.curatedModelAria', { engine: b.display_name })}
+            testId={`curated-model-select-${b.id}`}
+            options={b.curated_models.map((m) => ({ value: m.key, label: m.label }))}
+          />
         </label>
       )}
 
       {b.curated_voices && b.curated_voices.length > 0 && (
         <label className="flex flex-col gap-[4px]">
           <span className={LABEL}>{t('segment.voice')}</span>
-          <Select
+          <SearchableSelect
             size="sm"
-            className="w-full"
+            buttonClassName="input-base w-full"
             value={b.active_voice_id || ''}
             disabled={!onSelect || !b.available}
-            onChange={(e) => inv.changeVoice(b.id, e.target.value)}
-            aria-label={`${t('segment.voice')}: ${b.display_name}`}
-            data-testid={`curated-voice-select-${b.id}`}
-          >
-            {b.curated_voices.map((voice) => (
-              <option key={voice.key} value={voice.key}>
-                {voice.label}
-              </option>
-            ))}
-          </Select>
+            onChange={(value) => inv.changeVoice(b.id, value)}
+            ariaLabel={`${t('segment.voice')}: ${b.display_name}`}
+            testId={`curated-voice-select-${b.id}`}
+            options={b.curated_voices.map((voice) => ({
+              value: voice.key,
+              label: voice.label,
+            }))}
+          />
         </label>
       )}
 
@@ -384,6 +378,9 @@ export default function EngineDetail({
         </div>
       )}
 
+      {b.local_install_required && !b.available && (
+        <p className="text-xs text-muted-foreground">{t('engines.localInstallRequired')}</p>
+      )}
       {/* Setup snippet: top-level on plain path-gated rows; a collapsed
           "Manual install" fallback on one-click rows (open when the install
           failed — the snippet IS the recovery path then). */}

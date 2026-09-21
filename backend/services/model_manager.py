@@ -1,11 +1,12 @@
-import os
-import re
-import sys
-import time
 import asyncio
 import logging
+import math
+import os
 import queue
+import re
+import sys
 import threading
+import time
 from concurrent.futures import Executor, Future, ThreadPoolExecutor
 
 from utils.containment import contain_system_exit
@@ -527,6 +528,7 @@ def generate_timeout_s(
     text: "str | None", *, engine: object = None, execution_device: "str | None" = None,
     min_vram_gb: float = 0.0, hardware_family: "str | None" = None,
     vram_gb: "float | None" = None,
+    _include_sidecar_grace: bool = True,
 ) -> float:
     """THE wall-clock execution budget for one synthesis job, scaled to input.
 
@@ -562,6 +564,7 @@ def generate_timeout_s(
     claiming the card is under-provisioned in user-facing diagnostics.
     """
     base = GPU_JOB_TIMEOUT_S
+    explicit_budget = _GENERATE_TIMEOUT_EXPLICIT or GPU_JOB_TIMEOUT_S != _CONFIGURED_GPU_JOB_TIMEOUT_S
     try:
         from core.device_caps import detect_host_caps
         caps = detect_host_caps()
@@ -588,6 +591,7 @@ def generate_timeout_s(
         )
         if family == "cpu" and (cpu_explicit or not universal_override):
             base = CPU_JOB_TIMEOUT_S
+            explicit_budget = cpu_explicit
         elif not universal_override and family in (
             "cuda", "rocm", "vulkan", "xpu",
         ):
@@ -610,7 +614,23 @@ def generate_timeout_s(
         # Device probing is advisory here; the configured universal bound is
         # still safe when a platform probe is unavailable during startup.
         pass
-    return base + (max(0, len(text or "") - 1200) / 40.0)
+
+    # If the engine specifies its own sidecar receive timeout (e.g. SubprocessBackend
+    # engines like Confucius, Dots, Moss, Supertonic), the outer execution budget
+    # must not cut the sidecar off early (#2103). A bounded 5s grace period ensures
+    # the sidecar's watchdog timer fires and surfaces its actionable timeout error
+    # before the outer pool cancellation cuts it off.
+    sidecar_grace = 0.0
+    if not explicit_budget and engine is not None and hasattr(engine, "recv_timeout_s"):
+        try:
+            sidecar_timeout = float(engine.recv_timeout_s)
+            if math.isfinite(sidecar_timeout) and sidecar_timeout > 0:
+                base = max(base, sidecar_timeout)
+                sidecar_grace = 5.0 if _include_sidecar_grace else 0.0
+        except (TypeError, ValueError):
+            pass  # Invalid optional engine metadata cannot disable the outer guard.
+
+    return base + (max(0, len(text or "") - 1200) / 40.0) + sidecar_grace
 
 
 def _retry_after_estimate(stats: dict) -> float:
@@ -726,6 +746,8 @@ async def run_on_gpu_pool_guarded(fn, *, what: str = "GPU job",
     finalizer. Normal completion never calls it. This lets request-owned temp
     files outlive abandoned workers without delaying ordinary requests (#1668).
     """
+    from services.inference_cancellation import InferenceCancellation
+    cancellation = InferenceCancellation()
     loop = asyncio.get_running_loop()
     ex = executor if executor is not None else _get_gpu_pool()
     # Resolved at CALL time, not def time, so monkeypatching/reloading the
@@ -768,7 +790,8 @@ async def run_on_gpu_pool_guarded(fn, *, what: str = "GPU job",
         except RuntimeError:
             pass  # loop already closed (caller vanished) — still run the job
         try:
-            return _inner()
+            with cancellation.activate():
+                return _inner()
         finally:
             # Idents are reused by the OS; a stale heartbeat under this ident
             # must not vouch for some future job on the same thread.
@@ -783,6 +806,7 @@ async def run_on_gpu_pool_guarded(fn, *, what: str = "GPU job",
     fut = asyncio.wrap_future(concurrent_fut, loop=loop)
 
     def _abandon() -> None:
+        cancellation.cancel()
         # Keep the concurrent future so we can distinguish a job cancelled out
         # of the queue from a thread that Python cannot stop once it has begun.
         cancelled_before_start = concurrent_fut.cancel()
@@ -846,6 +870,10 @@ async def run_on_gpu_pool_guarded(fn, *, what: str = "GPU job",
     _soft_deadline = _t0 + timeout
     _hard_deadline = _soft_deadline + MODEL_LOAD_EXTRA_TIMEOUT_S
     _extended = False
+
+    class _ExecutionDeadlineExceeded(Exception):
+        """Internal deadline, distinct from a worker's own TimeoutError."""
+
     try:
         while True:
             _now = time.monotonic()
@@ -862,7 +890,12 @@ async def run_on_gpu_pool_guarded(fn, *, what: str = "GPU job",
                 if (_last is None
                         or _now - _last > _grace
                         or _now >= _hard_deadline):
-                    raise asyncio.TimeoutError()
+                    # A worker clears its heartbeat before the asyncio wrapper
+                    # receives its result. Prefer completed work over a timeout
+                    # snapshot taken just before that completion.
+                    if concurrent_fut.done():
+                        return await fut
+                    raise _ExecutionDeadlineExceeded()
                 if not _extended:
                     _extended = True
                     logger.info(
@@ -889,7 +922,7 @@ async def run_on_gpu_pool_guarded(fn, *, what: str = "GPU job",
         _abandon()
         fut.add_done_callback(_swallow_abandoned)
         raise
-    except asyncio.TimeoutError as timeout_exc:
+    except _ExecutionDeadlineExceeded as timeout_exc:
         # Parity with the old wait_for semantics: cancel the asyncio wrapper;
         # the worker thread keeps going regardless. Consume whatever it
         # eventually produces.
@@ -1372,7 +1405,7 @@ _last_used = time.time()
 # Updated by _load_model_sync() so get_model_status() can report
 # granular progress to the frontend pill.
 _loading_detail: dict = {
-    "sub_stage": None,   # importing | loading_weights | loading_asr | compiling | ready | error
+    "sub_stage": None,   # importing | loading_weights | compiling | ready | error
     "detail": "",        # human-readable description
     "error": None,       # error message string if failed
     "progress": None,    # 0-100 percentage (None = indeterminate)
@@ -1565,10 +1598,13 @@ def _is_compile_runtime_failure(exc: BaseException) -> bool:
     """True when an exception originates in the torch.compile stack (Dynamo /
     Inductor / Triton / FX / CUDA-graph trees) rather than in the model itself.
 
-    #278: on GPU architectures Triton doesn't support yet (e.g. Blackwell
-    sm_120), the compiled model dies mid-generation with errors like
-    "Detected that you are using FX to symbolically trace a dynamo-optimized
-    function" or an AssertionError out of torch/_inductor/cudagraph_trees.py.
+    #278: an independent compile-stack failure can surface during generation
+    as an AssertionError out of torch/_inductor/cudagraph_trees.py. An
+    architecture missing from the running torch build's arch list is rejected
+    earlier by should_torch_compile(), before this runtime fallback applies.
+    #278 also quotes "Detected that you are using FX to symbolically trace a
+    dynamo-optimized function"; Dynamo raises that on any device, CPU included,
+    so it is a compile-stack error to catch here but never an arch signal.
     Walks the exception chain and checks (a) the exception type's module,
     (b) the message, (c) the traceback file paths — the cudagraph case is a
     bare AssertionError, so the traceback check is load-bearing.
@@ -1793,6 +1829,64 @@ _TORCH_COMPILE_MODE = "reduce-overhead"
 # would not.
 _CUDAGRAPH_COMPILE_MODES = frozenset({"reduce-overhead", "max-autotune"})
 
+# ── #2135: CUDA-graph capture needs Ampere or newer ─────────────────────────
+# On a Turing T4 (sm_75) the cudagraph mode above took the whole backend
+# process down on the first generate — no Python traceback, no HTTP response,
+# just a dead PID (the native capture aborts below the interpreter, so neither
+# the #278 eager fallback nor any `except` can see it). The graph *capture* is
+# the risky part, not Inductor: dropping to the non-cudagraph "default" mode
+# keeps the compiled kernels (and most of the speedup) while removing the
+# crash surface. Ampere (sm_80) is the floor because that is where the app has
+# actual passing evidence; anything older takes the conservative path.
+_CUDAGRAPH_MIN_CAPABILITY = (8, 0)
+# Escape hatch in the other direction, for operators benchmarking on old GPUs.
+_FORCE_CUDAGRAPH_ENV = "OMNIVOICE_FORCE_CUDAGRAPH"
+
+
+def _resolve_compile_mode() -> str:
+    """The ``torch.compile`` mode to use on this GPU (#2135).
+
+    Returns the configured cudagraph mode on Ampere+, and the non-cudagraph
+    ``"default"`` on older architectures where graph capture has been observed
+    to abort the process. Fails *safe* (→ "default") only when we positively
+    identify a pre-Ampere device; any probe error keeps the configured mode so
+    a weird torch build doesn't silently lose the optimization.
+    """
+    if _TORCH_COMPILE_MODE not in _CUDAGRAPH_COMPILE_MODES:
+        return _TORCH_COMPILE_MODE
+    if os.environ.get(_FORCE_CUDAGRAPH_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        logger.warning(
+            "%s=1 — keeping torch.compile mode %r on a GPU where CUDA-graph "
+            "capture is not known-good (#2135).",
+            _FORCE_CUDAGRAPH_ENV, _TORCH_COMPILE_MODE,
+        )
+        return _TORCH_COMPILE_MODE
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return _TORCH_COMPILE_MODE
+        capability = torch.cuda.get_device_capability(0)
+    except Exception:
+        logger.debug("compile-mode capability probe failed; keeping %r",
+                     _TORCH_COMPILE_MODE, exc_info=True)
+        return _TORCH_COMPILE_MODE
+    if tuple(capability) >= _CUDAGRAPH_MIN_CAPABILITY:
+        return _TORCH_COMPILE_MODE
+    try:
+        device_name = torch.cuda.get_device_name(0)
+    except Exception:
+        device_name = "this GPU"
+    logger.info(
+        "torch.compile mode %r downgraded to 'default' on %s (sm_%d%d): CUDA-graph "
+        "capture below sm_%d%d has been seen to abort the backend process (#2135). "
+        "Compiled kernels are still used. Set %s=1 to override.",
+        _TORCH_COMPILE_MODE, device_name, capability[0], capability[1],
+        _CUDAGRAPH_MIN_CAPABILITY[0], _CUDAGRAPH_MIN_CAPABILITY[1],
+        _FORCE_CUDAGRAPH_ENV,
+    )
+    return "default"
+
 _compiled_inference_executor: "ThreadPoolExecutor | None" = None
 _compiled_inference_thread_ident: "int | None" = None
 
@@ -1851,6 +1945,15 @@ def _set_loading(sub_stage: str, detail: str = "", error: str | None = None, pro
     _loading_detail["detail"] = detail
     _loading_detail["error"] = error
     _loading_detail["progress"] = progress
+    # Model state is a declared real-time event. Emit only at these explicit
+    # lifecycle transitions; high-frequency Hugging Face byte progress updates
+    # write the dict directly and remain covered by the active one-second poll.
+    try:
+        from core import event_bus
+
+        event_bus.emit("model_status", {"sub_stage": sub_stage})
+    except Exception:
+        logger.debug("Could not publish model status", exc_info=True)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -2577,8 +2680,11 @@ def _load_model_sync():
 
             if not flashinfer_applied and should_torch_compile(device):
                 _set_loading("compiling", "Compiling model (torch.compile)…")
+                # #2135: resolved per-GPU — pre-Ampere drops to the
+                # non-cudagraph mode rather than risking a native abort.
+                compile_mode = _resolve_compile_mode()
                 try:
-                    _model.llm = torch.compile(_model.llm, mode=_TORCH_COMPILE_MODE)
+                    _model.llm = torch.compile(_model.llm, mode=compile_mode)
                 except Exception as compile_exc:
                     # #278: compile is an optimization, never a point of
                     # failure — keep the eager model and remember the failure
@@ -2595,7 +2701,7 @@ def _load_model_sync():
                     # archs, #278). Wrap generate so that falls back to eager
                     # instead of failing the generation.
                     _install_compile_fallback(_model)
-                    if _TORCH_COMPILE_MODE in _CUDAGRAPH_COMPILE_MODES:
+                    if compile_mode in _CUDAGRAPH_COMPILE_MODES:
                         # #315: reduce-overhead uses CUDA graphs, whose
                         # captured state is thread-local. Pin all inference to
                         # one dedicated thread so a later render dispatched to
@@ -2606,11 +2712,29 @@ def _load_model_sync():
                         logger.info(
                             "torch.compile mode %r uses CUDA graphs — compiled-model "
                             "inference pinned to a single dedicated thread (#315).",
-                            _TORCH_COMPILE_MODE,
+                            compile_mode,
                         )
-                    logger.info("torch.compile applied.")
+                    logger.info("torch.compile applied (mode=%r).", compile_mode)
         except Exception as e:
             logger.info("torch.compile skipped: %s", e)
+
+        # Bind status identity to the object that actually finished loading.
+        # Resolving preferences later can name a newly-selected checkpoint
+        # while the previous one is still resident, and process-global load
+        # metadata can be overwritten by a loader that completed after its
+        # caller timed out. Instance metadata keeps /model/status honest.
+        try:
+            setattr(_model, "_voicestudio_checkpoint", checkpoint)
+            setattr(
+                _model,
+                "_voicestudio_loaded_at",
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            )
+        except Exception:
+            # OmniVoice is an ordinary nn.Module and accepts attributes, but
+            # a future slotted/proxied model must still be usable. Status falls
+            # back to the effective configured checkpoint below.
+            logger.debug("Could not attach resident model identity", exc_info=True)
 
         _set_loading("ready", "Model ready", progress=100)
         logger.info("VoiceStudio model loaded successfully.")
@@ -3030,20 +3154,41 @@ def get_model_status():
         is_loading = False
 
     status = "loading" if is_loading else ("ready" if is_loaded else "idle")
+    checkpoint = None
+    loaded_at = None
+    if is_loaded:
+        checkpoint = getattr(model, "_voicestudio_checkpoint", None)
+        loaded_at = getattr(model, "_voicestudio_loaded_at", None)
+        if not checkpoint:
+            try:
+                checkpoint = resolve_omnivoice_checkpoint()
+            except Exception:
+                # Status is a recovery surface. A broken preferences layer
+                # must not turn a resident-model query into a 500.
+                logger.debug("Could not resolve resident model identity", exc_info=True)
+
     result = {
         "loaded": is_loaded,
         "loading": is_loading,
         "status": status,
     }
-    # Attach sub-stage detail when loading or after an error
+    if checkpoint is not None:
+        result["checkpoint"] = checkpoint
+    if loaded_at is not None:
+        result["loaded_at"] = loaded_at
+    # Attach sub-stage detail only while it describes the current resident/load
+    # state, or when a failure must remain actionable. A completed model can be
+    # unloaded while the last successful "ready" detail remains in memory.
+    # Publishing that stale detail alongside status=idle/loaded=false gives
+    # clients two contradictory readiness states.
     sub = _loading_detail.get("sub_stage")
-    if sub:
+    err = _loading_detail.get("error")
+    if sub and (is_loading or is_loaded or err):
         result["sub_stage"] = sub
         result["detail"] = _loading_detail.get("detail", "")
         progress = _loading_detail.get("progress")
         if progress is not None:
             result["progress"] = progress
-        err = _loading_detail.get("error")
         if err:
             result["error"] = err
     return result
@@ -3160,7 +3305,7 @@ def _clear_cublas_workspaces(torch) -> None:
 
 
 def free_vram():
-    """Release cached GPU memory on any accelerator (CUDA, MPS, XPU)."""
+    """Release cached GPU memory on any accelerator (CUDA, MPS, XPU, NPU)."""
     torch = _lazy_torch()
     import gc
     gc.collect()
@@ -3171,6 +3316,8 @@ def free_vram():
         torch.mps.empty_cache()
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
         torch.xpu.empty_cache()
+    elif hasattr(torch, "npu") and torch.npu.is_available():
+        torch.npu.empty_cache()
 
 
 def unload_shared_model() -> bool:
@@ -3212,6 +3359,8 @@ def _has_dedicated_vram():
     if torch.cuda.is_available():
         return True
     if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return True
+    if hasattr(torch, "npu") and torch.npu.is_available():
         return True
     return False
 
@@ -3430,6 +3579,7 @@ _diar_pipeline = None
 DIARIZATION_ERR_NO_TOKEN = "NO_TOKEN"
 DIARIZATION_ERR_LICENSE  = "PYANNOTE_LICENSE_REQUIRED"
 DIARIZATION_ERR_LOAD     = "LOAD_FAILED"
+DIARIZATION_ERR_MISSING  = "MODEL_MISSING"
 
 
 def _classify_diarization_error(exc: BaseException) -> str:
@@ -3446,13 +3596,14 @@ def _classify_diarization_error(exc: BaseException) -> str:
     """
     name = type(exc).__name__.lower()
     msg = str(exc).lower()
+    if "localentrynotfounderror" in name or isinstance(exc, FileNotFoundError):
+        return DIARIZATION_ERR_MISSING
     if (
         "401" in msg
         or "403" in msg
         or "unauthorized" in msg
         or "gated" in msg
         or "accept" in msg and ("license" in msg or "terms" in msg or "user conditions" in msg)
-        or "hfhubhttperror" in name
         or "gatedrepoerror" in name
         or "repositorynotfounderror" in name and "gated" in msg
     ):
@@ -3513,6 +3664,15 @@ def get_diarization_pipeline(return_error: bool = False):
     a docs deeplink — issue #78.
     """
     global _diar_pipeline
+    from services.diarization_runtime import SORTFORMER, selected_backend
+    if selected_backend() == SORTFORMER:
+        try:
+            from services.diarization_native import NativeSortformer
+            pipeline = NativeSortformer()
+            return (pipeline, None) if return_error else pipeline
+        except Exception as exc:
+            logger.exception("Could not prepare native Sortformer")
+            return (None, _classify_diarization_error(exc)) if return_error else None
     if _diar_pipeline is not None:
         return (_diar_pipeline, None) if return_error else _diar_pipeline
 
@@ -3521,9 +3681,9 @@ def get_diarization_pipeline(return_error: bool = False):
     # reads HF tokens, and that place is `token_resolver.resolve()`.
     from services import token_resolver
     resolved = token_resolver.resolve()
-    if not resolved:
-        return (None, DIARIZATION_ERR_NO_TOKEN) if return_error else None
-    hf_token = resolved.token
+    # Access is checked during explicit installation. An already-installed
+    # local bundle remains usable after a token expires or is removed.
+    hf_token = resolved.token if resolved else False
     try:
         torch = _lazy_torch()
         _ensure_pyannote_hf_token_compat()  # #167: use_auth_token -> token
@@ -3541,16 +3701,41 @@ def get_diarization_pipeline(return_error: bool = False):
             logger.debug("pyannote safe-globals allowlist skipped: %s", _glob_e)
         from pyannote.audio import Pipeline
         logger.info("Loading Pyannote Diarization Pipeline...")
-        _diar_pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token)
+        from services.diarization_local import local_pipeline_config
+        with local_pipeline_config() as config_path:
+            pipeline = Pipeline.from_pretrained(config_path, use_auth_token=hf_token)
+        if pipeline is None:
+            raise RuntimeError("The installed diarisation pipeline could not be loaded")
         device = get_best_device()
         # Pyannote supports CUDA and CPU; route XPU/DirectML to CPU
         if device in ("cuda",):
-            _diar_pipeline.to(torch.device(device))
+            pipeline.to(torch.device(device))
+        _diar_pipeline = pipeline
         logger.info("Pyannote Diarization Pipeline loaded on %s.", device)
         return (_diar_pipeline, None) if return_error else _diar_pipeline
     except Exception as e:
         err_class = _classify_diarization_error(e)
+        # Without a token, a missing local bundle means the user must connect
+        # Hugging Face before the explicit install can run. Once installed,
+        # local_pipeline_config succeeds and diarisation remains fully local.
+        if resolved is None and err_class == DIARIZATION_ERR_MISSING:
+            err_class = DIARIZATION_ERR_NO_TOKEN
         logger.exception(
             "Failed to load Pyannote pipeline (class=%s)", err_class,
         )
         return (None, err_class) if return_error else None
+
+
+def unload_diarization_pipeline() -> bool:
+    """Release a resident pyannote pipeline after the runtime changes."""
+    global _diar_pipeline
+    pipeline = _diar_pipeline
+    _diar_pipeline = None
+    if pipeline is None:
+        return False
+    del pipeline
+    try:
+        free_vram()
+    except Exception:
+        logger.debug("Could not clear accelerator cache after diarisation unload", exc_info=True)
+    return True
