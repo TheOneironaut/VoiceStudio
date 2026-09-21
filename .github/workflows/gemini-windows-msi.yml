@@ -2,142 +2,136 @@ name: Gemini Windows MSI
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "omnivoice/**"
+      - "electron/**"
+      - "frontend/package.json"
+      - "package.json"
+      - "bun.lock"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/gemini-windows-msi.yml"
   push:
     branches: [main]
     paths:
       - "backend/**"
       - "omnivoice/**"
-      - "frontend/**"
+      - "electron/**"
+      - "frontend/package.json"
       - "package.json"
       - "bun.lock"
       - "pyproject.toml"
       - "uv.lock"
       - "README.md"
       - "CHANGELOG.md"
-      - "scripts/verify-windows-msi.ps1"
-      - "scripts/smoke-gemini-windows.ps1"
-      - "scripts/inject-apprun.sh"
       - ".github/workflows/gemini-windows-msi.yml"
 
 permissions:
   contents: write
 
 concurrency:
-  group: gemini-windows-msi
+  group: gemini-windows-msi-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  RUST_TARGET: x86_64-pc-windows-msvc
+  VOICESTUDIO_EDITION: gemini
+  VOICESTUDIO_RUST_TARGET: x86_64-pc-windows-msvc
+  VOICESTUDIO_UPDATE_CHANNEL: gemini-disabled-win32-x64
   RELEASE_TAG: gemini-windows
   MSI_NAME: VoiceStudio-Gemini-Windows-x64.msi
+  CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
 jobs:
   build:
-    name: Build and publish Windows MSI
-    if: github.ref == 'refs/heads/main'
+    name: Build and publish Gemini Electron MSI
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
         with:
-          targets: ${{ env.RUST_TARGET }}
+          node-version: "22"
 
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
         with:
-          workspaces: frontend/src-tauri -> target
-          key: ${{ env.RUST_TARGET }}-gemini
+          bun-version: "1.4.2"
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
-
-      - name: Cache Bun dependencies
-        uses: actions/cache@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          path: ~/.bun/install/cache
-          key: windows-bun-${{ hashFiles('frontend/bun.lock', 'bun.lock') }}
-          restore-keys: windows-bun-
+          targets: ${{ env.VOICESTUDIO_RUST_TARGET }}
 
-      - name: Install frontend dependencies
-        working-directory: frontend
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/desktop-bridge -> target
+          key: gemini-electron-${{ env.VOICESTUDIO_RUST_TARGET }}
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.13"
+          enable-cache: false
+
+      - name: Bundle pinned uv for Electron
+        shell: pwsh
+        run: |
+          $source = (Get-Command uv).Source
+          $destination = "electron/build/uv/uv-$env:VOICESTUDIO_RUST_TARGET.exe"
+          New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination
+
+      - name: Install locked dependencies
         run: bun install --frozen-lockfile
 
-      - name: Bundle uv
+      - name: Validate Electron
+        run: bun run check:electron
+
+      - name: Build Gemini Electron MSI
+        working-directory: electron
+        run: |
+          bun x electron-builder --config electron-builder.gemini-windows.config.mjs --win msi --x64 --publish never
+          node tests/gemini-windows-package-contract.mjs --artifact
+
+      - name: Install managed runtime and verify Gemini default
+        working-directory: electron
+        timeout-minutes: 25
+        env:
+          VOICESTUDIO_PACKAGED_EXE: electron/release/win-unpacked/VoiceStudio Gemini.exe
+          VOICESTUDIO_EXPECTED_TTS_ENGINE: gemini-3.1-flash-tts
+          VOICESTUDIO_RUNTIME_TIMEOUT_MS: "1200000"
+        run: node tests/packaged-smoke.mjs --install
+
+      - name: Stage rolling MSI
         shell: pwsh
         run: |
-          $version = "0.11.7"
-          $archive = Join-Path $env:RUNNER_TEMP "uv.zip"
-          $expanded = Join-Path $env:RUNNER_TEMP "uv"
-          Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/$version/uv-$env:RUST_TARGET.zip" -OutFile $archive
-          Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
-          New-Item -ItemType Directory -Force frontend/src-tauri/binaries | Out-Null
-          Copy-Item -LiteralPath (Join-Path $expanded "uv.exe") -Destination "frontend/src-tauri/binaries/uv-$env:RUST_TARGET.exe"
-
-      - name: Bundle FFmpeg
-        shell: pwsh
-        run: |
-          $archive = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
-          $expanded = Join-Path $env:RUNNER_TEMP "ffmpeg"
-          Invoke-WebRequest "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile $archive
-          Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
-          $bin = Get-ChildItem -LiteralPath $expanded -Directory | Select-Object -First 1 | ForEach-Object { Join-Path $_.FullName "bin" }
-          Copy-Item -LiteralPath (Join-Path $bin "ffmpeg.exe") -Destination "frontend/src-tauri/binaries/ffmpeg-$env:RUST_TARGET.exe"
-          Copy-Item -LiteralPath (Join-Path $bin "ffprobe.exe") -Destination "frontend/src-tauri/binaries/ffprobe-$env:RUST_TARGET.exe"
-
-      - name: Build MSI
-        working-directory: frontend
-        run: bun run tauri build --target $env:RUST_TARGET --bundles msi --config src-tauri/tauri.gemini-windows.conf.json
-
-      - name: Verify and stage MSI
-        shell: pwsh
-        run: |
-          $bundle = "frontend/src-tauri/target/$env:RUST_TARGET/release/bundle/msi"
-          $msi = Get-ChildItem -LiteralPath $bundle -Filter *.msi | Select-Object -First 1
-          if (-not $msi) { throw "Tauri did not produce an MSI in $bundle" }
-          & ./scripts/verify-windows-msi.ps1 -MsiPath $msi.FullName
+          $msi = "electron/release/$env:MSI_NAME"
+          if (-not (Test-Path -LiteralPath $msi)) { throw "Electron did not produce $msi" }
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item -LiteralPath $msi.FullName -Destination "dist/$env:MSI_NAME"
+          Copy-Item -LiteralPath $msi -Destination "dist/$env:MSI_NAME"
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$env:MSI_NAME").Hash.ToLowerInvariant()
           "$hash  $env:MSI_NAME" | Set-Content -Encoding ascii "dist/$env:MSI_NAME.sha256"
 
-      - name: Reclaim build space when the runner is tight
-        shell: pwsh
-        run: |
-          $free = (Get-PSDrive -Name C).Free
-          Write-Host ("Free disk before installed-app smoke: {0:N1} GB" -f ($free / 1GB))
-          if ($free -lt 10GB) {
-            Remove-Item -LiteralPath "frontend/src-tauri/target/$env:RUST_TARGET" -Recurse -Force
-            Write-Host "Removed the already-staged Rust build tree to make room for the real Python environment."
-          }
-
-      - name: Smoke-test installed Gemini app
-        timeout-minutes: 25
-        shell: pwsh
-        run: |
-          ./scripts/smoke-gemini-windows.ps1 `
-            -MsiPath "dist/$env:MSI_NAME" `
-            -LogDir "dist/smoke-logs" `
-            -ReadyTimeoutSeconds 1200
-
-      - name: Upload installed-app diagnostics
+      - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: gemini-windows-smoke-logs-${{ github.run_id }}
-          path: dist/smoke-logs
+          name: gemini-electron-windows-${{ github.run_id }}
+          path: |
+            electron/release/*.msi
+            electron/release/builder-debug.yml
           if-no-files-found: ignore
           retention-days: 7
 
       - name: Publish rolling Gemini release
+        if: github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Windows installer for the Gemini-default VoiceStudio build from commit $env:GITHUB_SHA. Existing engine preferences are preserved; new installations default to Gemini 3.1 Flash TTS and do not download a local TTS checkpoint."
+          $notes = "Windows Electron installer for the Gemini-default VoiceStudio build from commit $env:GITHUB_SHA. Existing engine preferences are preserved; new installations default to Gemini 3.1 Flash TTS and do not download a local TTS checkpoint."
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY 2>$null
           if ($LASTEXITCODE -ne 0) {
             gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title "VoiceStudio Gemini for Windows" --notes $notes

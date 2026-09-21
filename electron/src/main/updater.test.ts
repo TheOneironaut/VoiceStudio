@@ -65,6 +65,7 @@ vi.mock('./trusted-renderer', () => ({ isTrustedRenderer: mocks.trusted }));
 
 import {
   compareReleaseVersions,
+  desktopUpdatesSupported,
   DesktopUpdater,
   feedManifestName,
   listDesktopReleases,
@@ -72,6 +73,12 @@ import {
   resolvePreviewFeed,
   UPDATE_CHANNELS,
 } from './updater';
+
+test('disables upstream desktop updates for the Gemini fork edition', () => {
+  expect(desktopUpdatesSupported(true, 'gemini')).toBe(false);
+  expect(desktopUpdatesSupported(true, 'standard')).toBe(true);
+  expect(desktopUpdatesSupported(false, 'standard')).toBe(false);
+});
 
 function emit(event: string, value?: unknown) {
   for (const listener of mocks.handlers.get(event) || []) listener(value);

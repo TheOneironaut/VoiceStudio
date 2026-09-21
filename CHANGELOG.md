@@ -16,10 +16,11 @@ metadata and the backend fallback mirror it. Archived Tauri manifests stay froze
 
 ### Added
 
-- Gemini Windows releases install and launch the built MSI on a clean cloud runner before publication, with path-filtered builds, reused caches, and superseded PR runs cancelled. — thanks @TheOneironaut!
+- Gemini Windows releases package and smoke-test the maintained Electron desktop with the Gemini engine active before publishing the rolling MSI. (#13) — thanks @TheOneironaut!
 
 ### Fixed
 
+- Gemini Electron builds keep upstream desktop updates disabled and bundle the runtime-pinned uv binary instead of falling back to first-run PowerShell installation. (#13) — thanks @TheOneironaut!
 - Gemini Windows relies on the shell's Job Object instead of a redundant parent-pipe thread that blocked native imports and later API workers. — thanks @TheOneironaut!
 - Gemini Windows native imports stay on Python's main thread so later API worker threads start normally after cold setup. — thanks @TheOneironaut! (#8)
 - The Gemini Windows backend avoids a Windows native-import/thread-start deadlock that left Uvicorn listening while setup timed out after 300 seconds. — thanks @TheOneironaut!
