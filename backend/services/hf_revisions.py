@@ -15,6 +15,7 @@ _SHA = re.compile(r"[0-9a-f]{40}\Z")
 CURATED_REVISIONS: dict[str, str] = {
     "facebook/nllb-200-distilled-600M": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
     "k2-fsa/OmniVoice": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
+    "audio-cpp/audio.cpp-gguf": "dc6fecccc2b0c6bdda0a8b2f38fa61394fee0b9c",
     "Systran/faster-whisper-large-v3": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
     "mlx-community/whisper-large-v3-mlx": "49e6aa286ad60c14352c404340ded53710378a11",
     "mlx-community/whisper-large-v3-turbo": "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb",
@@ -38,6 +39,8 @@ CURATED_REVISIONS: dict[str, str] = {
     "csukuangfj/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23": "204ad334e2e683fd295359930cc16fc0432a23ac",
     "csukuangfj/sherpa-onnx-whisper-tiny": "65176e2deb88badc814a94058666cadccc29b61c",
     "pyannote/speaker-diarization-3.1": "84fd25912480287da0247647c3d2b4853cb3ee5d",
+    "pyannote/segmentation-3.0": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+    "pyannote/wespeaker-voxceleb-resnet34-LM": "837717ddb9ff5507820346191109dc79c958d614",
     "OpenMOSS-Team/MOSS-TTS-Nano-100M": "44502f80dbf9743528fa921cc544d662c685ebec",
     "KittenML/kitten-tts-mini-0.8": "c02725660cea441db4c383af69f1f26f5cd00947",
     "openbmb/VoxCPM2": "bffb3df5a29440629464e5e839f4d214c8714c3d",

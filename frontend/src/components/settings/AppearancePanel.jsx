@@ -13,12 +13,19 @@ import { useAppStore, FONT_OPTIONS, FONT_STACKS } from '../../store';
 import { SettingsSection, SettingRow, InfoHint, SettingsToggle } from './primitives';
 
 const THEMES = [
+  {
+    id: 'auto',
+    labelKey: 'settings.theme_auto',
+    defaultLabel: 'System Auto',
+    dot: 'linear-gradient(135deg, #fdf6e3 50%, #1d2021 50%)',
+  },
   { id: 'gruvbox', label: 'Gruvbox', dot: '#d3869b' },
   { id: 'midnight', label: 'Midnight', dot: '#8b5cf6' },
   { id: 'nord', label: 'Nord', dot: '#88c0d0' },
   { id: 'solarized', label: 'Solarized', dot: '#268bd2' },
   { id: 'rose-pine', label: 'Rosé Pine', dot: '#ebbcba' },
   { id: 'catppuccin', label: 'Catppuccin', dot: '#cba6f7' },
+  { id: 'light', labelKey: 'settings.theme_light', defaultLabel: 'Light', dot: '#1d6b9f' },
 ];
 
 /**
@@ -94,6 +101,8 @@ export default function AppearancePanel() {
   const setTheme = useAppStore((s) => s.setTheme);
   const font = useAppStore((s) => s.font);
   const setFont = useAppStore((s) => s.setFont);
+  const reduceMotion = useAppStore((s) => s.reduceMotion);
+  const setReduceMotion = useAppStore((s) => s.setReduceMotion);
   const autoPlayPreview = useAppStore((s) => s.autoPlayPreview);
   const setAutoPlayPreview = useAppStore((s) => s.setAutoPlayPreview);
   const showHeaderLiveStats = useAppStore((s) => s.showHeaderLiveStats);
@@ -202,8 +211,10 @@ export default function AppearancePanel() {
                 style={{ '--dot-color': th.dot }}
                 onClick={() => setTheme(th.id)}
                 onKeyDown={(e) => radioGroupKeyDown(e, themeIds, theme, setTheme)}
-                title={th.label}
-                aria-label={th.label}
+                title={th.labelKey ? t(th.labelKey, { defaultValue: th.defaultLabel }) : th.label}
+                aria-label={
+                  th.labelKey ? t(th.labelKey, { defaultValue: th.defaultLabel }) : th.label
+                }
                 aria-checked={theme === th.id}
                 role="radio"
                 tabIndex={radioTabIndex(themeIds, theme, th.id)}
@@ -277,6 +288,21 @@ export default function AppearancePanel() {
             aria-label={t('settings.header_live_stats', {
               defaultValue: 'Show live system metrics in header',
             })}
+          />
+        }
+      />
+
+      <SettingRow
+        title={t('settings.reduce_motion', { defaultValue: 'Reduce motion' })}
+        subtitle={t('settings.reduce_motion_desc', {
+          defaultValue:
+            'Stops background animation and transitions. Your system setting is honoured on its own; this adds to it.',
+        })}
+        control={
+          <SettingsToggle
+            checked={reduceMotion}
+            onChange={setReduceMotion}
+            aria-label={t('settings.reduce_motion', { defaultValue: 'Reduce motion' })}
           />
         }
       />

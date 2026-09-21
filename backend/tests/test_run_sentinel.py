@@ -113,6 +113,93 @@ def test_unclean_shutdown_yields_crash_record(sentinel_env, monkeypatch):
     assert acked is False, "a fresh crash record must be unacknowledged"
 
 
+def test_lifespan_clears_sentinel_even_if_later_shutdown_raises(monkeypatch, tmp_path):
+    """THE #1895 regression: before this fix, ``clear_sentinel()`` was the
+    LAST statement of ``main.py``'s lifespan shutdown, behind ~50s of bounded
+    waits plus model unload / ``free_vram()`` / ``gc.collect()`` / httpx
+    close. The desktop shell's quit path grants only a 2s grace before
+    SIGKILL (``frontend/src-tauri/src/bootstrap.rs``
+    ``terminate_process_tree``), and Windows grants no graceful phase at all
+    (``tools.rs``) — nowhere near enough, so a deliberate, clean quit
+    routinely got killed before reaching that last line, leaving the
+    sentinel behind for the NEXT startup to misreport as "did not shut down
+    cleanly... likely crashed".
+
+    Simulates that class of interruption without an actual SIGKILL: a later
+    shutdown step (``model_loads_begin_shutdown()``, called unguarded well
+    after the sentinel clear) raises, so nothing past it in the shutdown
+    body ever runs — for this purpose, the same effect as being killed
+    mid-teardown.
+
+    Fail-before/pass-after: with ``clear_sentinel()`` moved to the TOP of
+    the shutdown block (immediately after ``yield``), the sentinel is
+    already gone by the time this raise happens, so the next startup must
+    not fabricate a crash record.
+    """
+    import asyncio
+    from fastapi import FastAPI
+
+    # Fresh `main`/`core`/`api`/`services` import, mirroring
+    # tests/test_model_load_shutdown.py's `_reimported_backend_modules`: a
+    # sibling suite may have purged these names from sys.modules, leaving a
+    # collection-time alias stale. Purging and re-importing here makes this
+    # test self-consistent in isolation, not dependent on suite order.
+    purge_names = ("main", "core", "api", "services")
+    purge_prefixes = ("core.", "api.", "services.")
+    saved = {
+        name: mod for name, mod in sys.modules.items()
+        if name in purge_names or name.startswith(purge_prefixes)
+    }
+
+    def _purge():
+        for name in [
+            n for n in sys.modules
+            if n in purge_names or n.startswith(purge_prefixes)
+        ]:
+            sys.modules.pop(name, None)
+
+    _purge()
+    try:
+        import main as main_mod
+        from core import run_sentinel as fresh_run_sentinel
+
+        monkeypatch.setattr(
+            fresh_run_sentinel, "SENTINEL_PATH", str(tmp_path / "run_sentinel.json")
+        )
+        monkeypatch.setattr(
+            fresh_run_sentinel, "CRASH_RECORD_PATH", str(tmp_path / "last_run_crash.json")
+        )
+        monkeypatch.setattr(
+            fresh_run_sentinel, "LOG_PATH", str(tmp_path / "omnivoice.log")
+        )
+        fresh_run_sentinel._reset_for_tests()
+
+        def _boom():
+            raise RuntimeError("simulated kill: interrupted after the early clear")
+
+        monkeypatch.setattr(main_mod, "model_loads_begin_shutdown", _boom)
+
+        async def scenario():
+            app = FastAPI()
+            async with main_mod.lifespan(app):
+                pass
+
+        with pytest.raises(RuntimeError, match="simulated kill"):
+            asyncio.run(scenario())
+
+        assert not os.path.exists(fresh_run_sentinel.SENTINEL_PATH), (
+            "sentinel must already be cleared even though a later shutdown "
+            "step raised before ever reaching the old clear-sentinel line"
+        )
+        assert fresh_run_sentinel.detect_unclean_shutdown() is None, (
+            "a deliberate quit interrupted after the early clear must never "
+            "be reported as a crash on the next startup"
+        )
+    finally:
+        _purge()
+        sys.modules.update(saved)
+
+
 def test_live_pid_means_second_instance_not_a_crash(sentinel_env):
     """A sentinel owned by a LIVE process is a concurrent second instance
     sharing DATA_DIR — never a crash, and we must not take over or delete
@@ -197,17 +284,40 @@ def test_touch_activity_without_ownership_never_writes(sentinel_env):
     assert not os.path.exists(run_sentinel.SENTINEL_PATH)
 
 
+def test_idle_shell_exit_is_retained_without_becoming_a_user_warning(sentinel_env):
+    record = {
+        "last_activity": None,
+        "log_tail": [
+            "INFO VoiceStudio model loaded successfully.",
+            "INFO Preload complete - model ready.",
+        ],
+    }
+    assert run_sentinel.warrants_user_notice(record) is False
+
+
+def test_interrupted_work_or_fatal_startup_still_warrants_a_warning(sentinel_env):
+    assert run_sentinel.warrants_user_notice(
+        {"last_activity": {"kind": "generate"}, "log_tail": []}
+    ) is True
+    assert run_sentinel.warrants_user_notice(
+        {"last_activity": None, "log_tail": ["CRITICAL: native runtime failed"]}
+    ) is True
+
+
 # ── Record store semantics (mirrors crash.rs) ──────────────────────────────
 
 
 def _crash_once(kind="generate"):
+    last_activity = None
+    if kind is not None:
+        last_activity = {"ts": time.time() - 5, "kind": kind, "detail": None}
     with open(run_sentinel.SENTINEL_PATH, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "pid": _dead_pid(),
                 "started_at": time.time() - 60,
                 "version": run_sentinel.APP_VERSION,
-                "last_activity": {"ts": time.time() - 5, "kind": kind, "detail": None},
+                "last_activity": last_activity,
             },
             f,
         )
@@ -334,3 +444,15 @@ def test_notification_surfaces_unacked_crash_and_reack(client):
     fresh = [n for n in notes if n["id"].startswith("last-run-crash-")]
     assert len(fresh) == 1
     assert fresh[0]["id"] != crash_notes[0]["id"]
+
+
+def test_notification_keeps_idle_exit_forensics_without_repeated_warning(client):
+    record = _crash_once(kind=None)
+    assert record is not None
+
+    notes = client.get("/system/notifications").json()["notifications"]
+    assert not [n for n in notes if n["id"].startswith("last-run-crash-")]
+
+    details = client.get("/system/last-run-crash").json()
+    assert details["record"]["detected_at"] == record["detected_at"]
+    assert details["acknowledged"] is False

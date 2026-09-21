@@ -38,7 +38,7 @@ Before touching any knob, check these — they account for most slowness reports
    - **Settings → About → Run self-check** (the `/system/diagnose` endpoint)
      warns explicitly: *"cpu (no GPU acceleration detected)"* with a hint
      about drivers.
-   - **Model Catalogue → Engines** shows a routing badge per engine — "GPU active",
+   - **Model Catalogue** shows a routing badge per engine — "GPU active",
      "CPU fallback", or "CPU" — with the *reason* shown as small text under
      the badge (full text on hover).
    Note: **GPU acceleration on Windows is NVIDIA/CUDA-only** — AMD and Intel
@@ -92,7 +92,8 @@ None of them are required — the defaults are chosen for the common case.
 | `OMNIVOICE_UNIFIED_OFFLOAD_HEADROOM_GB` | `6` | On unified memory (Apple Silicon): if free RAM is below this when a dub needs the transcription model, the TTS model is fully released first (it reloads on the next generation). Raise to be more aggressive about freeing, lower on 32 GB+ machines to avoid the reload. |
 | `OMNIVOICE_INDEXTTS_FP16` | `1` | IndexTTS half-precision. Leave on. |
 | `OMNIVOICE_ASR_VRAM_PREFLIGHT` | `1` | Downgrade transcription precision instead of crashing when VRAM is short (CUDA). Leave on. |
-| `OMNIVOICE_GENERATE_TIMEOUT_S` | `300` | Abandon a generation after this many seconds **of actual compute** — the clock starts when a GPU worker picks the job up, never while it waits in line. It's a floor, not a ceiling: the budget grows with the text (+1 s per 40 characters past the first 1200), so long inputs rarely need this raised. |
+| `OMNIVOICE_GENERATE_TIMEOUT_S` | `300` | Abandon a generation after this many seconds **of actual compute** on an accelerated (GPU-family) host — the clock starts when a worker picks the job up, never while it waits in line. It's a floor, not a ceiling: the budget grows with the text (+1 s per 40 characters past the first 1200), so long inputs rarely need this raised. A **CUDA or ROCm** GPU with less dedicated VRAM than the engine declares it needs is the exception — it pages to system RAM and renders slower than the same machine's CPU, so it floors at `OMNIVOICE_CPU_GENERATE_TIMEOUT_S` below instead. Apple Silicon (MPS) is not included: its reported VRAM is a heuristic over a *unified* memory pool, not a dedicated one, so there is no comparable floor to measure it against. Setting **this** var explicitly turns that off — an explicit value here is the base on every device, under-provisioned or not, so lowering it to fail fast still works. Also settable from **Settings → Performance & Device → Compute-time budget** (persists to `prefs.json`; takes effect on the next backend restart, same as `OMNIVOICE_DEVICE` above). |
+| `OMNIVOICE_CPU_GENERATE_TIMEOUT_S` | `600` | Same budget, for hosts that render on the CPU — correct CPU synthesis legitimately takes longer than the accelerated floor, so it gets its own, higher one. It is also the floor a CUDA/ROCm GPU below the engine's declared VRAM floor gets, since that is the performance class it actually falls into. An explicit value here always governs CPU-family generation, independent of `OMNIVOICE_GENERATE_TIMEOUT_S` above — that var only doubles as a CPU floor when *this* one is left unset (a legacy shortcut: setting only `OMNIVOICE_GENERATE_TIMEOUT_S` lowers the watchdog everywhere with one var). Also settable from **Settings → Performance & Device**, which flags a row an external env var is already shadowing instead of claiming a save will apply. |
 | `OMNIVOICE_ENGINE_IMPORT_PROBE_TIMEOUT_S` | `60` | How long to wait while checking that a sidecar engine's virtualenv can import the engine. Only affects how quickly a *broken* venv is ruled out — a probe that runs out of time is treated as "unproven", and the venv is used anyway, so a slow machine is never told its engine is missing. Per-engine override: `OMNIVOICE_INDEXTTS_IMPORT_PROBE_TIMEOUT_S` (and the same shape for `CONFUCIUS4`, `DOTS_TTS`, `MOSS_TTS_V15`). |
 | `OMNIVOICE_GPU_QUEUE_TIMEOUT_S` | `1800` | How long a job may sit in the GPU queue before it's reported as a saturated pool (a retryable condition — nothing ran). Waiting is normal on 1-worker machines; lower this only if you'd rather fail fast than queue. |
 
@@ -101,9 +102,20 @@ where the runtime check says it can work (a CUDA device with Triton importable
 and a supported GPU architecture) and skipped automatically everywhere else —
 MPS, CPU, and the typical Windows install (Triton ships no Windows wheel).
 The one user-facing control is Settings → Performance → "Disable
-torch.compile" (shown on Windows), for the rare setup where a partial Triton
-install makes the probe pass but the compile attempt itself crash — see
-[Windows install notes](install/windows.md).
+torch.compile", available on every platform, for the setup where the probe
+passes but the compile attempt itself misbehaves — a partial Triton install,
+or a GPU whose compiled kernels crash the engine. Setting
+`TORCH_COMPILE_DISABLE=1` (or `TORCHDYNAMO_DISABLE=1`) in the environment does
+the same thing and is honoured by both the in-process engine and every engine
+subprocess. See [Windows install notes](install/windows.md).
+
+On CUDA the compile **mode** is chosen per GPU: Ampere (sm_80) and newer use
+`reduce-overhead`, which captures CUDA graphs; older cards (Turing/Volta, e.g.
+the Tesla T4) fall back to the plain `default` mode, because graph capture was
+observed to abort the whole backend process there
+([#2135](https://github.com/debpalash/VoiceStudio/issues/2135)). They still get
+compiled Inductor kernels. `OMNIVOICE_FORCE_CUDAGRAPH=1` restores the
+cudagraph mode if you want to benchmark it.
 
 ## Warnings before a slow generation
 
@@ -115,14 +127,32 @@ editor, profile previews, and streaming).
 
 | Situation | What you see |
 | --- | --- |
-| The engine declares a VRAM floor above what this GPU has, or routing fell back to CPU | The routing caveat, naming your card, the engine's floor, and the ways around it |
+| The engine declares a VRAM floor above what this GPU has, or routing fell back to CPU | The routing caveat, naming your card, the engine's floor, and the ways around it. A CUDA/ROCm card below the floor is also *budgeted* as the CPU-class hardware it performs like — it gets the larger CPU/accelerated base unless `OMNIVOICE_GENERATE_TIMEOUT_S` is explicitly set |
 | The host synthesizes on the CPU **and** the text is over 1200 characters | A heads-up that this generation may exceed the time budget |
+| The host synthesizes on Apple Silicon (MPS) **and** the text is over 1200 characters | The same heads-up — MPS gets the accelerated-host budget (`OMNIVOICE_GENERATE_TIMEOUT_S`), which a long render can still legitimately exceed |
 
 **Why 1200 characters:** it is the same figure the budget itself uses. The first
-1200 characters get the flat `OMNIVOICE_GENERATE_TIMEOUT_S`, and only past that
-does the budget start growing (+1 s per 40 characters). Below the threshold you
-are inside a budget the backend already considers generous, so ordinary
-sentences on a CPU laptop stay quiet.
+1200 characters get the flat base budget, and only past that does the budget
+start growing (+1 s per 40 characters). Below the threshold you are inside a
+budget the backend already considers generous, so ordinary sentences on a CPU
+laptop stay quiet.
+
+**Which base applies:**
+
+| Host | Base budget |
+| --- | --- |
+| Renders on the CPU | `OMNIVOICE_CPU_GENERATE_TIMEOUT_S` |
+| CUDA/ROCm GPU below the engine's declared VRAM floor, when `OMNIVOICE_GENERATE_TIMEOUT_S` is not explicitly set | `OMNIVOICE_CPU_GENERATE_TIMEOUT_S` (whichever of the two is larger) |
+| Any other accelerated host, MPS included | `OMNIVOICE_GENERATE_TIMEOUT_S` |
+
+Both rows above can be overridden, and the two vars are independent:
+
+- An explicit `OMNIVOICE_CPU_GENERATE_TIMEOUT_S` always governs CPU-family
+  generation, even when the accelerated var is also set.
+- An explicit `OMNIVOICE_GENERATE_TIMEOUT_S` is used verbatim on every
+  accelerated host — **including** an under-provisioned one, which then keeps
+  the value you chose rather than being floored. That is deliberate: it is what
+  lets you lower the watchdog to fail fast everywhere with one setting.
 
 Both warnings are **advisory** — nothing is blocked. A driver can page to system
 RAM, and a short input fits where a long one does not, so the engine still runs
@@ -164,7 +194,7 @@ drain, or restart the backend, and then Flush.
   - **Unload all + flush** — the above **plus** fully unloads the resident
     TTS model. Frees the most memory; the next generation pays the ~8 s
     reload.
-- **Model Catalogue → Models** — rows whose weights are resident right now show an
+- the engine's **Weights** list in **Model Catalogue** — rows whose weights are resident right now show an
   "In memory" badge with the same per-model **Unload** button.
 
 **From a script** (the local API on port 3900), the same operations:
@@ -215,7 +245,7 @@ CPU ASR, the crash-isolated ASR engine).
   to 3-4 concurrent generations (API/batch workloads); ≤10 GB deliberately
   serializes.
 - **CPU-only**: expect ~2x slower than MPS, more against CUDA. Prefer the
-  smaller/faster engines (see Model Catalogue → Engines) and short reference clips.
+  smaller/faster engines (see Model Catalogue) and short reference clips.
 
 ## Measuring instead of guessing
 
@@ -249,9 +279,12 @@ but with **operation-count budgets** in
   makes **zero** TTS calls. The zero-decode / zero-rewrite budget activates
   with the natural-rate cached fast path (each cache is then decoded exactly
   once, by the final assembly).
-- **Batch dubbing (native batches)**: N renderable segments at batch width W
+- **Dubbing synthesis (native batches)**: N renderable segments at batch width W
   cost exactly ⌈N/W⌉ `generate_batch` calls and zero per-segment `generate`
-  calls when native batching is enabled.
+  calls when native batching is enabled, in both interactive and queued jobs.
+- **NLLB dubbing translation**: rows sharing a target language render in
+  bounded batches instead of one model forward per subtitle. Mixed targets
+  retain their request order, and a failed batch retries per row.
 
 Updating a budget is a deliberate act: if a change legitimately adds an
 operation to a guarded path, change the expected count in the same PR with a
@@ -260,7 +293,7 @@ comment justifying the new floor. Never loosen a budget just to make CI pass
 
 ## Batch and streaming behavior
 
- Batch dubbing renders several segments in one native forward pass when the
+Interactive and Batch Dubbing render several segments in one native forward pass when the
 selected engine supports it. The width is derived from the host rather than
 fixed, because a wider forward pass needs proportionally more device memory:
 CPU hosts and cards with less than ~2 GB of headroom above the engine's
@@ -268,6 +301,10 @@ single-job requirement stay at one segment, and the width steps up to 2, 4,
 and 8 as headroom allows. `OMNIVOICE_DUB_BATCH_WIDTH` overrides it (1 disables
 batching, 16 is the ceiling). Engines without native batching inherit a
 compatibility fallback that preserves the one-segment behavior.
+
+NLLB similarly groups subtitles by target language and translates four rows
+per forward pass on CPU/MPS or eight on CUDA by default. Set
+`OMNIVOICE_NLLB_BATCH_SIZE=1` to disable it or choose up to 32 explicitly.
 
 Streaming clients also receive measured latency in the `/ws/tts` terminal
  `done` frame: `ttfa_ms` is request-to-first-audio, `gen_time_s` is the

@@ -19,16 +19,19 @@ crashes and cold init never block the rest of VoiceStudio.
    uv sync --extra supertonic
    ```
 
-   (Or enable it from **Model Catalogue → Engines**, which installs the
-   pinned `supertonic` wheel for you.)
+   Or click **Install** in **Model Catalogue → Supertonic-3**. That
+   installs the same pinned wheel into the engine's own Python environment
+   under VoiceStudio's data directory. Nothing it installs touches VoiceStudio
+   itself or any other engine, and **Uninstall** in the same row removes only
+   that folder. An install made with `uv sync` keeps working as it is.
 
 2. **Accept the license in-app.** First use is gated behind an explicit
    acceptance dialog: the inference SDK is MIT, but the model weights are
    **OpenRAIL-M**, which carries use restrictions. The engine stays
-   unavailable until you review and accept in **Model Catalogue → Engines →
+   unavailable until you review and accept in **Model Catalogue →
    Supertonic-3**.
 
-3. Select the engine via **Model Catalogue → Engines** or
+3. Select the engine via **Model Catalogue** (TTS tab → **Use**) or
    `OMNIVOICE_TTS_BACKEND=supertonic3`.
 
 The first synthesis cold-downloads ~400 MB of model weights, pinned to an
@@ -45,9 +48,9 @@ log line.
 ## Behaviour notes
 
 - Output is 44.1 kHz mono.
-- Runs as a long-lived sidecar in the parent Python environment (its
-  dependencies — onnxruntime, numpy, soundfile — already match
-  VoiceStudio's pins); subsequent calls reuse the warm ONNX session.
+- Runs as a long-lived sidecar: from its own environment after a one-click
+  install, otherwise from VoiceStudio's (where `uv sync --extra supertonic`
+  puts it). Subsequent calls reuse the warm ONNX session.
 - `speed` is clamped to 0.7–2.0; quality steps clamp to 5–12.
 - Language is an ISO 639-1 code; Auto engages the SDK's multilingual
   fallback.
@@ -66,7 +69,7 @@ log line.
 
 - "supertonic package not installed": run the `uv sync` above or enable
   from the Model Catalogue.
-- "license not accepted": open **Model Catalogue → Engines → Supertonic-3**
+- "license not accepted": open **Model Catalogue → Supertonic-3**
   and accept.
 - Other issues: [install/troubleshooting.md](../install/troubleshooting.md).
 

@@ -8,7 +8,7 @@ prefers it wherever CTranslate2 can use the GPU.
 
 ## Selecting it
 
-- **Model Catalogue → Engines**, ASR tab → **Use** on the WhisperX row, or
+- **Model Catalogue**, ASR tab → **Use** on the WhisperX row, or
 - pin it with `OMNIVOICE_ASR_BACKEND=whisperx` (the env var always wins over
   the Settings pick; with neither set, auto-detect chooses per-hardware).
 
@@ -62,8 +62,12 @@ Two more fallback chains run at load time:
   process fast-fails with no traceback, so the engine is reported unavailable
   up front and selection falls through to pytorch-whisper, which uses torch's
   own cuDNN 9 ([#1371](https://github.com/debpalash/VoiceStudio/issues/1371)).
-- On some hardened Linux kernels CTranslate2's native library is rejected with
-  "cannot enable executable stack" — reported as unavailable, not a crash
+- On Linux kernels that refuse an executable stack, CTranslate2's native
+  library (4.4.0 and older — what whisperx 3.4.5 pins on Python 3.11) is
+  rejected with "cannot enable executable stack". VoiceStudio now clears that
+  one ELF flag in place on first probe and the engine loads normally; if the
+  library cannot be written (a read-only bundle), the engine reports itself
+  unavailable with the repair command instead of crashing
   ([#692](https://github.com/debpalash/VoiceStudio/issues/692)).
 - A partially-installed environment (interrupted sync, antivirus quarantine)
   can break WhisperX's deep import chain (whisperx → pyannote →

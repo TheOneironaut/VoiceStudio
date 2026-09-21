@@ -12,7 +12,7 @@ use std::time::Duration;
 use tauri::Manager;
 
 use crate::bootstrap::{
-    BootstrapStage, emit_log, ensure_venv_ready, set_stage,
+    BootstrapStage, current_attempt, emit_log_for_attempt, ensure_venv_ready, set_stage,
 };
 use crate::config::load_config;
 use crate::tools::{resolve_ffmpeg, resolve_ffprobe};
@@ -66,6 +66,45 @@ fn parse_app_version(body: &str) -> Option<String> {
     Some(rest[..rest.find('"')?].to_string())
 }
 
+/// The `data_dir` the running backend advertises via `/system/info` — the
+/// directory `backend/core/config.py::get_app_data_dir()` resolved for
+/// itself (honors `OMNIVOICE_DATA_DIR`, else the per-OS default).
+///
+/// This exists so Tauri's one-shot host-path capability files
+/// (`commands::authorize_host_path`) always land where
+/// `backend/core/path_authorization.py` actually looks for them. Tauri's own
+/// `setup::resolved_data_dir` normally agrees with the backend, but they can
+/// diverge: dev mode spawns the backend out-of-process
+/// (`scripts/dev-backend.mjs`, which strips `OMNIVOICE_*` from the child
+/// env) so it may fall back to a different platform default than Tauri
+/// computes, and in a packaged build a custom data folder or portable mode
+/// applied after the backend already started can do the same (#1781).
+/// Asking the backend directly makes the two processes structurally unable
+/// to disagree.
+///
+/// `None` when nothing VoiceStudio answers at `port` (not started yet,
+/// unreachable) or an old backend predating the `data_dir` field — callers
+/// fall back to Tauri's own resolution, the historical behavior.
+///
+/// Only an ABSOLUTE path is accepted. `get_app_data_dir()` returns
+/// `OMNIVOICE_DATA_DIR` verbatim, so a relative value (`OMNIVOICE_DATA_DIR=
+/// omnivoice_data`, plausible for source/Docker setups) would make the
+/// backend resolve the store against ITS working directory while Tauri
+/// resolved the same string against its own — silently recreating the very
+/// split this function exists to close. A relative advertisement is
+/// therefore treated as unusable and the caller falls back, which is also
+/// what keeps a foreign responder on the port from steering capability
+/// writes to a path of its choosing.
+pub fn backend_data_dir(port: u16) -> Option<String> {
+    let url = format!("http://127.0.0.1:{}/system/info", port);
+    let body = ureq_get_with_timeout(&url, Duration::from_millis(500)).ok()?;
+    if !is_omnivoice_body(&body) {
+        return None;
+    }
+    parse_json_string_field(&body, "data_dir")
+        .filter(|dir| !dir.is_empty() && Path::new(dir).is_absolute())
+}
+
 /// Whether a running backend's version matches THIS app build, comparing
 /// **base** versions (any `-N` pre-release suffix stripped from both sides) so
 /// a preview build `0.3.10-4` still attaches to its `0.3.10` backend.
@@ -81,6 +120,87 @@ pub fn same_app_version(running: &str) -> bool {
         v.split('-').next().unwrap_or(v).trim()
     }
     !running.is_empty() && base(running) == base(env!("CARGO_PKG_VERSION"))
+}
+
+/// `app_version` + `code_fingerprint`, parsed from ONE `/system/info` fetch
+/// — see `code_fingerprint_is_current` for how callers interpret
+/// `code_fingerprint`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BackendIdentity {
+    pub version: String,
+    /// `None` when the response has no `code_fingerprint` key at all (an old
+    /// backend whose `/system/info` schema predates the field, since a
+    /// *present* field always serializes — even as `""`). `Some("")` when
+    /// the field is present but blank (current schema, but the process
+    /// wasn't spawned with `OMNIVOICE_BUILD_FINGERPRINT` set — dev mode's
+    /// `dev-backend.mjs` strips `OMNIVOICE_*`, and a manually started
+    /// `uvicorn` never sets it).
+    pub code_fingerprint: Option<String>,
+}
+
+/// Parse both fields out of a single already-fetched `/system/info` body.
+/// Pure — no network — so the absent/blank/known distinction is unit-tested
+/// directly against fixture bodies, not against a live probe.
+fn parse_backend_identity(body: &str) -> Option<BackendIdentity> {
+    if !is_omnivoice_body(body) {
+        return None;
+    }
+    Some(BackendIdentity {
+        version: parse_app_version(body).unwrap_or_default(),
+        code_fingerprint: parse_json_string_field(body, "code_fingerprint"),
+    })
+}
+
+/// `running_backend_version` + a separate `code_fingerprint` fetch used to be
+/// two independent `/system/info` round-trips in the attach handshake —
+/// besides the redundant probe, that let a transport hiccup on the *second*
+/// fetch (a transient timeout, not "no key in the body") come back as
+/// `None`, indistinguishable from a successfully parsed body that genuinely
+/// lacks `code_fingerprint`. `code_fingerprint_is_current` treats a missing
+/// key as stale, so that ambiguity could kill and respawn a perfectly
+/// healthy backend on a single flaky probe. One fetch removes the ambiguity
+/// structurally: `None` here means "nothing answered at all" (the caller's
+/// existing "no VoiceStudio here" branch), full stop — it can never be
+/// confused with "answered, but the field was absent from that body".
+pub fn running_backend_identity(port: u16) -> Option<BackendIdentity> {
+    let url = format!("http://127.0.0.1:{}/system/info", port);
+    let body = ureq_get_with_timeout(&url, Duration::from_millis(500)).ok()?;
+    parse_backend_identity(&body)
+}
+
+/// Whether an already-version-matched running backend's *code* is current
+/// enough to attach to, for the `prepare_backend_launch` handshake (#1770).
+///
+/// `running` is `BackendIdentity::code_fingerprint` from the SAME
+/// `/system/info` fetch that established the version match — never a
+/// separate probe (see `running_backend_identity`'s doc comment for why);
+/// `ours` is `bootstrap::own_backend_code_fingerprint`'s.
+///
+/// - `running: None` — the backend's `/system/info` has no `code_fingerprint`
+///   key at all, meaning its code predates this fingerprinting mechanism
+///   outright. Because `main` holds one version string for an entire
+///   release cycle (see `same_app_version`'s doc comment), a matching
+///   version string does NOT mean matching code — this is exactly the class
+///   of bug #1770 reported: a same-version backend running weeks-old code
+///   was attached to and adopted as current. Treated as STALE, the same
+///   "replace it" outcome a version mismatch already gets.
+/// - `running: Some("")` — the field IS present (current schema) but blank:
+///   confirmed at-least-this-fix-or-later by schema, just unverifiable
+///   further (no env var at spawn time — dev mode, a manually started
+///   backend). Accepted rather than hard-failing every dev session or
+///   manual-start workflow.
+/// - `ours: None` — we failed to compute our own fingerprint (unreadable
+///   resource dir / dev root). We can't enforce a check we can't compute
+///   either side of, so this degrades to accept too, same as the historical
+///   version-only behavior.
+/// - both `Some` — must match exactly; a mismatch is STALE.
+pub fn code_fingerprint_is_current(running: Option<&str>, ours: Option<&str>) -> bool {
+    match (running, ours) {
+        (None, _) => false,
+        (Some(""), _) => true,
+        (Some(_), None) => true,
+        (Some(r), Some(o)) => r == o,
+    }
 }
 
 /// Deep health probe for the attach-to-a-running-backend shortcut.
@@ -138,12 +258,81 @@ pub fn startup_progress(port: u16) -> Option<(String, String, String)> {
 /// First `"key": "value"` string field in a JSON body — same dependency-free
 /// sniffing style as `parse_app_version`. `None` for absent or non-string
 /// (e.g. `null`) values.
+///
+/// Decodes JSON string escapes properly (`decode_json_string`) rather than
+/// substring-slicing to the first `"` byte: a naive slice returns the
+/// literal wire form, which breaks on any value containing a backslash or an
+/// escaped quote. This matters most for `data_dir` — a Windows path like
+/// `C:\Users\x\AppData\Roaming\OmniVoice` serialises as
+/// `"C:\\Users\\x\\..."`, and slicing to the first raw `"` would either hand
+/// back the doubled-backslash form verbatim or, for a path containing a
+/// literal quote, truncate the value outright.
 fn parse_json_string_field(body: &str, key: &str) -> Option<String> {
     let needle = format!("\"{key}\"");
     let rest = &body[body.find(&needle)? + needle.len()..];
     let rest = rest[rest.find(':')? + 1..].trim_start();
     let rest = rest.strip_prefix('"')?;
-    Some(rest[..rest.find('"')?].to_string())
+    decode_json_string(rest)
+}
+
+/// Decode a JSON string body starting right after its opening `"`, stopping
+/// at the first *unescaped* closing `"`. Handles `\\`, `\"`, `\/`, `\n`,
+/// `\r`, `\t`, `\b`, `\f`, and `\uXXXX` (including UTF-16 surrogate pairs for
+/// codepoints outside the BMP). Returns `None` on an unterminated string or a
+/// malformed escape — matching the previous function's `?`-propagating
+/// behavior on absent/malformed input.
+fn decode_json_string(rest: &str) -> Option<String> {
+    fn read_hex4(chars: &mut std::str::Chars) -> Option<u32> {
+        let mut hex = String::with_capacity(4);
+        for _ in 0..4 {
+            hex.push(chars.next()?);
+        }
+        u32::from_str_radix(&hex, 16).ok()
+    }
+
+    let mut chars = rest.chars();
+    let mut out = String::new();
+    loop {
+        let c = chars.next()?;
+        if c == '"' {
+            return Some(out);
+        }
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next()? {
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            '/' => out.push('/'),
+            'n' => out.push('\n'),
+            'r' => out.push('\r'),
+            't' => out.push('\t'),
+            'b' => out.push('\u{0008}'),
+            'f' => out.push('\u{000C}'),
+            'u' => {
+                let code = read_hex4(&mut chars)?;
+                if (0xD800..=0xDBFF).contains(&code) {
+                    // High surrogate: must be followed by a \uXXXX low
+                    // surrogate to form one codepoint outside the BMP.
+                    if chars.next()? != '\\' || chars.next()? != 'u' {
+                        return None;
+                    }
+                    let low = read_hex4(&mut chars)?;
+                    if !(0xDC00..=0xDFFF).contains(&low) {
+                        return None;
+                    }
+                    let cp = 0x10000 + (((code - 0xD800) << 10) | (low - 0xDC00));
+                    out.push(char::from_u32(cp)?);
+                } else if (0xDC00..=0xDFFF).contains(&code) {
+                    return None; // lone low surrogate — malformed
+                } else {
+                    out.push(char::from_u32(code)?);
+                }
+            }
+            _ => return None, // invalid escape
+        }
+    }
 }
 
 /// Status code from a raw HTTP response ("HTTP/1.1 200 OK" → 200).
@@ -227,6 +416,137 @@ pub fn free_port_or_report(port: u16) -> bool {
     false
 }
 
+/// Who is holding the port, as far as an HTTP request can tell (#1933).
+///
+/// The port-conflict failure used to assert "already in use by **another
+/// application**" without asking. That is wrong in the common case: the holder
+/// is usually the user's own orphaned backend from an earlier run, which has
+/// no window to quit — so the message sent them to close a copy of VoiceStudio
+/// they cannot see, and gave them nothing that would work.
+///
+/// The identity check already existed (`running_backend_version`, used to
+/// decide whether to attach to a healthy same-version backend, a far more
+/// consequential decision). It just was not consulted here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PortHolder {
+    /// Nothing answered — either genuinely free, or a listener that accepts a
+    /// connection but does not respond in time.
+    Unknown,
+    /// A VoiceStudio backend, carrying the version it reports. Empty string
+    /// when it predates the `app_version` field.
+    OurBackend(String),
+    /// Something answered `/system/info` and it was not us.
+    Foreign,
+}
+
+/// Ask the listener on `port` who it is.
+///
+/// Stricter than `running_backend_version`, deliberately. That one accepts a
+/// `/system/info` body containing `model_checkpoint` or `data_dir` — a
+/// substring sniff, which is fine for deciding whether to ATTACH but not for
+/// deciding what to tell a user to kill. This answer ends in a message naming
+/// a process to end, so it requires the `x-omnivoice-backend` marker header
+/// that `backend/main.py` stamps on every response (CodeRabbit). A body alone
+/// can be served by anything; the header is what our backend actually asserts,
+/// and `startup_progress` already gates on it for the same reason.
+pub fn port_holder(port: u16) -> PortHolder {
+    if !port_in_use(port) {
+        return PortHolder::Unknown;
+    }
+    let url = format!("http://127.0.0.1:{}/system/info", port);
+    let Ok(resp) = raw_http_get(&url, Duration::from_millis(500)) else {
+        return PortHolder::Foreign;
+    };
+    let head_end = resp.find("
+
+").unwrap_or(resp.len());
+    if !resp[..head_end].to_ascii_lowercase().contains("x-omnivoice-backend") {
+        // Something is listening but it does not identify as VoiceStudio.
+        // That covers a genuinely foreign app AND one of ours too wedged to
+        // answer — `Foreign` is the conservative reading either way, since it
+        // is the one that never tells a user to kill what is not theirs.
+        return PortHolder::Foreign;
+    }
+    let body = &resp[resp.find("
+
+").map(|i| i + 4).unwrap_or(0)..];
+    if !is_omnivoice_body(body) {
+        return PortHolder::Foreign;
+    }
+    PortHolder::OurBackend(parse_app_version(body).unwrap_or_default())
+}
+
+/// How to find and end the listener on `port`, for the platform this build
+/// runs on. Offered only when the holder identified itself as our own backend.
+///
+/// Two steps, deliberately, and never a one-liner that pipes a lookup straight
+/// into `kill`. `lsof -ti tcp:PORT` matches *connected clients* as well as the
+/// listener, and Windows `findstr :3900` matches `:39001` and established
+/// connections too — so the convenient one-liner can end a process that merely
+/// talks to VoiceStudio, or one that has nothing to do with it. The identity
+/// `port_holder` established is a fact about the moment the message was
+/// written; by the time the user runs a command it has to be re-established,
+/// and only they can do that. So the first command shows exactly one listening
+/// process to look at, and the second ends that pid.
+fn reclaim_command(port: u16) -> String {
+    if cfg!(target_os = "windows") {
+        format!(
+            "Get-NetTCPConnection -LocalPort {port} -State Listen | \
+             Select-Object OwningProcess, @{{n='Name';e={{(Get-Process -Id \
+             $_.OwningProcess).ProcessName}}}}\n\n    \
+             ...then, once you have confirmed it is python or omnivoice:\n\n    \
+             Stop-Process -Id <OwningProcess>"
+        )
+    } else {
+        format!(
+            "lsof -nP -iTCP:{port} -sTCP:LISTEN\n\n    \
+             ...then, once you have confirmed the COMMAND is python or \
+             omnivoice:\n\n    kill <PID>"
+        )
+    }
+}
+
+/// What to tell the user when the port could not be freed.
+///
+/// Pure, so the three wordings are unit-tested without a listener.
+///
+/// Every branch must contain a phrase `BootstrapSplash.detectHints` matches
+/// ("port … in use"), because that is what turns this English Rust string into
+/// the LOCALISED `bootstrap.hint_port` the user actually reads. Pinned by
+/// `frontend/src/test/portInUseHint.test.js`.
+pub fn port_conflict_message(port: u16, holder: &PortHolder, suffix: &str) -> String {
+    let body = match holder {
+        PortHolder::OurBackend(version) if version.is_empty() || same_app_version(version) => {
+            format!(
+                "Port {port} is in use by a VoiceStudio backend from an earlier \
+                 session that never shut down. It has no window to quit, so \
+                 closing VoiceStudio will not release it. End it from a \
+                 terminal:\n\n    {}",
+                reclaim_command(port)
+            )
+        }
+        PortHolder::OurBackend(version) => {
+            format!(
+                "Port {port} is in use by a VoiceStudio backend from version \
+                 {version}, left running by an earlier install. This build is \
+                 {}, so it cannot use that one. Find and end it from a terminal:\n\n    {}",
+                env!("CARGO_PKG_VERSION"),
+                reclaim_command(port)
+            )
+        }
+        PortHolder::Foreign | PortHolder::Unknown => format!(
+            "Port {port} is already in use by another application, and \
+             VoiceStudio could not free it. Quit whatever is using that port \
+             and try again."
+        ),
+    };
+    if suffix.is_empty() {
+        body
+    } else {
+        format!("{body}\n\n{suffix}")
+    }
+}
+
 /// An HTTP response can justify attaching to a healthy same-version backend,
 /// but never grants process ownership. Deliberately refuse orphan cleanup:
 /// signalling a PID discovered through lsof/netstat has an unavoidable reuse
@@ -247,7 +567,12 @@ pub fn backend_log_path() -> PathBuf {
     // harness gives every scenario its own tempdir through this.
     if let Ok(dir) = std::env::var("OMNIVOICE_LOG_DIR") {
         if !dir.trim().is_empty() {
-            let log_dir = PathBuf::from(dir);
+            // Trim here too, not only in the emptiness test above. The Python
+            // reader strips this variable before joining (see
+            // api/routers/system.py::_backend_redirect_log_candidates), so a
+            // padded value had the writer and the reader looking at different
+            // directories — the exact divergence #1925 exists to close.
+            let log_dir = PathBuf::from(dir.trim());
             let _ = fs::create_dir_all(&log_dir);
             return log_dir.join("backend.log");
         }
@@ -310,14 +635,53 @@ pub fn err_log_run_start() -> u64 {
 /// This is the reader every death path must use: it cannot see another run's
 /// output, so a crash marker carries the dying process's words or nothing.
 pub fn read_error_log_tail_for_run(max_lines: usize) -> String {
+    read_error_log_tail_range(err_log_run_start(), None, max_lines)
+}
+
+/// Last N lines of one run's slice, `[start, end)`.
+///
+/// A death path pins `start` BEFORE it settles the drainers (#1850, Greptile):
+/// settling can take up to two seconds, and a Retry arriving in that window
+/// installs a new run and moves `ERR_LOG_RUN_START` past the dying run's
+/// output. Reading "the current run" afterwards would hand the dead process's
+/// crash marker the REPLACEMENT's healthy startup — the cross-run attribution
+/// #1510 exists to prevent, reintroduced through the wait that fixed the tail.
+///
+/// `end` closes the other side (CodeRabbit). A start offset with an unbounded
+/// end still does not identify ONE run: the replacement writes below the dying
+/// run's lines, and a tail reads the last N of the file, so the newer run's
+/// startup is exactly what a caller would get. `end` is where the next run's
+/// slice begins, or `None` when no run started in the meantime.
+pub fn read_error_log_tail_range(start: u64, end: Option<u64>, max_lines: usize) -> String {
     let err_path = backend_log_path().with_file_name("backend_err.log");
-    read_error_log_tail_at(&err_path, err_log_run_start(), max_lines)
+    read_error_log_slice(&err_path, start, end, max_lines)
+}
+
+/// The run that has just died, read as a closed range.
+///
+/// Call AFTER settling: the end is taken from wherever the current run now
+/// begins, which is either still `start` (nothing replaced it) or the
+/// replacement's offset (which is exactly where this run's slice ends).
+pub fn read_dead_run_tail(start: u64, max_lines: usize) -> String {
+    let now = err_log_run_start();
+    let end = if now > start { Some(now) } else { None };
+    read_error_log_tail_range(start, end, max_lines)
 }
 
 /// Tail of `path` starting at byte `start` (whole file when `start` is 0 or
 /// no longer valid — an externally replaced/shrunk file must degrade to the
 /// old whole-file behaviour, never to a silent empty capture).
 fn read_error_log_tail_at(path: &Path, start: u64, max_lines: usize) -> String {
+    read_error_log_slice(path, start, None, max_lines)
+}
+
+/// `read_error_log_tail_at` with the far end closed too.
+fn read_error_log_slice(
+    path: &Path,
+    start: u64,
+    end: Option<u64>,
+    max_lines: usize,
+) -> String {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return String::new(),
@@ -328,35 +692,106 @@ fn read_error_log_tail_at(path: &Path, start: u64, max_lines: usize) -> String {
     } else {
         &content[..]
     };
+    // An end that is not a usable boundary degrades to "the rest of the file",
+    // matching how an unusable start degrades to the whole file: evidence
+    // beats precision, and a silent empty capture is the one outcome that
+    // helps nobody.
+    let slice = match end.and_then(|e| usize::try_from(e).ok()) {
+        Some(e) if e >= start && e <= content.len() && content.is_char_boundary(e) => {
+            &content[..e - start]
+        }
+        _ => slice,
+    };
     let lines: Vec<&str> = slice.lines().collect();
     let from = lines.len().saturating_sub(max_lines);
     lines[from..].join("\n")
 }
 
-/// The previous run's stderr-drainer thread. Joined (bounded) before a new
-/// spawn records its offset, so a dying run's still-buffered stderr cannot be
-/// appended AFTER the new run's start offset and get attributed to the new
-/// run. (Full per-child offset binding isn't needed: spawns are serialized by
-/// the #1223 spawn-once flow, so the only race left was this buffered tail.)
-static ERR_LOG_DRAINER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+/// Stderr-drainer threads that have not finished writing yet.
+///
+/// A list, not a slot. Two callers wait on these — a respawn before it records
+/// its start offset (#1510) and a crash marker before it captures the tail
+/// (#1850) — and either can time out on a wedged drainer (a pipe held open by
+/// an orphaned grandchild) while a NEW run installs its own. A single slot
+/// loses the timed-out handle at that moment: dropping a JoinHandle detaches
+/// the thread, so nothing can ever wait for that run's output again and both
+/// guarantees quietly stop holding. Keeping every unfinished handle costs a
+/// Vec that is empty in the normal case, since a finished drainer is dropped
+/// on the next settle.
+static ERR_LOG_DRAINERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
 
-/// Wait briefly for the previous run's stderr drainer to flush. A wedged
-/// drainer (pipe held open by an orphaned grandchild) must not block a
-/// respawn forever — after the bound we proceed; the offset then simply
-/// includes whatever the old run still manages to write, which degrades to
-/// attributing too MUCH to the new run, never to destroying evidence.
-fn join_previous_err_drainer(bound: Duration) {
-    let handle = ERR_LOG_DRAINER.lock().ok().and_then(|mut g| g.take());
-    if let Some(handle) = handle {
-        let deadline = std::time::Instant::now() + bound;
-        while !handle.is_finished() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+/// Register a run's stderr drainer so the settles below can wait for it.
+fn track_err_drainer(handle: std::thread::JoinHandle<()>) {
+    if let Ok(mut guard) = ERR_LOG_DRAINERS.lock() {
+        guard.push(handle);
+    }
+}
+
+/// Serializes a whole settlement. `settle_err_log` takes the handles out of
+/// the list and then waits without holding that lock, so two callers could
+/// otherwise interleave: the second finds an empty list, concludes there is
+/// nothing to wait for, and reads the log while the first is still waiting for
+/// exactly the drainer it needs (CodeRabbit). One settlement at a time makes a
+/// caller that returns a caller for whom the waiting is genuinely done.
+static ERR_LOG_SETTLE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Wait briefly for every outstanding stderr drainer to finish writing.
+///
+/// Two callers, one guarantee: everything a run wrote is on disk before anyone
+/// reads it.
+///
+/// - Before a respawn takes its start offset, so a dying run's buffered tail
+///   cannot be appended past that offset and get attributed to the new run
+///   (#1510).
+/// - Before a crash marker captures `last_stderr` (#1850). `wait()` returns the
+///   moment the child exits, but the drainer is a separate thread reading a
+///   pipe: its last lines — the traceback naming the cause — can still be in
+///   flight. Reading the file at that instant captures a tail that stops BEFORE
+///   the death, which is how a crash report arrives with a log ending a minute
+///   early and nothing to diagnose.
+///
+/// A wedged drainer must not block forever. After the bound we proceed, and
+/// every handle still running is kept for the next caller to wait on. For a
+/// respawn that degrades to attributing too MUCH to the new run; for a marker,
+/// to a short tail. Never to destroyed evidence, and never to a detached
+/// thread nobody can wait for again.
+pub fn settle_err_log(bound: Duration) {
+    let _settling = ERR_LOG_SETTLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pending: Vec<_> = match ERR_LOG_DRAINERS.lock() {
+        Ok(mut guard) => guard.drain(..).collect(),
+        Err(_) => return,
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + bound;
+    while std::time::Instant::now() < deadline && pending.iter().any(|h| !h.is_finished()) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut still_running = Vec::new();
+    for handle in pending {
         if handle.is_finished() {
             let _ = handle.join();
+        } else {
+            still_running.push(handle);
+        }
+    }
+    if !still_running.is_empty() {
+        if let Ok(mut guard) = ERR_LOG_DRAINERS.lock() {
+            // Put them back at the FRONT: they are older than anything a
+            // concurrent spawn pushed while this was waiting.
+            still_running.append(&mut guard);
+            *guard = still_running;
         }
     }
 }
+
+/// How long a death path waits for the dying run's final stderr. Bounded so a
+/// wedged pipe cannot stall crash recording, generous enough to cover a
+/// traceback already sitting in the drainer's buffer.
+pub const ERR_LOG_SETTLE: Duration = Duration::from_secs(2);
 
 /// Open backend_err.log for a new run: append-only (a respawn must not
 /// destroy the previous run's evidence), rotated when oversized, with the
@@ -541,7 +976,7 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
     // Append + per-run offset, never truncate: the previous run's stderr is
     // crash evidence until someone reads it (#1510). Flush the previous
     // drainer first so old buffered lines land BEFORE this run's offset.
-    join_previous_err_drainer(Duration::from_secs(2));
+    settle_err_log(Duration::from_secs(2));
     let (err_log_file, err_log_start) = open_err_log_for_run(&err_path);
     ERR_LOG_RUN_START.store(err_log_start, std::sync::atomic::Ordering::SeqCst);
     if let Some(ref f) = err_log_file {
@@ -624,6 +1059,12 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
     // Analytics destination (#1123) — see analytics_env() below for why.
     env.extend(analytics_env(option_env!("VITE_POSTHOG_KEY"), option_env!("VITE_POSTHOG_HOST")));
     if cmd_override.is_none() {
+        // #1770: lets the attach handshake tell "this build's code" apart
+        // from "a same-version backend running older code" — see
+        // `bootstrap::own_backend_code_fingerprint` / `code_fingerprint_is_current`.
+        if let Some(fingerprint) = crate::bootstrap::own_backend_code_fingerprint(app) {
+            env.push(("OMNIVOICE_BUILD_FINGERPRINT".into(), fingerprint));
+        }
         let app_data = app.path().app_local_data_dir().unwrap_or_default();
         if let Some(ffmpeg_path) = resolve_ffmpeg(app, &app_data) {
             env.push(("FFMPEG_PATH".into(), ffmpeg_path.to_string_lossy().into()));
@@ -696,6 +1137,11 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
         }
     };
 
+    // The attempt these pumps drain, captured up front: the threads outlive
+    // the run, and a restart must not relabel its trailing output as the new
+    // attempt's evidence (#1900).
+    let pump_attempt = current_attempt();
+
     if let Some(stdout_pipe) = contained.child.stdout.take() {
         let app_clone = app.clone();
         let mut out_file = stdout_file;
@@ -704,7 +1150,7 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
             let reader = BufReader::new(stdout_pipe);
             for line in reader.lines().flatten() {
                 log::info!("[backend_stdout] {}", line);
-                emit_log(&app_clone, "starting_backend", &line);
+                emit_log_for_attempt(&app_clone, pump_attempt, "starting_backend", &line);
                 if let Some(ref mut f) = out_file {
                     let _ = writeln!(f, "{}", line);
                 }
@@ -722,15 +1168,13 @@ pub(crate) fn spawn_backend<R: tauri::Runtime>(
             let mut log_file = err_log_file;
             for line in reader.lines().flatten() {
                 log::info!("[backend_stderr] {}", line);
-                emit_log(&app_clone, "starting_backend", &line);
+                emit_log_for_attempt(&app_clone, pump_attempt, "starting_backend", &line);
                 if let Some(ref mut f) = log_file {
                     let _ = writeln!(f, "{}", line);
                 }
             }
         });
-        if let Ok(mut guard) = ERR_LOG_DRAINER.lock() {
-            *guard = Some(drainer);
-        }
+        track_err_drainer(drainer);
     }
 
     Some(contained)
@@ -751,6 +1195,11 @@ mod tests {
     /// The env-var tests below mutate process-global state; keep them off each
     /// other's toes (cargo runs tests in threads by default).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `ERR_LOG_DRAINERS` is one process-global list, and several tests push
+    /// a handle onto it. Without this they race: one test's settle drains and
+    /// joins another's thread, and both assert on state they no longer own.
+    static DRAINER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn a_baked_token_reaches_the_spawned_backend() {
@@ -848,6 +1297,148 @@ mod tests {
             }
         });
         port
+    }
+
+    /// Loopback responder that answers `/system/info` with an arbitrary
+    /// body, for `backend_data_dir` tests.
+    fn spawn_system_info_stub(body: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn backend_data_dir_reads_system_info_and_degrades_safely() {
+        // Reachable backend advertising data_dir → Some(path). This is what
+        // lets Tauri and the backend agree on where one-shot capability
+        // files live (#1781) even when they'd otherwise resolve different
+        // platform defaults (e.g. a dev backend spawned without
+        // OMNIVOICE_DATA_DIR).
+        //
+        // The fixture must be a platform-appropriate ABSOLUTE path:
+        // `Path::new("/custom/data").is_absolute()` is FALSE on Windows
+        // (Windows requires a drive prefix like `C:` *and* a root — a
+        // rooted-but-driveless path is drive-relative and genuinely
+        // ambiguous), so a Unix-style fixture would spuriously fail the
+        // `is_absolute()` filter in `backend_data_dir` on that platform.
+        // The wire body doubles each backslash (JSON escaping); the new
+        // `decode_json_string` decodes that back to a single backslash, so
+        // the assertion checks the DECODED form, not the wire form.
+        #[cfg(windows)]
+        let (body, expected) = (
+            r#"{"data_dir": "C:\\custom\\data"}"#,
+            r"C:\custom\data",
+        );
+        #[cfg(not(windows))]
+        let (body, expected) = (r#"{"data_dir": "/custom/data"}"#, "/custom/data");
+        let port = spawn_system_info_stub(body);
+        assert_eq!(backend_data_dir(port), Some(expected.to_string()));
+
+        // A rooted-but-driveless path is drive-relative on Windows (which
+        // drive is "the" drive is ambiguous) and must be REJECTED there —
+        // `is_absolute()` correctly returns false for it, and the fixture
+        // fixed above must not silently paper over that. `/custom/data` and
+        // `\data` are exactly the un-prefixed forms a misbehaving responder
+        // (or a backend running under an unexpected shell) could send.
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                backend_data_dir(spawn_system_info_stub(r#"{"data_dir": "/custom/data"}"#)),
+                None
+            );
+            assert_eq!(
+                backend_data_dir(spawn_system_info_stub(r#"{"data_dir": "\\data"}"#)),
+                None
+            );
+        }
+
+        // Old backend body (identifies via model_checkpoint) predating the
+        // data_dir field → None, so callers fall back to Tauri's own
+        // resolution instead of trusting a missing field.
+        let old = spawn_system_info_stub(r#"{"model_checkpoint": "x"}"#);
+        assert_eq!(backend_data_dir(old), None);
+
+        // Explicit empty data_dir must not resolve to a bare/relative root —
+        // treated the same as absent.
+        let empty = spawn_system_info_stub(r#"{"data_dir": ""}"#);
+        assert_eq!(backend_data_dir(empty), None);
+
+        // A foreign (non-VoiceStudio) responder must not be trusted either.
+        let foreign = spawn_system_info_stub(r#"{"hello": "world"}"#);
+        assert_eq!(backend_data_dir(foreign), None);
+
+        // A RELATIVE data_dir is unusable and must not be adopted: the
+        // backend resolves it against its own working directory, so joining
+        // the same string onto Tauri's cwd would recreate exactly the split
+        // #1781 is about. `get_app_data_dir()` hands back
+        // OMNIVOICE_DATA_DIR verbatim, so this is reachable without any
+        // malice — a source or Docker setup using a relative override.
+        let relative = spawn_system_info_stub(r#"{"data_dir": "omnivoice_data"}"#);
+        assert_eq!(backend_data_dir(relative), None);
+        let dotted = spawn_system_info_stub(r#"{"data_dir": "./data"}"#);
+        assert_eq!(backend_data_dir(dotted), None);
+
+        // Nothing listening → None, same fallback path.
+        assert_eq!(backend_data_dir(1), None); // port 1 — never bindable by us
+    }
+
+    #[test]
+    fn parse_json_string_field_decodes_escape_sequences() {
+        // Windows data dirs are full of backslashes: the backend serializes
+        // `C:\Users\x\AppData\Roaming\OmniVoice` as
+        // `"C:\\Users\\x\\AppData\\Roaming\\OmniVoice"` on the wire. A naive
+        // substring extract to the first raw `"` would hand back the
+        // doubled-backslash literal instead of the real path.
+        assert_eq!(
+            parse_json_string_field(
+                r#"{"data_dir": "C:\\Users\\x\\AppData\\Roaming\\OmniVoice"}"#,
+                "data_dir"
+            ),
+            Some(r"C:\Users\x\AppData\Roaming\OmniVoice".to_string())
+        );
+
+        // A path containing an escaped quote must not truncate the value at
+        // that quote — only an UNESCAPED quote terminates the string.
+        assert_eq!(
+            parse_json_string_field(r#"{"data_dir": "C:\\a \"weird\" dir"}"#, "data_dir"),
+            Some("C:\\a \"weird\" dir".to_string())
+        );
+
+        // \uXXXX escapes, including a surrogate pair for a codepoint outside
+        // the BMP (backend labels are ensure_ascii-encoded JSON, so any
+        // non-ASCII text — e.g. an ellipsis "…" or an emoji — arrives this
+        // way, not as raw UTF-8 bytes).
+        assert_eq!(
+            parse_json_string_field(r#"{"label": "Loading\u2026"}"#, "label"),
+            Some("Loading\u{2026}".to_string())
+        );
+        assert_eq!(
+            parse_json_string_field(r#"{"label": "\ud83d\ude00"}"#, "label"),
+            Some("\u{1F600}".to_string())
+        );
+
+        // The other basic escapes.
+        assert_eq!(
+            parse_json_string_field(r#"{"x": "a\nb\tc\rd\/e"}"#, "x"),
+            Some("a\nb\tc\rd/e".to_string())
+        );
+
+        // Malformed/unterminated input still degrades to None.
+        assert_eq!(parse_json_string_field(r#"{"x": "unterminated"#, "x"), None);
+        assert_eq!(parse_json_string_field(r#"{"x": "bad \q escape"}"#, "x"), None);
     }
 
     #[test]
@@ -964,6 +1555,110 @@ mod tests {
         assert!(!same_app_version(""));
     }
 
+    // ── #1770: code fingerprint decision (pure — no AppHandle, per the
+    //    Windows tauri::test::mock_builder abort that broke a PR earlier
+    //    today) ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn code_fingerprint_absent_is_stale() {
+        // No `code_fingerprint` key at all in /system/info -> the backend's
+        // code predates the fingerprinting mechanism outright, regardless of
+        // whether we could compute our own. This is the #1770 bug case: a
+        // same-version backend running weeks-old code must NOT be adopted.
+        assert!(!code_fingerprint_is_current(None, Some("abc123")));
+        assert!(!code_fingerprint_is_current(None, None));
+    }
+
+    #[test]
+    fn code_fingerprint_present_but_blank_degrades_to_accept() {
+        // Present-but-blank means current schema, no env var at spawn time
+        // (dev mode's dev-backend.mjs strips OMNIVOICE_*; a manually started
+        // uvicorn never sets it) — don't hard-fail every dev/manual-start
+        // session over an unverifiable-but-plausibly-current backend.
+        assert!(code_fingerprint_is_current(Some(""), Some("abc123")));
+        assert!(code_fingerprint_is_current(Some(""), None));
+    }
+
+    #[test]
+    fn code_fingerprint_matches_and_mismatches() {
+        // Tracked re-supervision / preview-build reattach: same resource
+        // dir hashed twice by the same build -> identical value -> accept.
+        assert!(code_fingerprint_is_current(Some("abc123"), Some("abc123")));
+        // Different code within the same version string -> stale, replace it.
+        assert!(!code_fingerprint_is_current(Some("abc123"), Some("def456")));
+    }
+
+    #[test]
+    fn code_fingerprint_our_side_unknown_degrades_to_accept() {
+        // We failed to compute our own fingerprint (unreadable resource dir
+        // / dev root) — can't enforce a check we can't compute either side
+        // of, so don't block a legitimate attach on our own tooling failure.
+        assert!(code_fingerprint_is_current(Some("abc123"), None));
+    }
+
+    #[test]
+    fn parse_backend_identity_distinguishes_absent_from_blank_from_known() {
+        // Old backend: /system/info has no code_fingerprint key at all.
+        let old = parse_backend_identity(r#"{"app_version":"0.5.2","data_dir": "/x"}"#).unwrap();
+        assert_eq!(old.version, "0.5.2");
+        assert_eq!(old.code_fingerprint, None);
+
+        // Current schema, no env var set at spawn time.
+        let blank = parse_backend_identity(
+            r#"{"app_version":"0.5.2","data_dir": "/x", "code_fingerprint": ""}"#,
+        )
+        .unwrap();
+        assert_eq!(blank.code_fingerprint, Some(String::new()));
+
+        // Current schema, fingerprint present.
+        let known = parse_backend_identity(
+            r#"{"app_version":"0.5.2","data_dir": "/x", "code_fingerprint": "abc123"}"#,
+        )
+        .unwrap();
+        assert_eq!(known.code_fingerprint, Some("abc123".to_string()));
+
+        // Not our backend at all (no data_dir/model_checkpoint marker) — the
+        // whole identity is unknown, not just the fingerprint.
+        assert!(parse_backend_identity(r#"{"code_fingerprint": "abc123"}"#).is_none());
+    }
+
+    #[test]
+    fn running_backend_identity_reads_both_fields_from_one_fetch() {
+        let stub = spawn_system_info_stub(
+            r#"{"app_version":"0.5.2","data_dir": "/x", "code_fingerprint": "abc123"}"#,
+        );
+        let identity = running_backend_identity(stub).unwrap();
+        assert_eq!(identity.version, "0.5.2");
+        assert_eq!(identity.code_fingerprint, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn running_backend_identity_transport_failure_is_not_conflated_with_absent_field() {
+        // The P1 Greptile caught in review of #1796: when version and
+        // fingerprint came from two independent /system/info fetches, a
+        // transport hiccup on the SECOND one (nothing listening, timeout,
+        // connection reset) returned `None` from
+        // `running_backend_code_fingerprint` alone — wire-identical to "the
+        // body parsed fine but the key was genuinely absent", which
+        // `code_fingerprint_is_current` treats as stale. That could kill and
+        // respawn a perfectly healthy, externally-owned backend on a single
+        // flaky probe.
+        //
+        // With one fetch, a transport failure can no longer reach that
+        // branch at all: `running_backend_identity` returns a flat `None`,
+        // which `prepare_backend_launch`'s `None => {}` arm treats as
+        // "nothing answered" — a wholly different code path from "answered,
+        // but predates the fingerprint field" (`Some(identity)` with
+        // `code_fingerprint: None`). Assert that boundary directly: nothing
+        // is listening on this port, so the fetch itself fails, and the
+        // result must be the "nothing answered" `None` — never a `Some`
+        // that a caller could misread as an absent-field verdict.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // frees the port; nothing is listening on it now
+        assert_eq!(running_backend_identity(port), None);
+    }
+
     // ── Per-run crash evidence (#1510) ───────────────────────────────────
     // The reported failure shape: a crash marker whose stderr tail was the
     // REPLACEMENT process's healthy startup, because the shared err log was
@@ -1032,6 +1727,7 @@ mod tests {
 
     #[test]
     fn a_dying_runs_buffered_stderr_flushes_before_the_next_offset() {
+        let _g = DRAINER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("backend_err.log");
@@ -1044,10 +1740,10 @@ mod tests {
             let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
             writeln!(f, "run1: buffered last words").unwrap();
         });
-        *ERR_LOG_DRAINER.lock().unwrap() = Some(late);
+        track_err_drainer(late);
 
         // …must land BEFORE the next run records where its output begins.
-        join_previous_err_drainer(Duration::from_secs(2));
+        settle_err_log(Duration::from_secs(2));
         let (_file, start) = open_err_log_for_run(&path);
         let run2 = read_error_log_tail_at(&path, start, 10);
         assert!(
@@ -1089,5 +1785,310 @@ mod tests {
             rotated.exists(),
             "old evidence must survive rotation in the sibling file"
         );
+    }
+
+
+    // ── #1933: name who actually holds the port ───────────────────────────
+
+    #[test]
+    fn our_own_orphan_is_not_reported_as_another_application() {
+        // The report that opened #1933: the holder was the user's own backend
+        // from an earlier run, and the message told them to quit "another
+        // application" — then a copy of VoiceStudio with no window. Nothing in
+        // it would have worked.
+        let msg = port_conflict_message(
+            3900,
+            &PortHolder::OurBackend(env!("CARGO_PKG_VERSION").to_string()),
+            "",
+        );
+
+        assert!(msg.contains("VoiceStudio backend from an earlier session"), "{msg}");
+        assert!(!msg.contains("another application"), "{msg}");
+        // And a way out, not just a diagnosis.
+        assert!(msg.contains("terminal"), "{msg}");
+    }
+
+    #[test]
+    fn a_backend_from_another_version_is_named() {
+        let msg = port_conflict_message(3900, &PortHolder::OurBackend("0.1.0".into()), "");
+
+        assert!(msg.contains("0.1.0"), "the stale version is what identifies it: {msg}");
+        assert!(msg.contains(env!("CARGO_PKG_VERSION")), "{msg}");
+    }
+
+    #[test]
+    fn an_unidentified_listener_keeps_the_conservative_wording() {
+        // Never tell a user to go kill a process that may not be theirs.
+        for holder in [PortHolder::Foreign, PortHolder::Unknown] {
+            let msg = port_conflict_message(3900, &holder, "");
+            assert!(msg.contains("another application"), "{msg}");
+            assert!(!msg.contains("lsof"), "{msg}");
+            assert!(!msg.contains("Get-NetTCPConnection"), "{msg}");
+            assert!(!msg.contains("kill"), "{msg}");
+        }
+    }
+
+    /// A one-shot loopback responder: serves `response` verbatim to the first
+    /// connection, then stops. Enough to answer one `/system/info` probe.
+    fn serve_once(response: String) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { continue };
+                let mut scratch = [0u8; 1024];
+                let _ = stream.read(&mut scratch);
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_body_that_merely_looks_like_ours_is_not_treated_as_ours() {
+        // CodeRabbit: running_backend_version accepts a body containing
+        // "model_checkpoint" or "data_dir" — a substring sniff. Fine for
+        // deciding whether to ATTACH; not fine here, where the answer ends in
+        // a message naming a process for the user to kill. Anything can serve
+        // that body. Only our backend stamps x-omnivoice-backend.
+        let body = r#"{"model_checkpoint": "x", "data_dir": "/tmp", "app_version": "9.9.9"}"#;
+        let port = serve_once(format!(
+            "HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+
+{body}",
+            body.len()
+        ));
+
+        assert_eq!(
+            port_holder(port),
+            PortHolder::Foreign,
+            "an unmarked responder must never be named as our backend"
+        );
+        let msg = port_conflict_message(port, &port_holder(port), "");
+        assert!(!msg.contains("lsof"), "{msg}");
+        assert!(!msg.contains("Get-NetTCPConnection"), "{msg}");
+    }
+
+    #[test]
+    fn the_marker_header_is_what_identifies_our_backend() {
+        let body = r#"{"model_checkpoint": "x", "data_dir": "/tmp", "app_version": "9.9.9"}"#;
+        let port = serve_once(format!(
+            "HTTP/1.1 200 OK
+x-omnivoice-backend: 9.9.9
+Content-Length: {}
+
+{body}",
+            body.len()
+        ));
+
+        assert_eq!(port_holder(port), PortHolder::OurBackend("9.9.9".into()));
+    }
+
+    #[test]
+    fn the_reclaim_guidance_never_pipes_a_lookup_into_kill() {
+        // Greptile, security: the convenient one-liner does not preserve the
+        // identity `port_holder` established. `lsof -ti tcp:3900 | xargs kill`
+        // matches CONNECTED CLIENTS as well as the listener, and Windows
+        // `findstr :3900` matches `:39001` and established connections — so a
+        // user following it can end a process that merely talks to
+        // VoiceStudio, or one unrelated to it. The lookup has to be shown for
+        // a human to check before anything is signalled.
+        let guidance = reclaim_command(3900);
+
+        assert!(
+            !guidance.contains("| xargs kill") && !guidance.contains("|xargs kill"),
+            "a lookup piped straight into kill can end a process nobody identified: {guidance}"
+        );
+        // The listener, not every socket on the port.
+        if cfg!(target_os = "windows") {
+            assert!(guidance.contains("-State Listen"), "{guidance}");
+        } else {
+            assert!(guidance.contains("-sTCP:LISTEN"), "{guidance}");
+        }
+        // And a step where the user confirms what they found.
+        assert!(guidance.contains("confirmed"), "{guidance}");
+    }
+
+    #[test]
+    fn every_wording_still_triggers_the_localised_port_hint() {
+        // detectHints matches /port.*in use/i to swap this English string for
+        // the translated bootstrap.hint_port. An earlier draft of one of these
+        // said "is held by" and silently dropped the translation.
+        for holder in [
+            PortHolder::OurBackend(env!("CARGO_PKG_VERSION").to_string()),
+            PortHolder::OurBackend("0.1.0".into()),
+            PortHolder::Foreign,
+            PortHolder::Unknown,
+        ] {
+            let msg = port_conflict_message(3900, &holder, "").to_lowercase();
+            let port_at = msg.find("port").expect("no 'port' in the message");
+            assert!(
+                msg[port_at..].contains("in use"),
+                "detectHints will not match this, so the user loses the translated hint: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_caller_suffix_is_appended_not_substituted() {
+        let msg = port_conflict_message(3900, &PortHolder::Foreign, "so the backend can't restart.");
+
+        assert!(msg.contains("another application"), "{msg}");
+        assert!(msg.ends_with("so the backend can't restart."), "{msg}");
+    }
+
+    #[test]
+    fn a_crash_tail_waits_for_the_dying_runs_last_words() {
+        let _g = DRAINER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // #1850: `wait()` returns the moment the child exits, but the stderr
+        // drainer is a separate thread still reading the pipe. Capturing
+        // `last_stderr` at that instant produced a crash report whose log
+        // stopped a minute before the death — the traceback that named the
+        // cause never made it into the file in time.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backend_err.log");
+        fs::write(&path, "steady state\n").unwrap();
+
+        let p = path.clone();
+        let dying = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(120));
+            let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+            writeln!(f, "Traceback (most recent call last):").unwrap();
+            writeln!(f, "RuntimeError: the actual cause").unwrap();
+        });
+        track_err_drainer(dying);
+
+        // Without the settle this reads "steady state" and nothing else.
+        settle_err_log(ERR_LOG_SETTLE);
+        let tail = read_error_log_tail_at(&path, 0, 30);
+
+        assert!(
+            tail.contains("RuntimeError: the actual cause"),
+            "the crash marker captured a tail that predates the death: {tail:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_offset_survives_a_respawn_during_the_settle() {
+        // Greptile on #1994: settling can take up to two seconds, and a Retry
+        // in that window installs a new run and moves ERR_LOG_RUN_START past
+        // the dying run's output. Reading "the current run" after the wait
+        // would hand the dead process's crash marker the REPLACEMENT's healthy
+        // startup — the cross-run attribution #1510 exists to prevent,
+        // reintroduced through the wait that fixes the tail. Death paths pin
+        // the offset first, so the slice is the dying run's either way.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backend_err.log");
+        fs::write(&path, "run1: RuntimeError: the actual cause
+").unwrap();
+        let pinned = 0u64;
+
+        // A respawn lands mid-settle and the new run starts after that line.
+        let moved_on = fs::metadata(&path).unwrap().len();
+        fs::write(
+            &path,
+            "run1: RuntimeError: the actual cause
+run2: healthy startup
+",
+        )
+        .unwrap();
+
+        assert!(
+            read_error_log_tail_at(&path, pinned, 30).contains("the actual cause"),
+            "the pinned offset must still name the dying run's slice"
+        );
+        assert!(
+            !read_error_log_tail_at(&path, moved_on, 30).contains("the actual cause"),
+            "sanity: reading from the new run's offset really does lose it"
+        );
+    }
+
+    #[test]
+    fn a_dead_runs_slice_stops_where_the_replacement_begins() {
+        // CodeRabbit: a start offset with an unbounded end does not identify
+        // ONE run. The replacement writes BELOW the dying run's lines, and a
+        // tail reads the last N of the file — so the newer run's healthy
+        // startup is exactly what the dead run's crash marker would get.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backend_err.log");
+        let run1 = "run1: RuntimeError: the actual cause
+";
+        fs::write(&path, run1).unwrap();
+        let boundary = run1.len() as u64;
+        fs::write(&path, format!("{run1}run2: healthy startup
+run2: listening
+")).unwrap();
+
+        let closed = read_error_log_slice(&path, 0, Some(boundary), 30);
+        assert!(closed.contains("the actual cause"), "{closed}");
+        assert!(!closed.contains("run2"), "the replacement's output leaked in: {closed}");
+
+        // Unbounded, the tail is the replacement — the bug this closes.
+        let open = read_error_log_slice(&path, 0, None, 2);
+        assert!(open.contains("run2"), "sanity: an open end really does read the newer run");
+    }
+
+    #[test]
+    fn an_unusable_end_degrades_to_the_rest_of_the_file() {
+        // Same principle as an unusable start: evidence beats precision, and a
+        // silent empty capture is the one outcome that helps nobody.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backend_err.log");
+        fs::write(&path, "only line
+").unwrap();
+
+        // Past EOF, and an end that sits before the start — both mean the
+        // caller cannot pin the far side, so the slice runs to the end of the
+        // file. The start is honoured independently either way.
+        assert_eq!(read_error_log_slice(&path, 0, Some(10_000), 10), "only line");
+        assert_eq!(read_error_log_slice(&path, 5, Some(1), 10), "line");
+    }
+
+    #[test]
+    fn a_wedged_drainer_is_handed_back_rather_than_detached() {
+        let _g = DRAINER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The bound exists so an orphaned grandchild holding the pipe cannot
+        // stall crash recording. But giving up must not drop the handle:
+        // every later caller would then have nothing to wait on, and the
+        // respawn-offset guarantee (#1510) would quietly stop holding.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let wedged = std::thread::spawn(move || {
+            let _ = rx.recv();
+        });
+        track_err_drainer(wedged);
+
+        settle_err_log(Duration::from_millis(60));
+
+        assert!(
+            !ERR_LOG_DRAINERS.lock().unwrap().is_empty(),
+            "a drainer that outlived the bound was detached instead of retained"
+        );
+
+        // CodeRabbit: a NEW run installing its own drainer while the wait was
+        // timing out must not evict the old one. A single slot dropped it here,
+        // which detaches the thread — nothing could wait for that run's output
+        // again, and both the #1510 and #1850 guarantees silently stopped
+        // holding.
+        let (tx2, rx2) = std::sync::mpsc::channel::<()>();
+        track_err_drainer(std::thread::spawn(move || {
+            let _ = rx2.recv();
+        }));
+        settle_err_log(Duration::from_millis(60));
+        assert_eq!(
+            ERR_LOG_DRAINERS.lock().unwrap().len(),
+            2,
+            "an unfinished drainer was dropped when another run installed one"
+        );
+
+        let _ = tx.send(());
+        let _ = tx2.send(());
+        for handle in ERR_LOG_DRAINERS.lock().unwrap().drain(..) {
+            let _ = handle.join();
+        }
     }
 }

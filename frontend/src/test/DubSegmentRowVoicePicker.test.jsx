@@ -79,6 +79,18 @@ describe('DubSegmentRow voice picker (#1220)', () => {
     expect(onEditField).toHaveBeenCalledWith('s1', 'profile_id', 'p_clone');
   });
 
+  it('uses the portaled searchable language picker and preserves the language code', () => {
+    const onEditField = vi.fn();
+    renderRow(makeProps({ onEditField }));
+    fireEvent.click(screen.getByRole('button', { name: 'Lang' }));
+    expect(screen.getByRole('listbox').parentElement).toBe(document.body);
+    fireEvent.change(screen.getByRole('textbox', { name: /Search/ }), {
+      target: { value: 'HE' },
+    });
+    fireEvent.mouseDown(screen.getByRole('option', { name: 'HE' }));
+    expect(onEditField).toHaveBeenCalledWith('s1', 'target_lang', 'he');
+  });
+
   it('emits the auto:<slug> value for a from-video speaker (byte-identical to the old select)', () => {
     const onEditField = vi.fn();
     renderRow(makeProps({ onEditField }));

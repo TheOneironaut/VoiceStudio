@@ -1,3 +1,4 @@
+import i18n from 'i18next';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { apiFetch, ApiError } from '../api/client';
 
@@ -7,6 +8,31 @@ import { apiFetch, ApiError } from '../api/client';
 // few times — but never retry an HTTP error (the backend responded) or a
 // deliberate abort, and still surface the actionable error if it stays down.
 describe('apiFetch transport-retry', () => {
+  it('localizes Argos runtime errors without losing recovery metadata', async () => {
+    const detail = { code: 'argos_runtime_unavailable', message: 'Raw native diagnostic' };
+    vi.spyOn(i18n, 't').mockReturnValue('Localized recovery guidance');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ detail }), { status: 400 })),
+    );
+    const err = await apiFetch('/dub/translate').catch((error) => error);
+    expect(err.message).toContain('Localized recovery guidance');
+    expect(err.detail).toEqual(detail);
+  });
+  it.each([false, true])('localizes HTTP failure topics (nested: %s)', async (nested) => {
+    const translate = vi.spyOn(i18n, 't').mockReturnValue('Localized recovery');
+    const failure = { docs_topic: 'GPU_ARCH_UNSUPPORTED', detail: 'English fallback' };
+    const payload = nested ? { detail: failure } : failure;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify(payload), { status: 500 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await apiFetch('/generate').catch((e) => e);
+    expect(error.message).toContain('Localized recovery');
+    expect(error.detail).toEqual(payload.detail);
+    expect(translate).toHaveBeenCalledWith('tts_errors.gpu_arch_unsupported');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();

@@ -68,3 +68,10 @@ export function groupModels(models, query) {
     };
   });
 }
+
+/** Which catalog sections belong to each engine family (one family's slice of the catalog). */
+export const FAMILY_SECTIONS = {
+  tts: ['tts'],
+  asr: ['asr', 'dictation', 'diarisation'],
+  llm: [],
+};

@@ -84,6 +84,10 @@ def _is_ct_error(msg):
 def _get_model():
     global _model
     if _model is None:
+        from core.execstack import ensure_ctranslate2_loadable
+        ok, detail = ensure_ctranslate2_loadable()
+        if not ok:
+            raise ImportError(f"faster-whisper cannot load CTranslate2: {detail}")
         from faster_whisper import WhisperModel
         # Same weights as in-process faster-whisper: ASR_MODEL_FASTER selects
         # for BOTH variants, ASR_MODEL_FW stays as a sidecar-only override.
@@ -124,9 +128,16 @@ def _get_model():
     return _model
 
 
-def _transcribe(audio_path, word_timestamps):
+def _transcribe(audio_path, word_timestamps, decode_options=None):
+    options = decode_options or {}
+    if not isinstance(options, dict) or any(
+        key not in {"beam_size", "best_of"}
+        or type(value) is not int or not 1 <= value <= 8
+        for key, value in options.items()
+    ):
+        raise ValueError("Invalid ASR decoding options")
     model = _get_model()
-    segments, info = model.transcribe(audio_path, word_timestamps=word_timestamps)
+    segments, info = model.transcribe(audio_path, word_timestamps=word_timestamps, **options)
     out = []
     for s in segments:
         seg = {"start": float(s.start), "end": float(s.end), "text": s.text}
@@ -178,7 +189,7 @@ def main() -> int:
             if op == "ping":
                 _send(stdout, {"op": "pong"})
             elif op == "transcribe":
-                result = _transcribe(msg.get("audio_path"), bool(msg.get("word_timestamps", True)))
+                result = _transcribe(msg.get("audio_path"), bool(msg.get("word_timestamps", True)), msg.get("decode_options"))
                 _send(stdout, {"op": "segments", "result": result})
             elif op == "shutdown":
                 return 0

@@ -143,7 +143,7 @@ def _resolve_profile_conditioning(row, *, ref_text=None, instruct=None,
     out = {
         "ref_audio_path": None, "ref_text": ref_text, "instruct": instruct,
         "seed": seed, "language": language, "kind": None,
-        "persist_ref_text": False,
+        "persist_ref_text": False, "language_from_profile": False,
     }
     # `kind` is authoritative (0005): 'design' profiles condition on their
     # deterministic rendered sample + instruct; 'clone' on the user's
@@ -212,6 +212,12 @@ def _resolve_profile_conditioning(row, *, ref_text=None, instruct=None,
             prof_lang = None
         if prof_lang and prof_lang != "Auto":
             out["language"] = prof_lang
+            # #2156: record that the caller never asked for this language. The
+            # UI omits `language` entirely while its picker reads "Auto", so a
+            # profile-filled language must not be reported back as if the user
+            # had picked it — an engine that can't speak it would otherwise
+            # tell them to "leave language as Auto", which is what they did.
+            out["language_from_profile"] = True
     return out
 
 
@@ -736,7 +742,7 @@ def _oom_friendly_reraise(e):
     # the OOM catch-all, telling a user with 63 GB of RAM to press Flush. Point
     # at the real fix — set the variable — and never mention memory or Flush.
     # The underlying error already names the exact variable + what to point it
-    # at (and Model Catalogue → Engines shows a copy-paste setup line), so keep it
+    # at (and Model Catalogue shows a copy-paste setup line), so keep it
     # front-and-center. Checked before the OOM branch so a config error can
     # never be mislabeled as memory.
     if _is_config_failure(e):
@@ -745,7 +751,7 @@ def _oom_friendly_reraise(e):
             f"environment variable that isn't configured, so nothing was "
             f"generated. Set it as the underlying error describes (it names the "
             f"exact variable and what to point it at), then restart VoiceStudio — "
-            f"or pick a ready engine in Model Catalogue → Engines. This is a setup "
+            f"or pick a ready engine in Model Catalogue. This is a setup "
             f"problem, not a memory one. Underlying error: {e}"
         ) from e
     # #880 (the class bug): the OOM hint used to be the catch-all fallback,
@@ -804,16 +810,36 @@ def _oom_friendly_reraise(e):
     ) from e
 
 
-def _generate_timeout_s(text: str, *, execution_device=None) -> float:
+def _generate_timeout_s(
+    text: str,
+    *,
+    engine: object = None,
+    execution_device=None,
+    min_vram_gb=0.0,
+    hardware_family=None,
+    vram_gb=None,
+) -> float:
     """Wall-clock budget for one generate, scaled to the request.
 
     Thin alias for the canonical helper, which moved to
     ``services.model_manager.generate_timeout_s`` (#1190) so /v1/audio/speech,
     batch, dub and archetype previews share it instead of each re-deriving (or,
     as they did, silently keeping the flat 300s).
+
+    ``min_vram_gb`` is the engine's declared VRAM floor. A GPU below it pages to
+    system RAM and renders slower than this machine's CPU, so it must not be
+    budgeted as fast hardware (#1804) — the same figure the dispatch already
+    hands the guard so a timeout message can name the card (#1226/#1222).
     """
     from services.model_manager import generate_timeout_s
-    return generate_timeout_s(text, execution_device=execution_device)
+    return generate_timeout_s(
+        text,
+        engine=engine,
+        execution_device=execution_device,
+        min_vram_gb=min_vram_gb,
+        hardware_family=hardware_family,
+        vram_gb=vram_gb,
+    )
 
 
 def _run_inference(
@@ -1023,6 +1049,18 @@ _LANGUAGE_REJECTION_SIGNATURES = (
     "unsupported language code",
 )
 
+# Engine-specific rejections that ALREADY name the engine and what it supports,
+# so #1257's generic rewrite deliberately leaves them alone — re-wrapping them
+# only nests "Engine's own message:" twice. They still have to be recognised as
+# language rejections for #2156's provenance check, which cares about the
+# *cause* of the language, not the quality of the wording.
+_SELF_DESCRIBING_LANGUAGE_REJECTIONS = (
+    # services/tts_backend.py: "…doesn't support language='Persian'. Kokoro
+    # supports: …" — mlx-audio's Kokoro, the engine reported in #2156.
+    "doesn't support language",
+    "does not support language",
+)
+
 #: `unsupported language: xx` / `unsupported language 'xx'` — but not
 #: `unsupported language model ...`.
 _LANGUAGE_REJECTION_RE = re.compile(
@@ -1032,15 +1070,87 @@ _LANGUAGE_REJECTION_RE = re.compile(
 )
 
 
+def _is_language_rejection(text: str) -> bool:
+    """True when an engine failure is about the LANGUAGE it was handed.
+
+    Matched on the message, not the type: the engines multiplex third-party
+    libraries that each raise their own class. Covers the self-describing
+    wordings too — #1257's rewrite skips those, but #2156 still needs to know a
+    language was refused so it can say where that language came from.
+    """
+    low = text.lower()
+    return (
+        any(sig in low for sig in _LANGUAGE_REJECTION_SIGNATURES)
+        or any(sig in low for sig in _SELF_DESCRIBING_LANGUAGE_REJECTIONS)
+        or bool(_LANGUAGE_REJECTION_RE.search(text))
+    )
+
+
+def _profile_language_rejection_detail(exc: BaseException, language) -> str:
+    """The 400 body for a language the *voice profile* supplied, not the user.
+
+    #2156: the UI omits `language` while its picker reads "Auto", and #533
+    fills that gap from the selected profile. When the active engine can't
+    speak the profile's language the engine's own message tells the user to
+    "leave language as 'Auto'" — which is exactly what they did, so the advice
+    cannot be acted on. Name the real source and the remedies that exist.
+    """
+    return (
+        f"This voice profile is saved with the language '{language}', and the "
+        f"active engine can't speak it. The language picker being on \"Auto\" "
+        f"does not override that — Auto fills the language in from the "
+        f"profile. Set this voice profile's language to one the engine "
+        f"supports, pick a supported language explicitly for this render, or "
+        f"switch engine in Model Catalogue (the VoiceStudio engine has the "
+        f"widest coverage). Engine's own message: {exc}"
+    )
+
+
+def _language_rejection_payload(exc, language, *, from_profile):
+    """Stable, non-retryable error metadata for both response transports."""
+    from core.public_errors import stream_failure
+    failure = stream_failure("invalid_request")
+    failure["terminal"] = True
+    if from_profile:
+        failure.update(
+            code="profile_language_rejected", language=language,
+            detail=_profile_language_rejection_detail(_root_language_error(exc), language),
+        )
+    return failure
+
+
+def _language_rejection_http_error(exc: BaseException, language, *, from_profile):
+    """The 400 a refused language deserves, wherever the refusal was raised.
+
+    A language an engine cannot speak is never retryable — not by waiting, and
+    not by re-running the same request on another machine. Built here so the
+    local (`ValueError`) and remote (`RemoteJobFailed`) handlers cannot drift:
+    #2156 shipped the profile-aware branch on the local path only, and a remote
+    render kept answering with a retryable 503 that offered "run it on this
+    machine instead", which cannot help.
+    """
+    root = _root_language_error(exc)
+    detail = (
+        _profile_language_rejection_detail(root, language)
+        if from_profile else str(exc)
+    )
+    if from_profile:
+        detail = {"code": "profile_language_rejected", "language": language, "message": detail}
+    return HTTPException(status_code=400, detail=detail)
+
+
 def _language_rejection_or(e: BaseException, backend, language):
     """``e`` rewritten with engine context when it's a language rejection.
 
     Returns ``e`` unchanged otherwise, so this is safe to wrap any failure in.
-    Matched on the message, not the type: the engines multiplex third-party
-    libraries that each raise their own class.
+    Deliberately narrower than :func:`_is_language_rejection`: a message that
+    already names its engine and the languages it supports is left alone rather
+    than nested inside a second "Engine's own message:".
     """
     text = str(e)
     low = text.lower()
+    if any(sig in low for sig in _SELF_DESCRIBING_LANGUAGE_REJECTIONS):
+        return e
     if not any(sig in low for sig in _LANGUAGE_REJECTION_SIGNATURES) and not (
         _LANGUAGE_REJECTION_RE.search(text)
     ):
@@ -1049,13 +1159,23 @@ def _language_rejection_or(e: BaseException, backend, language):
         type(backend), "id", type(backend).__name__
     )
     requested = f" '{language}'" if language else ""
-    return ValueError(
+    rewritten = ValueError(
         f"The {engine} engine can't speak{requested}. VoiceStudio offers every "
         f"language its default engine supports, but each engine covers a "
         f"different set — pick one this engine supports, or switch engine in "
-        f"Model Catalogue → Engines (the VoiceStudio engine has the widest coverage) "
+        f"Model Catalogue (the VoiceStudio engine has the widest coverage) "
         f"and generate again. Engine's own message: {e}"
     )
+    # Keep the engine's own text reachable. #2156's profile message quotes the
+    # engine once; without this it would quote THIS wrapper, repeating both the
+    # engine-switch remedy and "Engine's own message:" twice.
+    rewritten.engine_language_error = e
+    return rewritten
+
+
+def _root_language_error(exc: BaseException) -> BaseException:
+    """The engine's own rejection, unwrapping :func:`_language_rejection_or`."""
+    return getattr(exc, "engine_language_error", exc)
 
 
 def _persist_profile_ref_text(profile_id: str, ref_text: str) -> None:
@@ -1348,12 +1468,12 @@ async def generate_speech(
     ref_text: Optional[str] = Form(None),
     instruct: Optional[str] = Form(None),
     duration: Optional[float] = Form(None),
-    num_step: int = Form(16),
+    num_step: Optional[int] = Form(None),
     guidance_scale: float = Form(2.0),
     speed: float = Form(1.0),
     t_shift: Optional[float] = Form(None),
     denoise: bool = Form(True),
-    postprocess_output: bool = Form(True),
+    postprocess_output: Optional[bool] = Form(None),
     layer_penalty_factor: Optional[float] = Form(None),
     position_temperature: Optional[float] = Form(None),
     class_temperature: Optional[float] = Form(None),
@@ -1399,6 +1519,13 @@ async def generate_speech(
     )
 
     engine_id = engine or active_backend_id()
+    from services.performance_profiles import tts_defaults
+
+    sampling_defaults = tts_defaults(engine_id)
+    if num_step is None:
+        num_step = sampling_defaults.get("num_step", 16)
+    if postprocess_output is None:
+        postprocess_output = sampling_defaults.get("postprocess_output", True)
     try:
         backend_cls = get_backend_class(engine_id)
     except ValueError:
@@ -1434,6 +1561,8 @@ async def generate_speech(
     # local fallback call's timeout device-neutral so the closure is valid
     # without pretending the control plane describes the remote worker.
     _routing = {"effective_device": None}
+    _routing_hardware_family = None
+    _routing_vram_gb = None
 
     if not _remote:
         # Single-active-engine memory discipline: hand back any OTHER resident
@@ -1490,11 +1619,16 @@ async def generate_speech(
         # 4090 from a Mac control plane would be refused by a gate describing
         # a machine that is about to do nothing.
         from core.device_caps import detect_host_caps
-        from services.engine_routing import resolve_routing, routing_notice
-        _routing = resolve_routing(
-            getattr(backend_cls, "gpu_compat", ("cpu",)), detect_host_caps(),
-            _engine_min_vram_gb,
+        from services.engine_routing import (
+            routing_notice,
+            runtime_compute_profile_async,
         )
+        _routing = await runtime_compute_profile_async(
+            backend_cls, detect_host_caps()
+        )
+        _engine_min_vram_gb = _routing["min_vram_gb"]
+        _routing_hardware_family = _routing.get("runtime_hardware_family")
+        _routing_vram_gb = _routing.get("runtime_vram_gb")
         if _routing["routing_status"] == "unavailable":
             # The engine needs an accelerator this host lacks and has no CPU path.
             raise HTTPException(status_code=400, detail=_routing["routing_reason"])
@@ -1525,7 +1659,7 @@ async def generate_speech(
                 detail=(
                     f"TTS engine '{engine_id}' did not finish loading within its "
                     f"model-load budget — on a first run this usually means the "
-                    f"weight download is slow or stalled (check Model Catalogue → Models "
+                    f"weight download is slow or stalled (check the engine's Weights list in Model Catalogue "
                     f"for progress), not that generation failed. Retry once the "
                     f"model shows as installed."
                 ),
@@ -1536,6 +1670,9 @@ async def generate_speech(
     ref_lease = None
     used_seed = seed
     resolved_profile_id = None
+    # #2156: True once a profile's stored language fills a language the caller
+    # never sent, so a rejection can name the profile instead of the picker.
+    language_from_profile = False
     history_mode = None  # profile.kind when a profile drives; else inferred at insert
     # #1032: profile id to persist an auto-transcribed reference transcript to.
     # Set only for a plain (unlocked) clone profile whose stored ref_text is
@@ -1564,6 +1701,7 @@ async def generate_speech(
             instruct = _cond["instruct"]
             used_seed = _cond["seed"]
             language = _cond["language"]
+            language_from_profile = _cond["language_from_profile"]
             if _cond["persist_ref_text"]:
                 persist_ref_text_profile_id = profile_id
     elif ref_audio is not None:
@@ -1580,7 +1718,7 @@ async def generate_speech(
     # backend (whisperx / faster-whisper / mlx-whisper) instead of the model's
     # built-in transformers pipeline, which cannot load whisper-large-v3-turbo
     # on transformers 5.3. On failure ref_text stays None and the model's
-    # fallback behaves exactly as before.
+    # installed-only fallback can try without downloading another ASR model.
     if ref_audio_path and not ref_text:
         from services.asr_backend import transcribe_reference
         # Same #730 hang risk as any whisperx transcribe — bound + reset the pool
@@ -1718,7 +1856,14 @@ async def generate_speech(
             local=gpu_gateway.LocalCall(
                 _remote_only_local_call(_target_label),
                 what="TTS generate",
-                timeout=_generate_timeout_s(text, execution_device=_routing["effective_device"]),
+                timeout=_generate_timeout_s(
+                    text,
+                    engine=_backend,
+                    execution_device=_routing["effective_device"],
+                    min_vram_gb=_engine_min_vram_gb,
+                    hardware_family=_routing_hardware_family,
+                    vram_gb=_routing_vram_gb,
+                ),
                 min_vram_gb=_engine_min_vram_gb,
             ),
             remote=_remote_call,
@@ -1831,10 +1976,14 @@ async def generate_speech(
                 # holding what is often its only slot until the lease lapses.
                 render.cancel()
                 raise
-            except ValueError:
+            except ValueError as e:
                 logger.error("Remote generation request rejected")
                 from core.public_errors import stream_failure
-                yield _line({"type": "error", **stream_failure("invalid_request")})
+                failure = (
+                    _language_rejection_payload(e, language, from_profile=language_from_profile)
+                    if _is_language_rejection(str(e)) else stream_failure("invalid_request")
+                )
+                yield _line({"type": "error", **failure})
             except gpu_gateway.ModelNotDownloaded as e:
                 logger.warning("Remote model missing on %s", _target_label)
                 from core.public_errors import stream_failure
@@ -1850,13 +1999,16 @@ async def generate_speech(
             except gpu_gateway.RemoteJobFailed as e:
                 logger.error("Remote generate failed on %s", _target_label)
                 from core.public_errors import stream_failure
-                yield _line({
-                    "type": "error",
-                    **stream_failure("generation_failed"),
-                    "retryable": True,
-                    "target_label": e.worker_label or _target_label,
-                    "hint": e.hint,
-                })
+                if _is_language_rejection(str(e)):
+                    yield _line({"type": "error", **_language_rejection_payload(
+                        e, language, from_profile=language_from_profile,
+                    )})
+                else:
+                    yield _line({
+                        "type": "error", **stream_failure("generation_failed"),
+                        "retryable": True, "target_label": e.worker_label or _target_label,
+                        "hint": e.hint,
+                    })
             except Exception as exc:
                 # Mid-job remote failure is NOT quietly redone here: the client
                 # treats a retryable error as "surface it", so the user decides
@@ -2012,7 +2164,14 @@ async def generate_speech(
                                 ),
                                 what="TTS generate",
                                 min_vram_gb=_engine_min_vram_gb,
-                                timeout=_generate_timeout_s(text, execution_device=_routing["effective_device"]),
+                                timeout=_generate_timeout_s(
+                                    text,
+                                    engine=_backend,
+                                    execution_device=_routing["effective_device"],
+                                    min_vram_gb=_engine_min_vram_gb,
+                                    hardware_family=_routing_hardware_family,
+                                    vram_gb=_routing_vram_gb,
+                                ),
                                 on_abandon=release,
                             )
                         )
@@ -2032,7 +2191,14 @@ async def generate_speech(
                                 ),
                                 what="TTS generate",
                                 min_vram_gb=_engine_min_vram_gb,
-                                timeout=_generate_timeout_s(text, execution_device=_routing["effective_device"]),
+                                timeout=_generate_timeout_s(
+                                    text,
+                                    engine=_backend,
+                                    execution_device=_routing["effective_device"],
+                                    min_vram_gb=_engine_min_vram_gb,
+                                    hardware_family=_routing_hardware_family,
+                                    vram_gb=_routing_vram_gb,
+                                ),
                                 on_abandon=release,
                             )
                         )
@@ -2072,7 +2238,14 @@ async def generate_speech(
                                 # Budget scaled to THIS chunk (#1190) — the flat
                                 # 300s here is what made long streamed renders fail
                                 # even after the v0.3.22 scaled budget shipped.
-                                timeout=_generate_timeout_s(chunk_text, execution_device=_routing["effective_device"]),
+                                timeout=_generate_timeout_s(
+                                    chunk_text,
+                                    engine=_backend,
+                                    execution_device=_routing["effective_device"],
+                                    min_vram_gb=_engine_min_vram_gb,
+                                    hardware_family=_routing_hardware_family,
+                                    vram_gb=_routing_vram_gb,
+                                ),
                                 on_abandon=release,
                             )
                         )
@@ -2144,10 +2317,14 @@ async def generate_speech(
                 failure = stream_failure("generation_timeout")
                 failure["retry_after"] = 30
                 yield _line({"type": "error", **failure})
-            except ValueError:
+            except ValueError as e:
                 logger.error("Streaming generation request rejected")
                 from core.public_errors import stream_failure
-                yield _line({"type": "error", **stream_failure("invalid_request")})
+                failure = (
+                    _language_rejection_payload(e, language, from_profile=language_from_profile)
+                    if _is_language_rejection(str(e)) else stream_failure("invalid_request")
+                )
+                yield _line({"type": "error", **failure})
             except Exception as exc:
                 # A streaming request answers 200 and carries its failure as an
                 # in-band error frame, so it never reaches the global 500
@@ -2232,7 +2409,14 @@ async def generate_speech(
                     _REMOTE_OP,
                     local=gpu_gateway.LocalCall(
                         _local_render, what="TTS generate",
-                        timeout=_generate_timeout_s(text, execution_device=_routing["effective_device"]),
+                        timeout=_generate_timeout_s(
+                            text,
+                            engine=_backend,
+                            execution_device=_routing["effective_device"],
+                            min_vram_gb=_engine_min_vram_gb,
+                            hardware_family=_routing_hardware_family,
+                            vram_gb=_routing_vram_gb,
+                        ),
                         min_vram_gb=_engine_min_vram_gb,
                         on_abandon=release,
                     ),
@@ -2323,6 +2507,15 @@ async def generate_speech(
         # the client can offer "run it on this machine instead" — a resubmit
         # the user chose, with a wait they were told about.
         logger.error("Remote generate failed on %s: %s", _target_label, e)
+        # #2156: a language the engine can't speak is a request problem, not a
+        # worker problem. It travels home as RemoteJobFailed — caught here,
+        # ahead of the ValueError branch below — so without this the user is
+        # told to retry on this machine, where the same engine refuses the same
+        # language. Answer it as the 400 it is, on either path.
+        if _is_language_rejection(str(e)):
+            raise _language_rejection_http_error(
+                e, language, from_profile=language_from_profile
+            ) from e
         raise HTTPException(
             status_code=503,
             detail=f"{e} {e.hint or 'Run it on this machine instead, or pick another GPU.'}",
@@ -2357,7 +2550,25 @@ async def generate_speech(
         raise HTTPException(status_code=503, detail=str(e)) from e
     except ValueError as e:
         logger.error("Validation failed: %s", e)
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        # #2156: the language the engine refused was never chosen by the user —
+        # it came from the selected voice profile because the picker was on
+        # "Auto". The engine's own remedy ("leave language as 'Auto'") is then
+        # unfollowable, so say where the language actually came from. Only this
+        # scope knows that; the engine adapters never see the provenance.
+        if language_from_profile and _is_language_rejection(str(e)):
+            raise _language_rejection_http_error(
+                e, language, from_profile=True
+            ) from e
+        # Most ValueErrors here are VoiceStudio's own validation messages and
+        # are exactly what the user should read. A few are raw library text
+        # naming parameters and files the user cannot act on — those get the
+        # owned remedy for their class instead (#1879). Unclassified ones keep
+        # passing through, so this cannot swallow a good message.
+        from core.failure import classify, public_hint_for_topic
+
+        _topic = classify(str(e))
+        _owned = public_hint_for_topic(_topic) if _topic else ""
+        raise HTTPException(status_code=400, detail=_owned or str(e)) from e
     except Exception as e:
         tb = traceback.format_exc()
         logger.error("Inference failed: %s\n%s", e, tb)

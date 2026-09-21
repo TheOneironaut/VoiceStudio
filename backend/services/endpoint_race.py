@@ -15,7 +15,7 @@ Principles (owner-set):
   endpoint gets probed first — never to decide. No geo-IP lookups, no
   third-party calls, no telemetry.
 - **Explicit choices are never auto-switched.** A user with an endpoint
-  configured anywhere (Model Catalogue → Models, ``HF_ENDPOINT`` env, the
+  configured anywhere (Settings → Network, ``HF_ENDPOINT`` env, the
   ``hf_endpoint`` pref) is in manual mode; auto applies only where nothing
   was chosen. ``OMNIVOICE_HF_ENDPOINT_MODE=manual`` is a hard env opt-out.
 - **Sticky, canonical-first decisions.** With both endpoints reachable the
@@ -65,7 +65,7 @@ _MODE_PREF = "hf_endpoint_mode"          # "auto" | "manual"; absent → default
 _DECISION_PREF = "hf_endpoint_auto"      # cached decision dict (see race())
 
 DECISION_MAX_AGE_S = 7 * 24 * 3600.0     # re-race a decision older than 7 days
-PROBE_TIMEOUT_S = 3.0                    # short: a probe is not a download
+PROBE_TIMEOUT_S = 8.0                    # high-latency / China paths often need >3s
 MIRROR_SPEEDUP_FACTOR = 3.0              # mirror must be ≥3× faster to win
 
 # Small, stable, long-lived public file for the optional ranged-GET
@@ -272,7 +272,7 @@ def explicit_endpoint():
     """The endpoint the user explicitly configured, or "".
 
     Same resolution the download paths use: ``HF_ENDPOINT`` env (what
-    Model Catalogue → Models persists via user_env and what main.py loads at boot)
+    Settings → Network persists via user_env and what main.py loads at boot)
     with the ``hf_endpoint`` pref as fallback. Unlike
     ``core.failure.configured_hf_mirror`` this does NOT filter the official
     endpoint — explicitly choosing huggingface.co is still an explicit

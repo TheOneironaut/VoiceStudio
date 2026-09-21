@@ -48,6 +48,15 @@ from services.subprocess_backend import SubprocessBackend
 
 logger = logging.getLogger("omnivoice.engines.pockettts")
 
+_VENV_ENV_VAR = "OMNIVOICE_POCKETTTS_DIR"
+
+
+def _own_venv_python() -> "Path | None":
+    """The venv the one-click installer made for this engine, if any."""
+    from services.sidecar_install import engine_venv_python
+
+    return engine_venv_python(_VENV_ENV_VAR)
+
 if TYPE_CHECKING:
     import torch  # noqa: F401
 
@@ -94,7 +103,7 @@ class PocketTTSBackend(SubprocessBackend):
             raise RuntimeError(platform_error)
         if not self._license_accepted():
             raise RuntimeError(
-                "PocketTTS license not accepted. Review it in Model Catalogue → Engines."
+                "PocketTTS license not accepted. Review it in Model Catalogue."
             )
         super().__init__()
 
@@ -104,7 +113,7 @@ class PocketTTSBackend(SubprocessBackend):
         # relying on every caller to evict its cached instance.
         if not self._license_accepted():
             raise RuntimeError(
-                "PocketTTS license not accepted. Review it in Model Catalogue → Engines."
+                "PocketTTS license not accepted. Review it in Model Catalogue."
             )
         return super().generate(*args, **kwargs)
 
@@ -114,30 +123,31 @@ class PocketTTSBackend(SubprocessBackend):
         # so revocation while waiting cannot reach the sidecar or return audio.
         if not self._license_accepted():
             raise RuntimeError(
-                "PocketTTS license not accepted. Review it in Model Catalogue → Engines."
+                "PocketTTS license not accepted. Review it in Model Catalogue."
             )
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
         if platform_error := cls._platform_error():
             return False, platform_error
-        # Optional-dep gate: the pocket-tts wheel is installed only when the user
-        # opted in. The interpreter is the parent's own (sys.executable), so
-        # there is no separate venv to validate.
-        try:
-            import pocket_tts  # type: ignore[import-not-found]  # noqa: F401
-        except Exception as e:
-            return False, (
-                f"pocket_tts package not installed or failed to import ({e}). "
-                f"Enable in Settings -> Engines (uv sync --extra pockettts)."
-            )
+        # Installed either into its own venv by the one-click installer, which
+        # verified `import pocket_tts` there before saving the path, or into the
+        # app's environment by `uv sync --extra pockettts`.
+        if _own_venv_python() is None:
+            try:
+                import pocket_tts  # type: ignore[import-not-found]  # noqa: F401
+            except Exception as e:
+                return False, (
+                    f"pocket_tts package not installed or failed to import ({e}). "
+                    "Install it from Model Catalogue."
+                )
 
         # The model repository has an additional gated-access agreement and
         # prohibited-use conditions beyond its CC-BY-4.0 license. Keep first
         # use behind an explicit local acknowledgement, matching the dialog.
         if not cls._license_accepted():
             return False, (
-                "PocketTTS license not accepted. Open Model Catalogue → Engines → "
+                "PocketTTS license not accepted. Open Model Catalogue → "
                 "PocketTTS and review the MIT code license, CC-BY-4.0 model "
                 "license, and gated-access conditions before enabling it."
             )
@@ -145,10 +155,10 @@ class PocketTTSBackend(SubprocessBackend):
 
     @classmethod
     def venv_python(cls) -> Path:
-        # Parent interpreter: pocket-tts deps (torch>=2.5, scipy, beartype) sit
-        # happily at the parent's pins, so this isolates for crash recovery, not
-        # dependency pins (same rationale as omnivoice-subprocess).
-        return Path(sys.executable)
+        # Its own venv when the one-click installer made one. Otherwise the
+        # parent interpreter, where `uv sync --extra pockettts` installs it
+        # (its deps sit happily at the parent's pins).
+        return _own_venv_python() or Path(sys.executable)
 
     @classmethod
     def sidecar_script(cls) -> Path:

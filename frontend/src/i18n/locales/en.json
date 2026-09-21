@@ -26,6 +26,8 @@
     "test_placeholder": "Type a sentence to preview the substitution…",
     "test_result": "Will be spoken as:",
     "test_nochange": "No entries match — spoken as written.",
+    "test_inert": "Stored but not applied yet on this engine: {{terms}}. IPA and CMU entries are saved and validated, but only Respelling changes the spoken text today.",
+    "not_applied_badge": "Not applied yet",
     "load_error": "Couldn't load the pronunciation dictionary.",
     "save_error": "Couldn't save that entry.",
     "lang_label": "Language code (e.g. en, de) or leave blank for Global",
@@ -96,6 +98,10 @@
     "importFailed": "Couldn't read that file.",
     "addLine": "Add Line",
     "addChapter": "Add Chapter",
+    "clearScript": "Clear script",
+    "clearScriptHint": "Remove every line and chapter from the script (the cast stays)",
+    "clearConfirm": "Clear all {{count}} script entries and any pending imported text? This cannot be undone.",
+    "cleared": "Script cleared",
     "chapterN": "Chapter {{n}}",
     "stems": "Stems",
     "stemsDone": "Exported {{count}} character stem(s)",
@@ -116,6 +122,11 @@
     "pasteAbove": "Paste text above",
     "cancel": "Cancel",
     "splitIntoTracks": "Split into lines",
+    "splitMode": "Split by",
+    "split_sentences": "Sentences",
+    "split_paragraphs": "Paragraphs",
+    "split_chapters": "Chapters",
+    "splitModeHint": "Every line is read as its own take. For one narrator, paragraphs or whole chapters flow better than sentences.",
     "emptyText": "Start your story by adding dialogue and narration lines. Assign each character a voice in the Cast.",
     "addFirst": "Add First Line",
     "linePlaceholder": "Enter dialogue or narration… use [pause 0.5s] for a silent break",
@@ -169,13 +180,16 @@
   },
   "catalogue": {
     "title": "Model Catalogue",
-    "tab_engines": "Engines",
-    "tab_models": "Models",
-    "moved_title": "Now in the Model Catalogue",
-    "moved_engines_body": "Choosing the default speech, transcription and LLM engine moved to the Model Catalogue workspace.",
-    "moved_models_body": "Browsing, installing and removing model downloads moved to the Model Catalogue workspace.",
-    "open_engines": "Open Engines",
-    "open_models": "Open Models"
+    "summary_title": "Your setup",
+    "other_weights": "Other weights",
+    "change": "Change",
+    "status_setup": "Needs setup",
+    "status_cpu": "CPU fallback",
+    "status_off": "Off",
+    "storage_link": "Storage settings",
+    "reco_line": "{{installed}} of {{total}} recommended models for {{device}} installed · {{remaining}} GB to go",
+    "install_rest": "Install the rest",
+    "device_remote": "Remote"
   },
   "audiobook": {
     "cast": "Cast",
@@ -195,10 +209,13 @@
     "warn_unknown_voice": "Unknown voice ‘{{name}}’ — will use the default",
     "warn_empty_chapter": "Chapter “{{title}}” has no spoken text",
     "warn_unknown_tag": "Unrecognized tag {{tag}} — it will be read aloud",
-    "untitled": "Untitled",
+    "untitled": "Untitled audiobook",
     "dismiss": "Dismiss",
     "output": "Output",
     "title": "Audiobook",
+    "tab_script": "Script",
+    "tab_voices": "Voices",
+    "tab_book": "Book",
     "subtitle": "Write or import your story, cast every voice, then export a polished audiobook with real chapters.",
     "script": "Script",
     "script_placeholder": "# Chapter One\nOnce upon a time… [pause 500ms] the end.\n\n# Chapter Two\n[voice:narrator] And so it continued.",
@@ -212,6 +229,14 @@
     "assembling": "Assembling the audiobook…",
     "stop": "Stop",
     "stopped_note": "Stopped — finished chapters are cached; Create again to resume.",
+    "recovery_title": "Interrupted audiobook",
+    "recovery_progress": "{{done}} of {{total}} chapters are cached",
+    "recovery_hint": "Resume reuses finished chapters and synthesizes only what remains.",
+    "resume": "Resume",
+    "open_chapter_cache": "Open chapter cache",
+    "cache_location_hint": "Chapter audio cache: {{cachePath}} · Resume manifest: {{manifestPath}}",
+    "resume_failed": "Could not resume the audiobook: {{message}}",
+    "open_cache_failed": "Could not open the chapter cache",
     "progress_summary": "Synthesizing {{current}} of {{total}} chapters",
     "eta": "~{{time}} left",
     "chapter_n": "Chapter {{n}}",
@@ -260,6 +285,11 @@
     "seed_ph": "Auto",
     "vary_repeats": "Vary repeated lines",
     "vary_repeats_help": "Give identical lines distinct takes instead of reusing one recording.",
+    "line_gap": "Gap between lines",
+    "joins_help": "The line gap goes between lines that have no [pause] of their own; the paragraph gap goes at blank lines. With trimming on, each line's own lead-in and tail silence is cut first, so the gap you set is the gap you hear.",
+    "paragraph_gap": "Gap between paragraphs",
+    "trim_edges": "Trim engine silence",
+    "trim_edges_help": "Cut the silence each engine pads onto a line before joining. Turn off to keep the raw renders.",
     "emotion_help": "Graded emotion — applied by the IndexTTS2 engine only.",
     "emotion_text": "Emotion description",
     "emotion_text_ph": "e.g. sounds exhausted and sad",
@@ -301,10 +331,19 @@
     "convert_desc": "Say it once — hear it in another voice. Speech to speech, fully local."
   },
   "clone": {
+    "text_label": "Text",
+    "paste": "Paste",
+    "paste_failed": "Clipboard access was blocked. Paste directly into the text field using your keyboard.",
     "prompt": "Prompt",
     "language": "Language",
     "steps": "Steps",
     "voice_source": "Voice Source",
+    "reference_audio": "Reference audio",
+    "reference_hint": "Use 5–15 seconds of clean speech.",
+    "upload_audio": "Upload audio",
+    "optional_details": "Optional details",
+    "starting_recording": "Starting…",
+    "unsupported_audio": "Choose a supported audio file: WAV, MP3, M4A, FLAC, OGG, AAC, or WebM.",
     "saved_profiles": "Saved Profiles",
     "transcript": "Transcript",
     "style": "Style",
@@ -349,7 +388,7 @@
     "design_placeholder": "Describe the voice, then type what it says…",
     "describe_label": "Describe your voice",
     "describe_placeholder": "e.g. a warm elderly British storyteller, slightly raspy",
-    "describe_hint": "Your description sets the controls below — you can still fine-tune them afterwards.",
+    "describe_hint": "Describe the voice, or pick a starting point. Either one fills in the details below.",
     "describe_unmatched": "Couldn't map: {{items}}",
     "describe_no_match": "No voice traits recognized yet — try words like deep, elderly, or British.",
     "speed": "Speed",
@@ -364,6 +403,7 @@
     "cat_Style": "Style",
     "cat_EnglishAccent": "English Accent",
     "cat_ChineseDialect": "Chinese Dialect",
+    "vd_exclusive_cleared": "Cleared {{cleared}} — a Chinese dialect and an English accent can't be combined.",
     "opt_Auto": "✨ Auto",
     "opt_male": "male",
     "opt_female": "female",
@@ -392,7 +432,14 @@
     "script": "Script",
     "starting_points": "Starting points",
     "voice_kicker": "Voice",
-    "define_convert": "Convert"
+    "define_convert": "Convert",
+    "details": "Details",
+    "edit": "Edit",
+    "cat_AccentDialect": "Accent or Dialect",
+    "accent_dialect_hint": "one or the other, never both",
+    "reset_to_description": "Reset to description",
+    "chips_more": "{{count}} more…",
+    "cfg": "CFG"
   },
   "settings": {
     "title": "Settings",
@@ -587,7 +634,7 @@
     "shortcut_reset_failed": "Reset failed: {{message}}",
     "reset_longform_failed": "VoiceStudio couldn’t safely clear saved projects. Your project data was left intact; free some storage or restart the app, then try again.",
     "cancel": "Cancel",
-    "hf_token_also_clear": "Also clear",
+    "hf_token_also_clear": "Also clear saved HuggingFace CLI token files",
     "hf_token_clear_btn": "Clear token",
     "hf_token_clear_confirm": "Clear the App-source HuggingFace token?",
     "hf_token_clear_dialog": "Clear token",
@@ -667,6 +714,8 @@
     "device": "Device & compute",
     "device_desc": "Live hardware and backend readouts.",
     "network_desc": "Proxy for downloads and model fetches.",
+    "theme_auto": "System Auto",
+    "theme_light": "Light",
     "translation_desc": "How dubbing translates dialogue, and which engine does it.",
     "translate_quality": "Translation quality",
     "translate_quality_desc": "Fast is literal and quick; Cinematic uses the LLM for natural phrasing.",
@@ -784,12 +833,20 @@
     "history_retention_save_failed": "Could not save",
     "history_retention_invalid": "Enter 0 or more",
     "perf_title": "Performance",
-    "perf_torch_compile": "Disable torch.compile (Windows)",
+    "perf_torch_compile": "Disable torch.compile",
     "perf_torch_compile_na": "Windows only — not needed on this platform",
-    "perf_torch_compile_note": "Falls back to eager mode — fixes Triton OOM on <16 GB GPUs.",
-    "perf_torch_compile_hint": "Workaround for <issueLink>#65</issueLink> — Windows users may hit Triton / <code>torch.compile</code> OOM during model load on GPUs with less than 16 GB VRAM. Enabling this sets <code>TORCH_COMPILE_DISABLE=1</code> on engine subprocesses, which falls back to eager mode. macOS and Linux are unaffected.",
+    "perf_torch_compile_note": "Uses eager execution to avoid Triton memory errors.",
+    "perf_torch_compile_hint": "Uses eager execution to avoid Triton memory errors. <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>",
     "perf_load_failed": "Failed to load performance settings",
     "perf_save_failed": "Failed to save setting",
+    "generate_budget_title": "Compute-time budget",
+    "generate_budget_desc": "How long one generation may run before it is abandoned as too heavy for this hardware. CPU renders are legitimately slower than accelerated ones, so they get their own, higher floor.",
+    "generate_timeout_gpu": "Accelerated (GPU) budget",
+    "generate_timeout_gpu_note": "Used when generation runs on CUDA, ROCm, MPS, or another accelerator. Also used for CPU-family generation if no CPU budget below is set.",
+    "generate_timeout_cpu": "CPU budget",
+    "generate_timeout_cpu_note": "Used when generation runs on the CPU. Once saved here, this always governs CPU-family generation — independent of the accelerated budget above.",
+    "generate_timeout_invalid": "Enter a number of seconds greater than 0 and at most {{max}}.",
+    "generate_timeout_saved": "Saved. Restart VoiceStudio for the new budget to take effect.",
     "storage_load_failed": "Failed to load storage info",
     "open_folder_failed": "Could not open folder",
     "storage_clear_temp": "Clear temp files",
@@ -913,9 +970,17 @@
     "device_family_cuda": "NVIDIA GPU (CUDA)",
     "device_family_rocm": "AMD GPU (ROCm)",
     "device_family_xpu": "Intel GPU (XPU)",
+    "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
-    "device_load_failed": "Failed to load device setting"
+    "device_family_gpu": "GPU",
+    "device_load_failed": "Failed to load device setting",
+    "generate_timeout_shadowed_badge": "Overridden externally",
+    "generate_timeout_shadowed_note": "An environment variable outside VoiceStudio (shell, .env file, or container) is currently setting this — your saved value here is ignored until that variable is removed.",
+    "generate_timeout_shadowed_toast": "Saved, but an environment variable outside VoiceStudio is currently setting this — it will keep being used until that variable is removed.",
+    "hf_token_not_checked": "Not tested",
+    "reduce_motion": "Reduce motion",
+    "reduce_motion_desc": "Stops background animation and transitions. Your system setting is honoured on its own; this adds to it."
   },
   "about": {
     "app": "App",
@@ -990,6 +1055,7 @@
   },
   "consent": {
     "title": "Help improve VoiceStudio?",
+    "desc": "Anonymous, content-free usage stats that help us fix bugs faster — entirely optional, off by default.",
     "step_label": "Improve VoiceStudio",
     "body": "Anonymous, content-free usage stats: which engines are used, how long generations take, and the type of errors. Never your text, your audio, your files, or anything identifying you. Nothing is sent unless you say yes, and you can change your mind anytime in Settings → Privacy.",
     "learn_more": "What exactly is sent?",
@@ -1179,6 +1245,7 @@
     "dubbed_segments_other": "{{count}} dubbed segments"
   },
   "dub": {
+    "timing_label": "Timing",
     "install_engine_pkg": "Install {{pkg}}",
     "needs_install_short": "Needs install",
     "install_popover_title": "Install this engine",
@@ -1199,6 +1266,7 @@
     "paste_url": "…or paste YouTube / video URL",
     "ingest": "Ingest",
     "pull_captions": "Pull YouTube captions + auto-translations",
+    "batch_queue_link": "Dubbing many videos? Open the batch queue",
     "youtube_auth": "YouTube sign-in (optional)",
     "youtube_cookie_file": "Choose a cookies.txt export",
     "remove_cookie_file": "Remove cookie file",
@@ -1395,7 +1463,10 @@
     "languages_selected_other": "{{count}} languages selected",
     "manage_languages": "Manage languages",
     "languages_done": "Done",
-    "languages_pending": "Pending"
+    "languages_pending": "Pending",
+    "live_preview": "Live preview",
+    "live_preview_title": "Hear a line as you edit it — the edited segment streams TTS with its CAST voice after a short pause. Playback only: nothing is saved, and export still renders at full quality.",
+    "live_preview_pick_voice": "Assign a CAST voice to this line or its speaker to hear the live preview."
   },
   "glossary": {
     "title": "Glossary",
@@ -1498,7 +1569,9 @@
     "plan_impossible": "Won't fit +{{seconds}}s",
     "plan_impossible_title": "Predicted speech ≈{{est}}s vs {{avail}}s available — about {{seconds}}s more than any fitting can absorb, so the audio would be trimmed. Shorten the text before generating.",
     "plan_apply": "Use shorter rewrite",
-    "plan_apply_title": "Replace this line with the suggested shorter rewrite: \"{{text}}\""
+    "plan_apply_title": "Replace this line with the suggested shorter rewrite: \"{{text}}\"",
+    "live_play_title": "Stream this line now (live preview)",
+    "live_stop_title": "Stop the live preview"
   },
   "timeline": {
     "track_label": "Segment timeline",
@@ -1631,7 +1704,18 @@
     "preserve_bg": "Preserve background audio (music/FX)",
     "estimate": "{{videos}} video(s) × {{langs}} lang(s) = {{jobs}} job(s)",
     "select_files_langs": "Select files and languages",
-    "add_to_queue": "Add to Queue"
+    "add_to_queue": "Add to Queue",
+    "watch_folder": "Watch folder",
+    "watching": "Watching {{folder}}",
+    "watch_paused": "Paused — {{folder}}",
+    "watch_added": "{{count}} auto-added",
+    "watch_pause": "Pause",
+    "watch_resume": "Resume",
+    "watch_stop": "Stop",
+    "watch_started": "Watching {{folder}} — new videos are added to the queue automatically",
+    "watch_unsupported": "Folder watching needs the desktop app or a Chromium-based browser — use Add Videos here instead.",
+    "watch_failed": "Folder watching stopped — the folder is no longer readable (moved, deleted, or permissions changed). Pick it again to resume.",
+    "watch_start_failed": "Couldn't start watching that folder — pick it again to retry."
   },
   "gallery": {
     "title": "VoiceStudio Gallery",
@@ -1746,6 +1830,7 @@
     "empty_search": "No transcriptions match your search."
   },
   "setup": {
+    "ready_desc": "You’re ready to create your first voice. You can set up dictation now or later in Settings.",
     "welcome": "Welcome",
     "system_check": "System check",
     "install_models": "Install models",
@@ -1783,6 +1868,8 @@
     "open": "Open",
     "install_required_models": "Install the required models above to continue.",
     "try_dictation": "Try dictation",
+    "try_dictation_desc": "Press your shortcut once so you know dictation works before you finish setup.",
+    "dictation_step_label": "Dictation",
     "next_try_dictation": "Next: Try dictation",
     "step_aria": "Step {{num}}: {{label}}",
     "step_completed": "completed",
@@ -1810,7 +1897,7 @@
     "choose_method": "Choose how to give",
     "choose_method_amount": "Continue with ${{amount}}",
     "goal": {
-      "title": "Fund Claude Max",
+      "title": "Support VoiceStudio development",
       "of": "of",
       "per_month": "/ month",
       "aria": "{{raised}} of {{goal}} monthly goal",
@@ -1819,7 +1906,7 @@
       "social_proof": "Join {{count}} supporters funding local AI"
     },
     "postcard": {
-      "title": "Fund Claude Max",
+      "title": "Support VoiceStudio development",
       "lead_default": "Glad that worked! VoiceStudio is free and fully local. If it saves you time, a small monthly chip-in funds the Claude Max behind it.",
       "lead_first_clone": "Your first voice clone is done — nice! VoiceStudio runs entirely on your machine, and your support keeps it that way.",
       "lead_tenth_dub": "Ten dubs in — you're clearly putting it to work. A small monthly chip-in funds the Claude Max that ships these features.",
@@ -1945,6 +2032,7 @@
     "dictation_lede": "Read one of these aloud after pressing your hotkey, or hit Replay to send the bundled sample through the transcriber so you can see dictation work end-to-end without speaking.",
     "dictation_status_ok": "Verified — hotkey works on this machine",
     "dictation_status_pending": "Press your shortcut anywhere to test",
+    "dictation_status_taken": "Another app already uses this shortcut — pick a different one in Settings.",
     "dictation_status_warn": "No hotkey registered — set one below",
     "dictation_hear": "Hear",
     "dictation_stop": "Stop",
@@ -2049,7 +2137,19 @@
     "configureProviders": "Configure providers",
     "loading": "Loading engines…",
     "refresh": "Refresh",
-    "matrixTitle": "Engine Compatibility Matrix",
+    "matrixTitle": "Engines",
+    "ariaTest": "Test {{engine}}",
+    "ariaRecheck": "Re-check {{engine}}",
+    "ariaSelfTest": "Self-test {{engine}}",
+    "ariaUnload": "Unload {{engine}}",
+    "ariaUse": "Use {{engine}}",
+    "ariaAcceptLicense": "Review and accept {{engine}} license",
+    "weights": "Weights",
+    "noWeights": "No catalogue weights — this engine fetches what it needs on first use.",
+    "colRunsOn": "Runs on",
+    "detailsFor": "Details for {{engine}}",
+    "runsIsolated": "Runs isolated",
+    "selectHint": "Select an engine to see what it needs, test it, or install it.",
     "familyMatrixTitle": "{{family}} Engines",
     "colEngine": "Engine",
     "colGpuCompat": "GPU compat",
@@ -2060,6 +2160,9 @@
     "retry": "Retry",
     "activeEngine": "Active {{family}}: {{engine}}",
     "engineCompatLabel": "{{family}} engine compatibility",
+    "dictation_model": "Dictation model",
+    "dictation_model_hint": "Used by live dictation and by this engine when it transcribes.",
+    "dictation_not_installed": "Not installed — select to download",
     "active": "active",
     "whyUnavailable": "What it needs",
     "diskDetails": "Disk details",
@@ -2115,6 +2218,7 @@
     "routingRemote": "Remote",
     "routingUnknown": "Unknown",
     "routingEffectiveChip": "Runs on {{device}} on this machine",
+    "gpuVulkan": "Vulkan",
     "routingCaveatTitle": "GPU selected, but: {{reason}}",
     "selectCpuFallback": "{{engine}}: running on CPU — {{reason}}",
     "curatedModelLabel": "Model",
@@ -2146,7 +2250,10 @@
     "selectWithCaveat": "Switched to {{engine}} — {{reason}}",
     "generateCaveat": "{{engine}} may be slow on this machine — {{reason}}",
     "cpuLongText": "{{engine}} runs on the CPU here, and this text is long — the generation may exceed the time budget. Shorter text, or a CPU-tuned engine (OmniVoice GGUF, Supertonic-3), will be much faster.",
-    "cpuLongTextTuned": "{{engine}} runs on the CPU here, and this text is long — the generation may exceed the time budget. Shorter text, or splitting it into a few takes, will be much faster."
+    "cpuLongTextTuned": "{{engine}} runs on the CPU here, and this text is long — the generation may exceed the time budget. Shorter text, or splitting it into a few takes, will be much faster.",
+    "mpsLongText": "{{engine}} runs on Apple Silicon (MPS) here, and this text is long — the generation may exceed the time budget. Shorter text, or splitting it into a few takes, will be much faster.",
+    "localInstallRequired": "Install this engine on the backend computer using localhost or its setup guide. Remote installation is disabled.",
+    "argosRuntimeUnavailable": "Argos runtime unavailable. Reinstall the backend or select NLLB."
   },
   "errors": {
     "title": "This tab hit a snag.",
@@ -2162,8 +2269,9 @@
     "unexpected": "Unexpected error: {{message}}",
     "backend_shutting_down": "VoiceStudio is shutting down. Reopen the app and try again.",
     "crash_broken_env": "It died while loading its own Python dependencies, so this is not about memory or your GPU — the environment is incomplete or was left half-updated. Use \"Clean & Retry\" in Settings → Logs → Backend, which rebuilds it from scratch; that repairs it in place, without touching your voices or projects. If it still fails afterwards, the crash details name the exact package that would not import.",
-    "crash_vram_default": "On smaller GPUs the usual cause is running out of VRAM while loading the ASR model on top of the TTS model: flush the TTS model first, or pick a smaller ASR model in Model Catalogue → Models.",
-    "stream_cut_backend_alive": "The stream ended early, but the backend is still running — so it did not crash. In a served or containerised setup this is usually a reverse proxy or load balancer buffering or timing out the connection: disable response buffering for this route (nginx: proxy_buffering off; X-Accel-Buffering: no) and raise its read timeout. Running the desktop app directly, or on localhost without a proxy, will confirm it."
+    "crash_vram_default": "On smaller GPUs the usual cause is running out of VRAM while loading the ASR model on top of the TTS model: flush the TTS model first, or pick a smaller ASR model in the engine's Weights list in Model Catalogue.",
+    "stream_cut_backend_alive": "The stream ended early, but the backend is still running — so it did not crash. In a served or containerised setup this is usually a reverse proxy or load balancer buffering or timing out the connection: disable response buffering for this route (nginx: proxy_buffering off; X-Accel-Buffering: no) and raise its read timeout. Running the desktop app directly, or on localhost without a proxy, will confirm it.",
+    "stream_cut_backend_alive_local": "The stream ended early, but the backend is still running — so it did not crash. The app lost its connection to the backend mid-job; that happens when a long step goes quiet for minutes, and the backend usually finishes the job anyway. Give it a few minutes and reopen the job from its history, or check the backend log (Settings → Logs → Backend) for what it was doing."
   },
   "crash": {
     "notice": "The voice backend crashed ({{exit}}) {{ago}} ago and is being restarted automatically.",
@@ -2191,7 +2299,7 @@
     "retry_hint": "Try \"Retry\" in Settings → Logs → Backend. If it fails again, \"Clean & Retry\" rebuilds the environment from scratch."
   },
   "backendUnreachable": {
-    "contact_recent": "It was answering {{ago}} ago and then stopped responding — it most likely crashed or was killed mid-request.",
+    "contact_recent": "It was answering {{ago}} ago and then stopped responding, and no crash was recorded — so it may still be alive but wedged on a heavy job that is holding the engine.",
     "contact_never": "It has not answered at all this session — it may never have started.",
     "dev": "Can't reach the local VoiceStudio backend. {{contact}} In `bun run dev` the backend runs with auto-reload, so any file change — including a save while a request was in flight — restarts it and drops the connection. Retry the action first; if it was a reload, it just works. If it keeps failing, check the terminal running `bun run dev` for a Python traceback or an exit banner, and omnivoice.log in your VoiceStudio data folder for the last thing the backend logged.",
     "server": "Can't reach the VoiceStudio backend server. {{contact}} Check the server logs for the cause (e.g. `docker logs <container>` or `journalctl`) — and note that if Docker serves this page, the page itself can go down with the backend.",
@@ -2204,6 +2312,9 @@
     "restart_failed": "The voice backend keeps crashing and couldn't be restarted — check the crash notice or Settings → Logs → Backend."
   },
   "common": {
+    "stop": "Stop",
+    "resume": "Resume",
+    "paused": "Paused",
     "open": "Open",
     "cancel": "Cancel",
     "save": "Save",
@@ -2353,6 +2464,7 @@
     "hint": "8 steps · fast preview"
   },
   "header": {
+    "speech": "Speech",
     "kicker_studio": "Studio",
     "kicker_library": "Library",
     "kicker_preferences": "Preferences",
@@ -2501,7 +2613,13 @@
   },
   "waveform": {
     "source_missing": "Source media missing — this file may have moved or been deleted. Re-upload the video to continue.",
-    "load_failed": "Could not load audio from this file"
+    "load_failed": "Could not load audio from this file",
+    "controls": "Playback controls",
+    "restart": "Restart playback",
+    "shortcuts": "J/K/L: rewind, play/pause, forward",
+    "zoom": "Zoom level",
+    "timeline": "Audio waveform timeline",
+    "loading": "Loading waveform…"
   },
   "player": {
     "now_playing": "Now playing",
@@ -2525,6 +2643,7 @@
     "preview_voice": "Preview voice"
   },
   "checkpoint": {
+    "timing_review": "{{count}} segments need timing review",
     "asr_title": "Transcripts ready",
     "asr_cta": "Translate",
     "asr_hint": "Fix any ASR errors now — tight diction saves TTS attempts later.",
@@ -2535,7 +2654,13 @@
     "done_hint": "Review timing and sync ratios. Tweak any line and hit \"Regen changed\" for a fast partial redo.",
     "segment_one": "{{count}} segment",
     "segment_other": "{{count}} segments",
-    "dismiss_title": "Dismiss — won't reappear for this stage until reload"
+    "dismiss_title": "Dismiss — won't reappear for this stage until reload",
+    "timing_review_one": "{{count}} segment needs timing review",
+    "timing_review_other": "{{count}} segments need timing review",
+    "timing_review_zero": "{{count}} segments need timing review",
+    "timing_review_two": "{{count}} segments need timing review",
+    "timing_review_few": "{{count}} segments need timing review",
+    "timing_review_many": "{{count}} segments need timing review"
   },
   "compare": {
     "title": "A/B Voice Comparison",
@@ -2737,6 +2862,7 @@
     "ingest_cancelled": "Ingest cancelled",
     "ingest_failed": "URL ingest failed: {{message}}",
     "retry_cancelled": "Retry cancelled",
+    "transcribe_stream_dropped": "The transcription stream ended before any segments arrived, and the backend could not be reached to say why. Check the backend log, and the ASR model's weights in Model Catalogue if it was still downloading.",
     "session_expired": "This dub session expired or was cleaned up — re-upload your video to start a new one.",
     "transcription_failed": "Transcription failed: {{message}}",
     "import_srt_no_job": "Upload or ingest a video first — there is no job to attach subtitles to.",
@@ -2778,6 +2904,7 @@
     "upgrading_preview": "Upgrading {{count}} preview-quality segment(s) to full quality…"
   },
   "tts_errors": {
+    "profile_language_rejected": "Auto uses the voice profile’s language ({{language}}), which this engine does not support. Change the profile language, choose a supported language, or switch engines.",
     "enter_text": "Please enter text",
     "upload_or_select": "Upload an audio or select a voice profile",
     "trim_hint": "Audio is {{duration}}s — trim to ≤{{max}}s for best cloning",
@@ -2786,9 +2913,15 @@
     "error_prefix": "Error: {{message}}",
     "ignored_unsupported": "Ignored unsupported instruct: {{items}}",
     "ignored_duplicate": "Ignored (category already set): {{items}}",
+    "ignored_conflict": "Ignored {{items}} — a Chinese dialect and an English accent can't be combined.",
+    "dialect_accent_conflict": "A Chinese dialect and an English accent can't be used together. Clear one before generating again.",
+    "instruct_category_conflict": "Two conflicting voice-design options were selected in the same category (e.g. two genders). Clear one before generating again.",
     "ref_audio_unusable": "No speech could be heard in the reference audio — the clip is silent or nearly silent, so there is no voice to clone. Record again closer to the microphone (check that the right input device is selected and its level moves while you speak), or choose a different clip.",
     "ref_audio_too_long": "A reference can be at most 20 seconds with a supplied transcript, or 75 seconds without one. Trim it to a clear 3–10 second speech passage; if you supply text, trim the transcript to the same passage.",
-    "ref_audio_no_speech": "Automatic speech detection found no spoken words in the reference. Trim it to a clear 3–10 second speech passage, or supply a matching transcript."
+    "ref_audio_no_speech": "Automatic speech detection found no spoken words in the reference. Trim it to a clear 3–10 second speech passage, or supply a matching transcript.",
+    "gpu_arch_unsupported": "This PyTorch build does not support your GPU. Choose CPU in Settings → Performance & Device, or install a compatible PyTorch build.",
+    "windows_app_control_blocked": "Windows application control blocked a required file. Ask your administrator to allow the trusted VoiceStudio runtime, then restart the app.",
+    "audio_io_failed": "Audio could not be read or saved. Check the file format, free disk space, and file permissions. Review the folder in Settings → Storage."
   },
   "tts": {
     "routingFallback": "Running on CPU — this engine has no GPU path on your machine, so generation will be slower. {{reason}}",
@@ -3054,7 +3187,10 @@
     "hf_token_error": "Could not save the token — try again or set it later in Settings → Credentials.",
     "hf_token_inline_prompt": "Speed up downloads with a free Hugging Face token",
     "hf_token_inline_ph": "Paste hf_… token (optional)",
-    "hf_token_get_short": "Get one free →"
+    "hf_token_get_short": "Get one free →",
+    "hf_token_active_using": "Hugging Face token found in {{source}} — {{masked}}",
+    "hf_token_replace": "Replace token…",
+    "hf_token_replace_warning": "This replaces the token saved for this app. It does not revoke the old token."
   },
   "history": {
     "dub_meta": "{{segments}} segs · {{duration}}s",
@@ -3139,7 +3275,12 @@
     "message": "No speech-to-text model is installed — this feature needs one to transcribe audio.",
     "download": "Download {{label}} ({{size}} GB)",
     "started": "Downloading {{label}} — watch progress in Settings → Models, then try again.",
-    "install_failed": "Couldn't start the download: {{message}}"
+    "install_failed": "Couldn't start the download: {{message}}",
+    "choose": "Pick the model that fits your work — accuracy, languages and download size differ. Downloads start only when you click.",
+    "group_offline": "Best accuracy — transcribes after you stop speaking",
+    "group_streaming": "Lowest latency — live text while you speak",
+    "use": "Use {{label}}",
+    "installed": "Installed"
   },
   "model_missing": {
     "message": "This model is not downloaded on {{target}}.",
@@ -3183,6 +3324,7 @@
     "none_selected": "No voice selected — describe one, drop audio, or pick below."
   },
   "convert": {
+    "cloning_required": "Choose a ready text-to-speech model that supports voice cloning.",
     "source_kicker": "Source clip",
     "drop_audio": "Drop the clip to convert — or click. WAV, MP3, M4A…",
     "target_voice": "Target voice",
@@ -3194,5 +3336,56 @@
     "transcript": "What it heard",
     "result_kicker": "Converted take",
     "need_source_and_voice": "Add a source clip and pick a target voice first."
+  },
+  "dubIntegrity": {
+    "missingSpeech": "Speech is missing or unreadable. Regenerate the affected segment before exporting.",
+    "timingOverflow": "Speech exceeds its time slot. Shorten the translation or choose Strict Slot or Stretch Video.",
+    "backgroundUnavailable": "Original sound could not be preserved. Check background separation and dialogue timing, then retry, or explicitly export speech only."
+  },
+  "dubStyle": {
+    "label": "Translation style prompt",
+    "help": "Describe tone, audience and adaptation style—for example: conversational Bengali, preserve jokes, adapt idioms naturally. Saved with this project; used for translation and timing rewrites. Leave blank for the default style."
+  },
+  "dubActivity": {
+    "output": "Translations",
+    "waiting": "No output received yet.",
+    "progress": "{{done}} / {{total}} segments validated",
+    "cancelled": "Cancelled",
+    "fitting": "Adjusting timing"
+  },
+  "sponsorSlot": {
+    "book": "Book your slot",
+    "preview": "Sponsor preview",
+    "message": "Your brand, website & message",
+    "email_app": "Open email app",
+    "copy_email": "Copy email",
+    "preview_detail": "Your logo, link and introduction could appear here."
+  },
+  "supportPlans": {
+    "remove": "Remove sponsor bar",
+    "title": "Free vs Pro",
+    "free": "Free",
+    "pro": "Pro",
+    "sponsor_bar": "Sponsor bar",
+    "visible": "Visible",
+    "hideable": "Can be hidden",
+    "unavailable": "Pro activation is not configured yet.",
+    "telemetry": "Telemetry",
+    "opt_in": "Optional, opt-in",
+    "disabled": "Disabled",
+    "badge": "Pro badge",
+    "advanced": "Advanced tools",
+    "standard": "Standard",
+    "included": "Included"
+  },
+  "integrationCatalog": {
+    "title": "Integrations",
+    "featured": "Featured",
+    "description": "Discover integrations and featured partners.",
+    "n8nHint": "Import this workflow into n8n, edit the request, and run it. Keep VoiceStudio running. Docker and remote n8n need a reachable backend address and any required credentials."
+  },
+  "directoryExamples": {
+    "example": "Directory example",
+    "notice": "Directory examples only — not sponsors or connected integrations."
   }
 }

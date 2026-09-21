@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { copyText } from '../utils/copyText';
-import { X, Loader } from 'lucide-react';
+import { X, Loader, Pause, Play, Square } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { useAppStore } from '../store';
 import { useTranslation } from 'react-i18next';
@@ -121,6 +121,20 @@ const IDLE_VISIBLE_POLL_MS = 600;
 // the main window's focus-based permission refresh after System Settings.
 // Reconcile only while the Accessibility blocker is visible.
 const A11Y_SETUP_RECHECK_MS = 1000;
+
+// How long the Accessibility prompt may hold the always-on-top pill on screen.
+//
+// The pill is created always-on-top, and the setup state had no time limit at
+// all: it sat above every application, including the first-run setup window it
+// was covering, until Accessibility was granted or the user dismissed it by
+// hand (#1845, #1886). A permission the user has not granted yet is not urgent
+// enough to outrank whatever they are actually doing, and on a clean install
+// they are usually mid-setup and cannot grant it yet anyway.
+//
+// Polling does NOT stop when the window hides. The check keeps running, so
+// granting Accessibility later still returns the widget to idle on its own —
+// what expires is the pill's claim on the screen, not the reconciliation.
+const A11Y_SETUP_VISIBLE_MS = 20_000;
 
 // A dictation model id is a sherpa-onnx live model when it carries the
 // `sherpa-` prefix the backend assigns (see services/sherpa_dictation.py). Only
@@ -355,6 +369,10 @@ function errorLabel(t, info) {
       return t('capture.paste_error');
     case 'mic':
       return t('capture.mic_denied');
+    case 'asr_missing':
+      // Not "Transcription failed: …" — nothing was transcribed or failed; a
+      // model is absent, and the fix is to install one.
+      return t('asr_missing.message');
     default:
       return t('capture.transcription_failed', { message: info?.message || '' });
   }
@@ -374,6 +392,8 @@ export default function CaptureWidget({ onDismiss }) {
   const { t } = useTranslation();
   const [state, setState] = useState('idle'); // idle | setup | recording | transcribing | done | error
   const [transcript, setTranscript] = useState('');
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
   const [duration, setDuration] = useState(0);
   const [captureMode] = useState(() => localStorage.getItem(LS_CAPTURE_MODE) || 'fast');
   const [, setLastEngine] = useState('');
@@ -405,6 +425,7 @@ export default function CaptureWidget({ onDismiss }) {
   // re-subscribing on every pref change.
   const modeRef = useRef(dictationMode);
   const enabledRef = useRef(dictationEnabled);
+  /** @type {React.MutableRefObject<null | { pending: boolean, ok: boolean, promise: Promise<void> | null }>} */
   const prefsHydrationRef = useRef(null);
   useEffect(() => {
     modeRef.current = dictationMode;
@@ -412,16 +433,42 @@ export default function CaptureWidget({ onDismiss }) {
   useEffect(() => {
     enabledRef.current = dictationEnabled;
   }, [dictationEnabled]);
-  const ensureDictationPrefsHydrated = useCallback(() => {
-    if (!prefsHydrationRef.current) {
-      prefsHydrationRef.current = Promise.resolve()
+  // Load the persisted dictation prefs into THIS window's store.
+  //
+  // The widget is its own window with its own store, created at app start —
+  // usually before the backend is listening. It used to hydrate exactly once
+  // and memoize the promise whether or not the load worked, so a startup
+  // failure pinned the store's seed model (`sherpa-whisper-tiny`) for the life
+  // of the app. The main window, which loaded fine, checked the model the user
+  // actually picked and said "ready"; the widget then asked the server for the
+  // seed, which was not installed, and the pill reported "No speech-to-text
+  // model is installed" with Parakeet sitting on disk. Nothing in the main
+  // window could tell, because the loader marked itself loaded either way.
+  //
+  // So: only a load the backend actually answered is kept. A failed one is
+  // retried by the next caller. And a capture start passes `fresh`, which
+  // re-reads even after a success — the model can be changed from the main
+  // window (Transcriptions, Settings) and this store is not the one that
+  // changed. An in-flight load is always shared rather than duplicated.
+  const ensureDictationPrefsHydrated = useCallback(
+    ({ fresh = false } = {}) => {
+      const current = prefsHydrationRef.current;
+      if (current && (current.pending || (current.ok && !fresh))) return current.promise;
+      const entry = { pending: true, ok: false, promise: null };
+      prefsHydrationRef.current = entry;
+      entry.promise = Promise.resolve()
         .then(() => loadDictationPrefs())
+        .then((loaded) => {
+          // A loader that predates the boolean resolves undefined on success.
+          entry.ok = loaded !== false;
+        })
         .catch((err) => {
           // The store keeps its cross-platform seeds when the backend is not
           // ready. Readiness must still resolve so the native hotkey can work.
           console.warn('dictation prefs hydration failed:', err);
         })
         .then(() => {
+          entry.pending = false;
           // Zustand updates before loadDictationPrefs resolves, but React's
           // selector effects may render later. Synchronise the long-lived
           // native listener refs now so its first event cannot use seed prefs.
@@ -433,9 +480,10 @@ export default function CaptureWidget({ onDismiss }) {
             modeRef.current = prefs.dictationMode;
           }
         });
-    }
-    return prefsHydrationRef.current;
-  }, [loadDictationPrefs]);
+      return entry.promise;
+    },
+    [loadDictationPrefs],
+  );
   // `state` follows the same rule, and for a sharper reason than the prefs do.
   // The tray listener used to depend on [state], so every single state change
   // tore the Tauri listener down and re-attached it through an `await import()`
@@ -650,6 +698,10 @@ export default function CaptureWidget({ onDismiss }) {
     let cancelled = false;
     let timerId;
 
+    // Wall-clock start of this setup episode, so the budget covers the whole
+    // time the prompt has been up rather than one poll interval.
+    const shownAt = Date.now();
+    let hiddenForBudget = false;
     const reconcileAccessibility = async () => {
       const ok = await checkAccessibility();
       if (cancelled || stateRef.current !== 'setup') return;
@@ -658,6 +710,12 @@ export default function CaptureWidget({ onDismiss }) {
         setState('idle');
         await hideWidgetWindow();
         return;
+      }
+      if (!hiddenForBudget && Date.now() - shownAt >= A11Y_SETUP_VISIBLE_MS) {
+        // Stop covering the screen, but stay in `setup` so the label is right
+        // if something shows the window again, and keep polling below.
+        hiddenForBudget = true;
+        await hideWidgetWindow();
       }
       timerId = setTimeout(() => {
         void reconcileAccessibility();
@@ -711,12 +769,30 @@ export default function CaptureWidget({ onDismiss }) {
       const eventRegistrationId = event?.payload?.registrationId;
       if (eventRegistrationId != null && eventRegistrationId !== registrationId) return false;
       if (deliveryId != null) {
-        void tauriInvoke('acknowledge_dictation_capture_delivery', {
+        return tauriInvoke('acknowledge_dictation_capture_delivery', {
           registrationId,
           deliveryId,
-        }).catch((err) => console.warn('dictation delivery acknowledgement failed:', err));
+        })
+          .catch((err) => {
+            console.warn('dictation delivery acknowledgement failed:', err);
+            return false;
+          })
+          .then((acknowledged) => acknowledged !== false);
       }
       return true;
+    };
+    const completeDelivery = async (event, error = null) => {
+      const deliveryId = event?.payload?.deliveryId;
+      if (deliveryId == null) return;
+      try {
+        await tauriInvoke('complete_dictation_capture_delivery', {
+          registrationId,
+          deliveryId,
+          error,
+        });
+      } catch (err) {
+        console.warn('dictation delivery completion failed:', err);
+      }
     };
     (async () => {
       try {
@@ -727,21 +803,31 @@ export default function CaptureWidget({ onDismiss }) {
         }
         const { listen } = await import('@tauri-apps/api/event');
         unlistenStart = await listen('tray-dictate', async (event) => {
-          if (!acknowledgeDelivery(event)) return;
+          let acknowledgement = acknowledgeDelivery(event);
+          if (acknowledgement === false) return;
+          if (acknowledgement !== true) acknowledgement = await acknowledgement;
+          if (!acknowledgement) return;
           const now = Date.now();
-          if (now - nativeEventAtRef.current.start < 150) return;
+          if (now - nativeEventAtRef.current.start < 150) {
+            await completeDelivery(event, 'Duplicate dictation start ignored');
+            return;
+          }
           nativeEventAtRef.current.start = now;
           const sessionId = event?.payload?.sessionId;
           if (!sessionId) {
             hideWidgetWindow();
+            await completeDelivery(event, 'Dictation output session is missing');
             return;
           }
-          await ensureDictationPrefsHydrated();
+          // Fresh: the model may have been changed from the main window
+          // since this store last loaded (see ensureDictationPrefsHydrated).
+          await ensureDictationPrefsHydrated({ fresh: true });
           if (!enabledRef.current) {
             // The hotkey is inert, but Rust has already shown the window.
             // Put it back rather than leaving an empty capsule on screen.
             hideWidgetWindow();
-            finishOutputSession(sessionId);
+            await finishOutputSession(sessionId);
+            await completeDelivery(event, 'Dictation is disabled');
             return;
           }
           const sequence = ++nativeStartSequenceRef.current;
@@ -757,6 +843,7 @@ export default function CaptureWidget({ onDismiss }) {
             } catch (err) {
               console.warn('reject dictation output session failed:', err);
             }
+            await completeDelivery(event, 'Dictation is already active');
             return;
           }
           const trackHold = modeRef.current === 'hold';
@@ -781,11 +868,13 @@ export default function CaptureWidget({ onDismiss }) {
             clearPendingHold();
             await finishOutputSession(sessionId);
             hideWidgetWindow();
+            await completeDelivery(event, `Could not activate dictation output: ${err}`);
             return;
           }
           if (cancelled || sequence !== nativeStartSequenceRef.current || !enabledRef.current) {
             clearPendingHold();
             await finishOutputSession(sessionId);
+            await completeDelivery(event, 'Dictation start was cancelled');
             return;
           }
           if (startupWasInFlight) {
@@ -793,8 +882,10 @@ export default function CaptureWidget({ onDismiss }) {
             if (startInFlightRef.current) {
               outputSessionIdRef.current = sessionId;
               pendingNativeStartRef.current = { sessionId, trackHold, sequence };
+              await completeDelivery(event, 'Another dictation start is already in progress');
             } else if (current === 'recording' || current === 'transcribing') {
               outputSessionIdRef.current = sessionId;
+              await completeDelivery(event);
             } else if (
               current === 'idle' ||
               current === 'done' ||
@@ -802,10 +893,14 @@ export default function CaptureWidget({ onDismiss }) {
               current === 'setup'
             ) {
               outputSessionIdRef.current = sessionId;
-              startRecordingRef.current?.(trackHold, sessionId);
+              void Promise.resolve(startRecordingRef.current?.(trackHold, sessionId)).then(
+                (accepted) =>
+                  completeDelivery(event, accepted ? null : 'Dictation could not start'),
+              );
             } else {
               clearPendingHold();
               await finishOutputSession(sessionId);
+              await completeDelivery(event, 'Dictation could not accept this start');
             }
             return;
           }
@@ -814,34 +909,66 @@ export default function CaptureWidget({ onDismiss }) {
             // in System Settings. A missing grant no longer blocks capture:
             // native delivery can truthfully fall back to clipboard-only.
             outputSessionIdRef.current = sessionId;
-            checkAccessibility().then(() => {
-              if (outputSessionIdRef.current !== sessionId) return;
-              startRecordingRef.current?.(modeRef.current === 'hold', sessionId);
+            void checkAccessibility().then(async () => {
+              if (outputSessionIdRef.current !== sessionId) {
+                await completeDelivery(event, 'Dictation output session changed before startup');
+                return;
+              }
+              const accepted = await startRecordingRef.current?.(
+                modeRef.current === 'hold',
+                sessionId,
+              );
+              await completeDelivery(event, accepted ? null : 'Dictation could not start');
             });
             return;
           }
           const idle = s === 'idle' || s === 'done' || s === 'error';
           if (modeRef.current === 'toggle') {
             // Press once to start, again to stop.
-            if (idle) startRecordingRef.current?.(false, sessionId);
-            else if (s === 'recording') stopRecordingRef.current?.();
+            if (idle) {
+              void Promise.resolve(startRecordingRef.current?.(false, sessionId)).then((accepted) =>
+                completeDelivery(event, accepted ? null : 'Dictation could not start'),
+              );
+              return;
+            } else if (s === 'recording') {
+              stopRecordingRef.current?.();
+              await completeDelivery(event);
+              return;
+            }
           } else if (idle) {
             // Hold mode: keydown → start.
-            startRecordingRef.current?.(true, sessionId);
+            void Promise.resolve(startRecordingRef.current?.(true, sessionId)).then((accepted) =>
+              completeDelivery(event, accepted ? null : 'Dictation could not start'),
+            );
+            return;
           }
+          await completeDelivery(event, 'Dictation could not start');
         });
         unlistenStop = await listen('tray-dictate-stop', async (event) => {
-          if (!acknowledgeDelivery(event)) return;
+          let acknowledgement = acknowledgeDelivery(event);
+          if (acknowledgement === false) return;
+          if (acknowledgement !== true) acknowledgement = await acknowledgement;
+          if (!acknowledgement) return;
           const now = Date.now();
-          if (now - nativeEventAtRef.current.stop < 150) return;
+          if (now - nativeEventAtRef.current.stop < 150) {
+            await completeDelivery(event, 'Duplicate dictation stop ignored');
+            return;
+          }
           nativeEventAtRef.current.stop = now;
           await ensureDictationPrefsHydrated();
           // Only hold mode acts on release; toggle ignores it.
+          let accepted = false;
           if (modeRef.current === 'hold' && stateRef.current === 'recording') {
             stopRecordingRef.current?.();
+            accepted = true;
           } else if (modeRef.current === 'hold' && holdStartRef.current === 'starting') {
             holdStartRef.current = 'released';
+            accepted = true;
           }
+          await completeDelivery(
+            event,
+            accepted ? null : 'Dictation is not recording in hold mode',
+          );
         });
         await ensureDictationPrefsHydrated();
         if (cancelled) {
@@ -901,13 +1028,17 @@ export default function CaptureWidget({ onDismiss }) {
 
   // Timer while recording
   useEffect(() => {
-    if (state === 'recording') {
-      const t0 = Date.now();
-      timerRef.current = setInterval(() => setDuration(Date.now() - t0), 100);
+    if (state === 'recording' && !paused) {
+      let previous = Date.now();
+      timerRef.current = setInterval(() => {
+        const now = Date.now();
+        setDuration((elapsed) => elapsed + now - previous);
+        previous = now;
+      }, 100);
       return () => clearInterval(timerRef.current);
     }
     clearInterval(timerRef.current);
-  }, [state]);
+  }, [state, paused]);
 
   // Waveform poll: 50 ms ≈ 2–3 worklet frames, so bars visibly move well
   // within ~100 ms of mic start. Only runs while the worklet is feeding us.
@@ -925,6 +1056,8 @@ export default function CaptureWidget({ onDismiss }) {
       dismissTimerRef.current = null;
     }
     if (aecModeRef.current || sherpaModeRef.current || pcmModeRef.current) teardownAec();
+    pausedRef.current = false;
+    setPaused(false);
     setState('idle');
     setTranscript('');
     setPartialText('');
@@ -1458,6 +1591,7 @@ export default function CaptureWidget({ onDismiss }) {
               }
             }
             wsPendingRef.current = [];
+            if (pausedRef.current) ws.send('PAUSE');
           };
           ws.onmessage = async (evt) => {
             if (!isCurrent() || wsRef.current !== ws) return;
@@ -1608,8 +1742,14 @@ export default function CaptureWidget({ onDismiss }) {
                 stopCaptureGraph();
                 setTrayRecording(false);
                 setModelStatus(null);
-                toastAsrModelMissing(asrMissingPayload(msg));
-                setErrorInfo({ kind: 'transcription', message: t('asr_missing.message') });
+                const missing = asrMissingPayload(msg);
+                // In the desktop app this window has no <Toaster>, so a toast
+                // here rendered nowhere; the main window shows the install
+                // action instead (dictationNotice, kind 'asr_missing'). The
+                // browser build mounts this widget inside the main window,
+                // where the local toast IS the only one.
+                if (!inTauri()) toastAsrModelMissing(missing);
+                setErrorInfo({ kind: 'asr_missing', message: t('asr_missing.message'), missing });
                 setState('error');
                 void finishAttemptOutputSession();
               } else if (sherpaModeRef.current || aecModeRef.current || pcmModeRef.current) {
@@ -1713,7 +1853,7 @@ export default function CaptureWidget({ onDismiss }) {
             return;
           }
           const sendBuf = (buf) => {
-            if (!isCurrent()) return;
+            if (!isCurrent() || pausedRef.current) return;
             const ws = wsRef.current;
             if (ws && ws.readyState === WebSocket.OPEN) {
               try {
@@ -1739,6 +1879,7 @@ export default function CaptureWidget({ onDismiss }) {
             const stopMicCapture = await startMicCapture(
               stream,
               (f) => {
+                if (pausedRef.current) return;
                 waveRef.current.push(f);
                 sendTagged(f, AEC_NEAR);
               },
@@ -1758,6 +1899,7 @@ export default function CaptureWidget({ onDismiss }) {
             const stopMicCapture = await startMicCapture(
               stream,
               (f) => {
+                if (pausedRef.current) return;
                 waveRef.current.push(f);
                 const i16 = floatToInt16(f);
                 sendBuf(i16.buffer.slice(i16.byteOffset, i16.byteOffset + i16.byteLength));
@@ -1788,6 +1930,8 @@ export default function CaptureWidget({ onDismiss }) {
           stopCaptureGraph();
           return;
         }
+        pausedRef.current = false;
+        setPaused(false);
         startTimeRef.current = Date.now();
         setTrayRecording(true);
         setWaveOn(pcmMode);
@@ -1856,11 +2000,11 @@ export default function CaptureWidget({ onDismiss }) {
           // newer non-empty lease without launching a second microphone graph.
           outputSessionIdRef.current = sessionId;
         }
-        return;
+        return false;
       }
       if (inTauri() && !sessionId) {
         hideWidgetWindow();
-        return;
+        return false;
       }
       startInFlightRef.current = true;
       if (sessionId) outputSessionIdRef.current = sessionId;
@@ -1893,9 +2037,25 @@ export default function CaptureWidget({ onDismiss }) {
           }
         }
       }
+      return stateRef.current === 'recording' || stateRef.current === 'transcribing';
     },
     [startRecordingImpl],
   );
+
+  const togglePause = useCallback(() => {
+    if (stateRef.current !== 'recording') return;
+    const next = !pausedRef.current;
+    const recorder = mediaRecorderRef.current;
+    if (recorder?.state === 'recording' && next) recorder.pause();
+    else if (recorder?.state === 'paused' && !next) recorder.resume();
+    pausedRef.current = next;
+    streamRef.current?.getTracks().forEach((track) => {
+      track.enabled = !next;
+    });
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(next ? 'PAUSE' : 'RESUME');
+    setPaused(next);
+  }, []);
 
   const stopRecording = useCallback(() => {
     const generation = captureGenerationRef.current;
@@ -1967,8 +2127,8 @@ export default function CaptureWidget({ onDismiss }) {
         const missing = asrMissingPayload(err);
         if (missing) {
           // Typed 409: no ASR model installed → download CTA, not a dead end.
-          toastAsrModelMissing(missing);
-          setErrorInfo({ kind: 'transcription', message: t('asr_missing.message') });
+          if (!inTauri()) toastAsrModelMissing(missing);
+          setErrorInfo({ kind: 'asr_missing', message: t('asr_missing.message'), missing });
           setState('error');
           setTranscript('');
           await finishOutputSession(sessionId);
@@ -2100,6 +2260,9 @@ export default function CaptureWidget({ onDismiss }) {
       // user to the permissions pane sends them somewhere nothing is wrong —
       // the same condition the pill's own mic button carried.
       deniedByOs: !!errorInfo?.deniedByOs,
+      // The install recommendation, so the main window can offer the one-click
+      // download the pill has no room for.
+      missing: errorInfo?.missing,
     });
   }, [state, errorInfo, t]);
 
@@ -2112,7 +2275,9 @@ export default function CaptureWidget({ onDismiss }) {
   // ── Pill label ──
   let label = '';
   let emoji = '';
-  if (state === 'setup') {
+  if (state === 'recording' && paused) {
+    label = t('common.paused');
+  } else if (state === 'setup') {
     // One-time Accessibility setup — shown instead of pretending to work.
     emoji = '🔒';
     label = t('capture.a11y_setup');
@@ -2156,9 +2321,13 @@ export default function CaptureWidget({ onDismiss }) {
     state === 'error' && errorInfo?.kind === 'mic' && errorInfo?.deniedByOs && inTauri();
 
   return (
-    <div className={`capture-pill capture-pill--${state}`} role="status" aria-live="polite">
+    <div
+      className={`capture-pill capture-pill--${state === 'recording' && paused ? 'paused' : state}`}
+      role="status"
+      aria-live="polite"
+    >
       {/* Live waveform while the worklet feeds us; pulsing dot otherwise */}
-      {state === 'recording' && waveOn && !modelStatus ? (
+      {state === 'recording' && !paused && waveOn && !modelStatus ? (
         <div className="capture-pill__wave" aria-hidden="true">
           {bars.map((v, i) => (
             <span
@@ -2173,10 +2342,10 @@ export default function CaptureWidget({ onDismiss }) {
       )}
 
       {/* Content */}
-      <div className="min-w-0 flex-1 overflow-hidden">
+      <div className="capture-pill__preview">
         <span
-          className="block overflow-hidden text-ellipsis whitespace-nowrap text-[12.5px] font-medium tracking-[0.01em]"
-          title={state === 'error' ? errorInfo?.message || undefined : undefined}
+          className="block text-[14px] leading-[1.5] font-medium"
+          title={state === 'error' ? errorInfo?.message || label || undefined : label || undefined}
         >
           {emoji} {label}
         </span>
@@ -2219,6 +2388,39 @@ export default function CaptureWidget({ onDismiss }) {
         </button>
       )}
 
+      {state === 'recording' && (
+        <>
+          <button
+            type="button"
+            className="capture-pill__control"
+            onClick={togglePause}
+            aria-label={t(paused ? 'common.resume' : 'common.pause')}
+            title={t(paused ? 'common.resume' : 'common.pause')}
+          >
+            {paused ? <Play size={14} /> : <Pause size={14} />}
+          </button>
+          <button
+            type="button"
+            className="capture-pill__control"
+            onClick={stopRecording}
+            aria-label={t('common.stop')}
+            title={t('common.stop')}
+          >
+            <Square size={12} />
+          </button>
+        </>
+      )}
+      {(state === 'recording' || state === 'transcribing') && (
+        <button
+          type="button"
+          className="capture-pill__control"
+          onClick={cancelSession}
+          aria-label={t('common.close')}
+          title={t('common.close')}
+        >
+          <X size={14} />
+        </button>
+      )}
       {/* Dismiss — done/error/setup */}
       {(state === 'done' || state === 'error' || state === 'setup') && (
         <button

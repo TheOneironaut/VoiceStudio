@@ -176,7 +176,7 @@ def _binary_repair_hint() -> str:
         f"the bundled GGUF runtime is not usable on this machine — build it "
         f"with `scripts/build-omnivoice-tts.sh --platform {_platform_slug()}`, "
         f"reinstall VoiceStudio, or switch to the default in-process "
-        f"OmniVoice engine (Model Catalogue → Engines)"
+        f"OmniVoice engine (Model Catalogue)"
     )
 
 
@@ -188,7 +188,12 @@ def _load_quant_map() -> dict:
     that here so a corrupted JSON can't sneak past the registry).
     """
     p = _PKG_DIR / "quant_map.json"
-    with p.open() as f:
+    # JSON is UTF-8 by definition. A bare open() decodes in the locale code
+    # page instead, and the table's VRAM notes carry em dashes that
+    # cp932/cp936/cp949/cp950 cannot decode — so on a Chinese, Japanese or
+    # Korean Windows picking a quant raised UnicodeDecodeError and every
+    # generation failed with an error the app could not classify.
+    with p.open(encoding="utf-8") as f:
         data = json.load(f)
     meta = data.get("_meta") or {}
     if meta.get("schema_version") != 1:
@@ -412,7 +417,7 @@ def _make_backend_class():
                         f"built — run `scripts/build-omnivoice-tts.sh "
                         f"--platform {_platform_slug()}`, reinstall "
                         f"VoiceStudio, or use the default in-process "
-                        f"OmniVoice engine (Model Catalogue → Engines)."
+                        f"OmniVoice engine (Model Catalogue)."
                     )
                 # Manifest-based SHA-256 verification (T-04-01).
                 manifest = _load_checksum_manifest()
@@ -861,7 +866,7 @@ def select_default_engine() -> str:
     Returns ``"omnivoice"`` (the existing in-process default) on any
     failure. The fallback is deliberately silent — a user who hits this
     code path still gets a working cloning engine; the failure surfaces
-    in the Model Catalogue → Engines Compatibility Matrix (Plan 02-04) so the
+    in the Model Catalogue Compatibility Matrix (Plan 02-04) so the
     user can investigate if they care to.
     """
     cls = _make_backend_class()

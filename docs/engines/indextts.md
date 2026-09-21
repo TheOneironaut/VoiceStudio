@@ -14,14 +14,14 @@ runtime. Existing user-managed IndexTTS-2 environments remain supported.
 IndexTTS 2.5 is not bundled because its source environment and model weights
 require substantial disk space.
 
-1. Open **Model Catalogue → Engines**.
+1. Open **Model Catalogue**.
 2. Expand **IndexTTS 2.5** and select **Install**.
 3. Keep VoiceStudio open while source, dependencies, and weights download.
 
 The installer:
 
 - checks for `uv` and at least 12 GB of free space;
-- installs the reviewed `indextts-2.5` source revision in an isolated venv;
+- installs the reviewed `indextts-2.5` source revision in an isolated Python 3.11 venv;
 - downloads the reviewed `IndexTeam/IndexTTS-2.5` model revision;
 - resumes partial model downloads;
 - saves `OMNIVOICE_INDEXTTS_DIR` and activates the engine without a restart.
@@ -32,6 +32,11 @@ environment, and weights pass verification. User-managed clones are never
 modified or removed; their legacy
 `indextts.infer_v2` entry point remains supported.
 
+Retrying a partial install rebuilds an incompatible managed Python environment
+(such as Python 3.14), preserving source and downloaded weights. Existing
+Python 3.10/3.11 environments are reused. Linked environments are never removed;
+if their interpreter cannot be checked, the installer reports how to recover.
+
 ## Manual install
 
 Use a separate checkout and venv. Do not install IndexTTS into VoiceStudio's
@@ -40,7 +45,7 @@ root environment.
 ```bash
 git clone --branch indextts-2.5 https://github.com/index-tts/index-tts.git
 cd index-tts
-uv venv .venv
+uv venv .venv --python 3.11
 uv pip install --python .venv/bin/python -e .
 hf download IndexTeam/IndexTTS-2.5 --local-dir=checkpoints
 ```
@@ -97,7 +102,7 @@ IndexTTS-2 installations continue receiving their `target_tokens` control.
 
 ### Engine unavailable
 
-Use **Model Catalogue → Engines → IndexTTS 2.5 → Install**. For a manual install,
+Use **Model Catalogue → IndexTTS 2.5 → Install**. For a manual install,
 confirm that the configured directory contains:
 
 ```text
@@ -111,10 +116,32 @@ installs only worked after hand-renaming it to `config_v2_5.yaml`; both names
 are accepted, so a renamed checkout keeps working as-is and needs no
 reinstall.
 
+### Missing checkpoint under a foreign absolute path
+
+Some pinned configs name checkpoints on the upstream authors' training cluster.
+When a configured absolute `gpt_checkpoint` or `s2mel_checkpoint` is missing,
+VoiceStudio uses the installed `gpt.pth` or `s2mel.pth` if present. This also
+handles Windows paths on other operating systems. Existing valid custom paths
+and relative paths remain unchanged.
+
+The adjustment exists only in a temporary config while loading the model;
+your downloaded config and weights are never rewritten. No reinstall or
+additional download is needed. If the local fallback is also missing, the
+original loading error is preserved rather than substituting another model.
+
 ### `uv` not found
 
-Install `uv` from <https://docs.astral.sh/uv/> or configure the bundled binary
-through `OMNIVOICE_BUNDLED_UV`.
+The desktop app ships `uv` and points the backend at it through
+`OMNIVOICE_BUNDLED_UV`, so an installed build needs nothing from you. Before
+v0.5.5 the shell located that binary but never passed it on, and because the
+packaged `uv` sits in the app's own resources directory — on nobody's `PATH`,
+and a GUI launch inherits no shell `PATH` additions either — preflight reported
+it missing while the binary was right there
+([#2215](https://github.com/debpalash/VoiceStudio/issues/2215)).
+
+Running from source, install `uv` from <https://docs.astral.sh/uv/>, or set
+`OMNIVOICE_BUNDLED_UV` to the absolute path of a `uv` binary to pin one
+explicitly — an explicit value always wins over the bundled copy.
 
 ### Import fails after installation
 

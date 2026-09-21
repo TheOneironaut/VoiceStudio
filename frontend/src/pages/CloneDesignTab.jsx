@@ -2,11 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 import { Volume2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
+import { toast } from 'react-hot-toast';
 import { CATEGORIES } from '../utils/constants';
-import { Segmented } from '../ui';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 import { useAppStore } from '../store';
 import { API, apiPost, apiFetch } from '../api/client';
-import { mergeDescribedAttrs } from '../utils/voiceInstruct';
+import { mergeDescribedAttrs, applyVdState } from '../utils/voiceInstruct';
 import { useEngines } from '../api/hooks';
 import { claimPlayback, stopActivePlayback, usePlaybackSource } from '../utils/playback';
 import ScriptPanel from '../components/clone/ScriptPanel';
@@ -14,9 +15,10 @@ import AudioMethodPanel from '../components/clone/AudioMethodPanel';
 import DesignMethodPanel from '../components/clone/DesignMethodPanel';
 import ConvertMethodPanel from '../components/clone/ConvertMethodPanel';
 import ActionBar from '../components/clone/ActionBar';
-import EngineQuickSwitch from '../components/EngineQuickSwitch';
+import VoiceModeIcon from '../components/clone/VoiceModeIcon';
 
 export default function CloneDesignTab(props) {
+  const [convertRecordingBusy, setConvertRecordingBusy] = useState(false);
   const {
     textAreaRef,
     text,
@@ -58,6 +60,7 @@ export default function CloneDesignTab(props) {
     showSaveProfile,
     setShowSaveProfile,
     isRecording,
+    isStartingRecording,
     isCleaning,
     recordingTime,
     audioInputs,
@@ -70,6 +73,7 @@ export default function CloneDesignTab(props) {
     setVdStates,
     isGenerating,
     generationTime,
+    generationProgress,
     applyPreset,
     insertTag,
     handleSaveProfile,
@@ -96,15 +100,17 @@ export default function CloneDesignTab(props) {
   const [activePersonality, setActivePersonality] = useState('');
   const [insertOpen, setInsertOpen] = useState(false);
 
-  // Identity recipe line (10x §1.5): the non-Auto category picks as one
-  // readable string. All-Auto (nothing chosen yet) starts the chips expanded.
+  // Details recipe line (10x §1.5, #1771 follow-up): the non-Auto category
+  // picks as one readable string, shown on the collapsed summary.
   const identityPicks = Object.values(vdStates || {}).filter((v) => v && v !== 'Auto');
   const identityRecipe = identityPicks.length
     ? identityPicks.join(' · ')
     : t('clone.identity_auto', { defaultValue: 'Auto — the model decides' });
-  const [identityOpen, setIdentityOpen] = useState(
-    () => !Object.values(vdStates || {}).some((v) => v && v !== 'Auto'),
-  );
+  // #1771 follow-up: the whole point of collapsing the 12-row block to one
+  // line is that it STAYS collapsed until asked — it must never start open,
+  // including on first run (the old design opened it whenever every category
+  // was still Auto; that behavior does not carry over).
+  const [identityOpen, setIdentityOpen] = useState(false);
 
   // ── "Describe your voice" (#317): free-text → design parameters ──────────
   // Debounced call to the local deterministic mapper (POST /design/describe);
@@ -115,13 +121,72 @@ export default function CloneDesignTab(props) {
   const [describeUnmatched, setDescribeUnmatched] = useState([]);
   const [describeMatchedAny, setDescribeMatchedAny] = useState(true);
 
+  // describeRequestRef guards a describe response landing after it's been
+  // superseded. It fires on every keystroke's debounce AND on-demand from
+  // the reset button, so two /design/describe calls can be in flight
+  // together, and whichever resolves LAST used to always win regardless of
+  // which was actually issued last (the original inline effect closed over
+  // its own `cancelled` flag per call, which extracting it into
+  // applyDescribeToVdStates dropped — greptile caught it in review).
+  //
+  // That first fix only ordered describe-vs-describe correctly — it left a
+  // second, worse hole greptile found on the next pass: describe-vs-MANUAL
+  // races. A describe request can still be in flight when the user picks a
+  // category by hand, clicks a personality/preset chip, or clears the
+  // description entirely; none of those bumped the token, so a describe
+  // response landing afterwards silently overwrote the user's manual pick
+  // (or re-applied attributes for a description that no longer exists).
+  // invalidateDescribe() is the one place that bumps it — call it from
+  // EVERY path that should beat an in-flight describe response, not just
+  // from inside applyDescribeToVdStates itself.
+  const describeRequestRef = useRef(0);
+  const invalidateDescribe = () => {
+    describeRequestRef.current += 1;
+  };
+
   const onDescribeChange = (e) => {
     const value = e.target.value;
     setDescribeText(value);
     if (!value.trim()) {
-      // Cleared: drop stale feedback immediately (controls stay as they are).
+      // Cleared: an in-flight response for the old (now-gone) description
+      // must never land and re-apply attributes for text that no longer
+      // exists — bump the token so it's discarded on arrival.
+      invalidateDescribe();
       setDescribeUnmatched([]);
       setDescribeMatchedAny(true);
+    }
+  };
+
+  // Shared "description -> vdStates" path: the debounced live-typing effect
+  // below and the Details editor's "Reset to description" button (#1771
+  // follow-up) both drive the category picks from describeText, so this is
+  // the ONE place that does it — resetToDescription must never grow a
+  // second, divergent implementation of the same mapping.
+  const applyDescribeToVdStates = async (q) => {
+    const requestId = ++describeRequestRef.current;
+    if (!q) {
+      // No description to reset to: every category goes back to Auto.
+      setVdStates(Object.fromEntries(Object.keys(CATEGORIES).map((k) => [k, 'Auto'])));
+      setDescribeUnmatched([]);
+      setDescribeMatchedAny(true);
+      setActivePersonality('');
+      setInstruct('');
+      return;
+    }
+    try {
+      const res = await apiPost('/design/describe', { description: q });
+      if (requestId !== describeRequestRef.current) return; // superseded — discard
+      setVdStates(mergeDescribedAttrs(res.attrs));
+      setDescribeUnmatched(res.unmatched || []);
+      setDescribeMatchedAny((res.matched || []).length > 0);
+      // The description now owns the design parameters — clear any stale
+      // personality instruct so the synthesize path can't merge conflicting
+      // tokens from two sources (the issue-#114 failure mode).
+      setActivePersonality('');
+      setInstruct('');
+    } catch {
+      // Backend unreachable — leave the controls untouched; the live-typing
+      // path retries on the next keystroke, the reset button on the next click.
     }
   };
 
@@ -129,22 +194,8 @@ export default function CloneDesignTab(props) {
     const q = describeText.trim();
     if (!q) return undefined;
     let cancelled = false;
-    const id = setTimeout(async () => {
-      try {
-        const res = await apiPost('/design/describe', { description: q });
-        if (cancelled) return;
-        setVdStates(mergeDescribedAttrs(res.attrs));
-        setDescribeUnmatched(res.unmatched || []);
-        setDescribeMatchedAny((res.matched || []).length > 0);
-        // The description now owns the design parameters — clear any stale
-        // personality instruct so the synthesize path can't merge conflicting
-        // tokens from two sources (the issue-#114 failure mode).
-        setActivePersonality('');
-        setInstruct('');
-      } catch {
-        // Backend unreachable mid-typing — leave the controls untouched;
-        // the next keystroke retries.
-      }
+    const id = setTimeout(() => {
+      if (!cancelled) applyDescribeToVdStates(q);
     }, 450);
     return () => {
       cancelled = true;
@@ -152,6 +203,11 @@ export default function CloneDesignTab(props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [describeText]);
+
+  // "Reset to description" (#1771 follow-up): returns every category to what
+  // the current description implies, or all-Auto when there is none —
+  // without waiting for the 450ms debounce or requiring a fresh keystroke.
+  const resetToDescription = () => applyDescribeToVdStates(describeText.trim());
 
   // Fetch personality presets from backend
   const { data: personalities = [] } = useQuery({
@@ -161,6 +217,9 @@ export default function CloneDesignTab(props) {
   });
 
   const applyPersonality = (p) => {
+    // A manual pick always beats an in-flight describe response (greptile,
+    // PR #1793 second pass) — bump the token before touching state.
+    invalidateDescribe();
     if (activePersonality === p.id) {
       setActivePersonality('');
       return;
@@ -259,16 +318,49 @@ export default function CloneDesignTab(props) {
       });
   };
 
-  // 10x P4 a11y (spec §3): category chip groups are radiogroups with a
-  // roving tabindex — ArrowLeft/ArrowRight move focus AND selection within
-  // the group, per the WAI-ARIA radio-group pattern.
-  const onChipKeyDown = (e, key, options) => {
+  // #1771: the ONE place a category pick is applied — mirrors the engine's
+  // dialect-vs-accent exclusivity (omnivoice/models/omnivoice.py::_resolve_
+  // instruct) live in the picker, so ChineseDialect and EnglishAccent can
+  // never both be set from the form. When picking one clears the other, say
+  // so instead of a silent reset.
+  const handleVdChange = (key, value) => {
+    // A manual pick always beats an in-flight describe response (greptile,
+    // PR #1793 second pass) — bump the token before touching state.
+    invalidateDescribe();
+    const { vdStates: next, clearedCategory } = applyVdState(vdStates, key, value);
+    setVdStates(next);
+    if (clearedCategory) {
+      toast(t('clone.vd_exclusive_cleared', { cleared: t(`clone.cat_${clearedCategory}`) }), {
+        icon: '⚠️',
+      });
+    }
+  };
+
+  // 10x P4 a11y (spec §3): chip strips get a roving tabindex —
+  // ArrowLeft/ArrowRight move FOCUS ONLY, per the WAI-ARIA toolbar pattern
+  // (a native <button> already activates on Enter/Space/click, so the
+  // handler never needs to fire selection itself). Gender/Age/Pitch/Style/
+  // Accent-or-Dialect moved to native <select>s in the #1771 follow-up
+  // (free keyboard nav from the browser), so the only remaining chip strip
+  // is the "Starting points" row — including chips currently hidden behind
+  // its overflow toggle, once revealed.
+  //
+  // This USED to also apply the newly-focused option (`onSelect`), which was
+  // correct for the old CATEGORIES radiogroups (a true single-value pick,
+  // where "arrow lands on X" and "X is now selected" are the same thing) but
+  // wrong for this toggle strip — CodeRabbit caught it in review: every
+  // arrow press was calling applyPersonality, which resets every vdStates
+  // category, so merely traversing the row with the keyboard destroyed the
+  // user's Details recipe. `currentIndex` is the target button's OWN index
+  // (from the render loop), not a lookup by "currently active id" — the old
+  // lookup-based `cur` silently reset to 0 whenever nothing was active
+  // (activePersonality can be '' most of the time), so it never advanced
+  // past the first two chips.
+  const onChipKeyDown = (e, ids, currentIndex) => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
-    const cur = Math.max(0, options.indexOf(vdStates[key]));
-    const next = (cur + (e.key === 'ArrowRight' ? 1 : -1) + options.length) % options.length;
-    setVdStates({ ...vdStates, [key]: options[next] });
-    e.currentTarget.closest('.chip-group')?.querySelectorAll('[role="radio"]')[next]?.focus();
+    const next = (currentIndex + (e.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length;
+    e.currentTarget.closest('[role="group"]')?.querySelectorAll('[data-chip-nav]')[next]?.focus();
   };
 
   // 10x P4 a11y (spec §3): once a generation has run, the persistent status
@@ -290,180 +382,227 @@ export default function CloneDesignTab(props) {
   // highlight the chip equivalent. After this fires, the user can hit
   // Synthesize Audio immediately — no further input needed.
   const applyDemoPreset = (p) => {
+    // A manual pick always beats an in-flight describe response (greptile,
+    // PR #1793 second pass) — bump the token before touching state.
+    invalidateDescribe();
     if (p.script) setText(p.script);
-    if (p.attrs) setVdStates({ ...vdStates, ...p.attrs });
+    if (p.attrs) {
+      // #1771: apply one category at a time through the same exclusivity
+      // guard the picker uses — a preset merged wholesale onto the existing
+      // vdStates could otherwise set a dialect on top of an already-picked
+      // accent (or vice versa).
+      let next = vdStates;
+      for (const [key, value] of Object.entries(p.attrs)) {
+        next = applyVdState(next, key, value).vdStates;
+      }
+      setVdStates(next);
+    }
     setInstruct('');
     if (p.language) setLanguage(p.language);
     setActivePersonality(p.id);
   };
 
+  // `applyPreset` is owned by useTTS.js (it writes straight to the global
+  // store), not this component — but the "Starting points" PRESETS chips
+  // still fire it from inside DesignMethodPanel, and a manual pick always
+  // beats an in-flight describe response (greptile, PR #1793 second pass).
+  // Wrap it here so invalidateDescribe fires before the prop's own logic
+  // runs, rather than reaching into useTTS.js for a second describe-aware
+  // implementation.
+  const applyPresetAndInvalidate = (p) => {
+    invalidateDescribe();
+    applyPreset(p);
+  };
+
   return (
-    <div className="flex-1 flex flex-col min-h-0 min-w-0">
-      <div className="flex-1 flex flex-col gap-[6px] min-h-0 overflow-y-auto">
-        {/* ═══ SCRIPT — what should it say ═══
+    <Tabs
+      value={defineMethod}
+      onValueChange={setDefineMethod}
+      activationMode="manual"
+      className="flex-1 min-h-0 min-w-0 gap-0"
+    >
+      <div className="voice-workspace-toolbar relative z-10 flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 px-3 pb-3 pt-2 max-[600px]:px-1.5">
+        <TabsList
+          aria-label={t('clone.voice_kicker')}
+          className="grid h-auto w-auto min-w-0 flex-[1_1_320px] grid-cols-3 gap-[3px] rounded-[var(--chrome-radius-pill)] border border-transparent bg-[var(--chrome-bg)] p-[3px]"
+        >
+          {[
+            { id: 'audio', label: t('clone.define_from_audio') },
+            { id: 'design', label: t('clone.define_by_design') },
+            { id: 'convert', label: t('clone.define_convert') },
+          ].map((method) => (
+            <TabsTrigger
+              key={method.id}
+              value={method.id}
+              data-voice-mode={method.id}
+              disabled={isStartingRecording || isRecording || convertRecordingBusy}
+              className="voice-mode-tab min-h-11 h-auto min-w-0 cursor-pointer whitespace-normal rounded-[var(--chrome-radius-pill)] border border-transparent bg-transparent px-3 py-2 text-sm font-medium text-[color:var(--chrome-fg-muted)] transition-colors data-[state=active]:border-[var(--chrome-accent-border)] data-[state=active]:bg-[var(--chrome-accent-bg)] data-[state=active]:font-semibold data-[state=active]:text-[color:var(--chrome-accent)] data-[state=active]:shadow-none dark:data-[state=active]:border-[var(--chrome-accent-border)] dark:data-[state=active]:bg-[var(--chrome-accent-bg)] dark:data-[state=active]:text-[color:var(--chrome-accent)] hover:data-[state=inactive]:bg-[var(--chrome-hover-bg)]"
+            >
+              <VoiceModeIcon mode={method.id} />
+              {method.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </div>
+      <TabsContent value={defineMethod} className="flex min-h-0 flex-col">
+        {defineMethod === 'convert' ? (
+          <ConvertMethodPanel
+            t={t}
+            profiles={profiles}
+            onRecordingBusyChange={setConvertRecordingBusy}
+          />
+        ) : (
+          <>
+            {/* The form owns the remaining height and scrolls above the action bar. */}
+            <div className="flex flex-1 flex-col gap-[6px] min-h-0 overflow-y-auto">
+              {/* ═══ SCRIPT — what should it say ═══
             Hidden for Convert: the source clip IS the script (the backend
             transcribes it), so a text panel would only mislead. */}
-        {defineMethod !== 'convert' && (
-          <ScriptPanel
-            t={t}
-            defineMethod={defineMethod}
-            text={text}
-            setText={setText}
-            activePersonality={activePersonality}
-            demoPresets={demoPresets}
-            applyDemoPreset={applyDemoPreset}
-            showDemoCoachmark={showDemoCoachmark}
-            setShowDemoCoachmark={setShowDemoCoachmark}
-            selectedProfile={selectedProfile}
-            DEMO_PROFILE_ID={DEMO_PROFILE_ID}
-            textAreaRef={textAreaRef}
-            insertOpen={insertOpen}
-            setInsertOpen={setInsertOpen}
-            insertTag={insertTag}
-          />
-        )}
-
-        {/* ═══ VOICE — who says it ═══ */}
-        <div className="flex flex-col gap-[6px] flex-none min-h-0 relative z-[1]">
-          <div className="flex flex-col min-h-0 overflow-auto bg-[var(--chrome-bg)] border border-transparent rounded-none py-[10px] px-[12px] max-[800px]:px-[10px] max-[600px]:px-[6px] max-[600px]:py-[8px]">
-            <div className="label-row justify-between">
-              <span className="label-row mb-0">
-                <Volume2 className="label-icon" size={14} />{' '}
-                {t('clone.voice_kicker', { defaultValue: 'Voice' })}
-              </span>
-              <div className="flex items-center gap-[6px]">
-                <EngineQuickSwitch />
-                <Segmented
-                  size="sm"
-                  value={defineMethod}
-                  onChange={setDefineMethod}
-                  items={[
-                    {
-                      value: 'audio',
-                      label: t('clone.define_from_audio', { defaultValue: 'From audio' }),
-                    },
-                    {
-                      value: 'design',
-                      label: t('clone.define_by_design', { defaultValue: 'By design' }),
-                    },
-                    {
-                      value: 'convert',
-                      label: t('clone.define_convert', { defaultValue: 'Convert' }),
-                    },
-                  ]}
+              {defineMethod !== 'convert' && (
+                <ScriptPanel
+                  t={t}
+                  defineMethod={defineMethod}
+                  text={text}
+                  setText={setText}
+                  activePersonality={activePersonality}
+                  demoPresets={demoPresets}
+                  applyDemoPreset={applyDemoPreset}
+                  showDemoCoachmark={showDemoCoachmark}
+                  setShowDemoCoachmark={setShowDemoCoachmark}
+                  selectedProfile={selectedProfile}
+                  DEMO_PROFILE_ID={DEMO_PROFILE_ID}
+                  textAreaRef={textAreaRef}
+                  insertOpen={insertOpen}
+                  setInsertOpen={setInsertOpen}
+                  insertTag={insertTag}
                 />
+              )}
+
+              {/* ═══ VOICE — who says it ═══ */}
+              <div
+                className={`flex flex-col gap-[6px] ${defineMethod === 'audio' ? 'flex-[1_0_auto]' : 'flex-none'} min-h-0 relative z-[1]`}
+              >
+                <div className="flex flex-1 flex-col min-h-0 bg-[var(--chrome-bg)] border border-transparent rounded-none py-[10px] px-[12px] max-[800px]:px-[10px] max-[600px]:px-[6px] max-[600px]:py-[8px]">
+                  <div className="label-row justify-between">
+                    <span className="label-row mb-0">
+                      <Volume2 className="label-icon" size={14} />{' '}
+                      {t('clone.voice_kicker', { defaultValue: 'Voice' })}
+                    </span>
+                  </div>
+
+                  {defineMethod === 'audio' ? (
+                    <AudioMethodPanel
+                      t={t}
+                      selectedProfile={selectedProfile}
+                      setSelectedProfile={setSelectedProfile}
+                      profiles={profiles}
+                      ingestRefAudio={ingestRefAudio}
+                      refAudio={refAudio}
+                      isCleaning={isCleaning}
+                      isRecording={isRecording}
+                      isStartingRecording={isStartingRecording}
+                      recordingTime={recordingTime}
+                      audioInputs={audioInputs}
+                      selectedAudioInputId={selectedAudioInputId}
+                      setSelectedAudioInputId={setSelectedAudioInputId}
+                      channelMode={channelMode}
+                      setChannelMode={setChannelMode}
+                      inputLevelStore={inputLevelStore}
+                      startRecording={startRecording}
+                      stopRecording={stopRecording}
+                      refText={refText}
+                      setRefText={setRefText}
+                      instruct={instruct}
+                      setInstruct={setInstruct}
+                      defineMethod={defineMethod}
+                      designSeed={designSeed}
+                      setDesignSeed={setDesignSeed}
+                      keepSeed={keepSeed}
+                      setKeepSeed={setKeepSeed}
+                      showSaveProfile={showSaveProfile}
+                      setShowSaveProfile={setShowSaveProfile}
+                      profileName={profileName}
+                      setProfileName={setProfileName}
+                      handleSaveProfile={handleSaveProfile}
+                    />
+                  ) : (
+                    <DesignMethodPanel
+                      t={t}
+                      describeText={describeText}
+                      onDescribeChange={onDescribeChange}
+                      describeMatchedAny={describeMatchedAny}
+                      describeUnmatched={describeUnmatched}
+                      chipPersonalities={chipPersonalities}
+                      activePersonality={activePersonality}
+                      applyPersonality={applyPersonality}
+                      applyPreset={applyPresetAndInvalidate}
+                      identityOpen={identityOpen}
+                      setIdentityOpen={setIdentityOpen}
+                      identityRecipe={identityRecipe}
+                      vdStates={vdStates}
+                      onVdChange={handleVdChange}
+                      onChipKeyDown={onChipKeyDown}
+                      resetToDescription={resetToDescription}
+                      showSaveProfile={showSaveProfile}
+                      setShowSaveProfile={setShowSaveProfile}
+                      profileName={profileName}
+                      setProfileName={setProfileName}
+                      handleSaveDesignProfile={handleSaveDesignProfile}
+                      instruct={instruct}
+                      language={language}
+                    />
+                  )}
+                </div>
               </div>
             </div>
 
-            {defineMethod === 'audio' ? (
-              <AudioMethodPanel
-                t={t}
-                selectedProfile={selectedProfile}
-                setSelectedProfile={setSelectedProfile}
-                profiles={profiles}
-                ingestRefAudio={ingestRefAudio}
-                refAudio={refAudio}
-                isCleaning={isCleaning}
-                isRecording={isRecording}
-                recordingTime={recordingTime}
-                audioInputs={audioInputs}
-                selectedAudioInputId={selectedAudioInputId}
-                setSelectedAudioInputId={setSelectedAudioInputId}
-                channelMode={channelMode}
-                setChannelMode={setChannelMode}
-                inputLevelStore={inputLevelStore}
-                startRecording={startRecording}
-                stopRecording={stopRecording}
-                refText={refText}
-                setRefText={setRefText}
-                instruct={instruct}
-                setInstruct={setInstruct}
-                defineMethod={defineMethod}
-                designSeed={designSeed}
-                setDesignSeed={setDesignSeed}
-                keepSeed={keepSeed}
-                setKeepSeed={setKeepSeed}
-                showSaveProfile={showSaveProfile}
-                setShowSaveProfile={setShowSaveProfile}
-                profileName={profileName}
-                setProfileName={setProfileName}
-                handleSaveProfile={handleSaveProfile}
-              />
-            ) : defineMethod === 'convert' ? (
-              <ConvertMethodPanel t={t} profiles={profiles} />
-            ) : (
-              <DesignMethodPanel
-                t={t}
-                describeText={describeText}
-                onDescribeChange={onDescribeChange}
-                describeMatchedAny={describeMatchedAny}
-                describeUnmatched={describeUnmatched}
-                chipPersonalities={chipPersonalities}
-                activePersonality={activePersonality}
-                applyPersonality={applyPersonality}
-                applyPreset={applyPreset}
-                identityOpen={identityOpen}
-                setIdentityOpen={setIdentityOpen}
-                identityRecipe={identityRecipe}
-                vdStates={vdStates}
-                setVdStates={setVdStates}
-                onChipKeyDown={onChipKeyDown}
-                showSaveProfile={showSaveProfile}
-                setShowSaveProfile={setShowSaveProfile}
-                profileName={profileName}
-                setProfileName={setProfileName}
-                handleSaveDesignProfile={handleSaveDesignProfile}
-                instruct={instruct}
-                language={language}
-              />
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* ═══ ACTION BAR — pinned to the column bottom ═══
+            {/* ═══ ACTION BAR — pinned to the column bottom ═══
           Hidden for Convert: it drives text synthesis (script + overrides),
           and Convert owns its action button inside its panel. */}
-      {defineMethod !== 'convert' && (
-        <ActionBar
-          t={t}
-          showOverrides={showOverrides}
-          setShowOverrides={setShowOverrides}
-          cfg={cfg}
-          setCfg={setCfg}
-          speed={speed}
-          setSpeed={setSpeed}
-          tShift={tShift}
-          setTShift={setTShift}
-          posTemp={posTemp}
-          setPosTemp={setPosTemp}
-          classTemp={classTemp}
-          setClassTemp={setClassTemp}
-          layerPenalty={layerPenalty}
-          setLayerPenalty={setLayerPenalty}
-          duration={duration}
-          setDuration={setDuration}
-          denoise={denoise}
-          setDenoise={setDenoise}
-          postprocess={postprocess}
-          setPostprocess={setPostprocess}
-          language={language}
-          setLanguage={setLanguage}
-          steps={steps}
-          setSteps={setSteps}
-          showHearDemo={showHearDemo}
-          playDemoOutput={playDemoOutput}
-          demoAudioPlaying={demoAudioPlaying}
-          demoAudioRef={demoAudioRef}
-          demoReleaseRef={demoReleaseRef}
-          setDemoAudioPlaying={setDemoAudioPlaying}
-          outputPlaying={outputPlaying}
-          isGenerating={isGenerating}
-          handleGenerate={handleGenerate}
-          generationTime={generationTime}
-          wasGeneratingRef={wasGeneratingRef}
-        />
-      )}
-    </div>
+            {defineMethod !== 'convert' && (
+              <ActionBar
+                t={t}
+                showOverrides={showOverrides}
+                setShowOverrides={setShowOverrides}
+                cfg={cfg}
+                setCfg={setCfg}
+                speed={speed}
+                setSpeed={setSpeed}
+                tShift={tShift}
+                setTShift={setTShift}
+                posTemp={posTemp}
+                setPosTemp={setPosTemp}
+                classTemp={classTemp}
+                setClassTemp={setClassTemp}
+                layerPenalty={layerPenalty}
+                setLayerPenalty={setLayerPenalty}
+                duration={duration}
+                setDuration={setDuration}
+                denoise={denoise}
+                setDenoise={setDenoise}
+                postprocess={postprocess}
+                setPostprocess={setPostprocess}
+                language={language}
+                setLanguage={setLanguage}
+                steps={steps}
+                setSteps={setSteps}
+                showHearDemo={showHearDemo}
+                playDemoOutput={playDemoOutput}
+                demoAudioPlaying={demoAudioPlaying}
+                demoAudioRef={demoAudioRef}
+                demoReleaseRef={demoReleaseRef}
+                setDemoAudioPlaying={setDemoAudioPlaying}
+                outputPlaying={outputPlaying}
+                isGenerating={isGenerating}
+                handleGenerate={handleGenerate}
+                generationTime={generationTime}
+                generationProgress={generationProgress}
+                wasGeneratingRef={wasGeneratingRef}
+              />
+            )}
+          </>
+        )}
+      </TabsContent>
+    </Tabs>
   );
 }

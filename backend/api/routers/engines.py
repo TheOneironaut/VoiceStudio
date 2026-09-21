@@ -15,18 +15,20 @@ Environment variables (`OMNIVOICE_TTS_BACKEND`, `OMNIVOICE_ASR_BACKEND`,
 `OMNIVOICE_LLM_BACKEND`) still win over the UI choice so power-users can pin
 a backend without Settings silently undoing it.
 """
+import asyncio
 import logging
 import os
 import threading
 from time import perf_counter
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from huggingface_hub import utils as hf_utils
 from huggingface_hub.errors import HFValidationError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from api.dependencies import require_admin, require_admin_action, require_desktop
+from api.dependencies import require_admin, require_admin_action, require_desktop, is_loopback
 from core import prefs
+from core.engine_licenses import LICENSE_GATED_ENGINES
 from services import tts_backend, asr_backend, llm_backend, translation_engines
 from services.audio_dsp import list_effect_presets
 from api.schemas import EffectPresetsResponse
@@ -42,12 +44,70 @@ _FAMILIES = {
 }
 
 
+def _catalogue_active_id(family: str, module) -> str:
+    """Return the active id represented by the public engine catalogue."""
+    active = module.active_backend_id()
+    if family != "tts" or active != "omnivoice-subprocess":
+        return active
+
+    from core.device_caps import detect_host_caps
+
+    try:
+        return "omnivoice" if detect_host_caps().family == "mps" else active
+    except Exception:
+        return active
+
+
 def _family_payload(family: str, module):
     """Public inventory plus whether an environment pin owns this family."""
+    active = _catalogue_active_id(family, module)
+    model = None
+    if family == "asr":
+        model = asr_backend._offline_asr_repo(active)
+    elif family == "llm" and active != "off":
+        model = llm_backend.get_active_llm_backend().model_name
+    elif family == "tts":
+        if active in {"omnivoice", "omnivoice-subprocess"}:
+            from services.model_manager import resolve_omnivoice_checkpoint
+            model = resolve_omnivoice_checkpoint()
+        elif active == "mlx-audio":
+            from core import prefs
+            cls = tts_backend.MLXAudioBackend
+            key = prefs.resolve("mlx_audio_model_id", env="OMNIVOICE_MLX_AUDIO_MODEL", default=cls.DEFAULT_MODEL_KEY)
+            model = cls.CURATED_MODELS.get(key, key)
+        else:
+            instance = getattr(tts_backend, "_active_instance", None)
+            if instance is not None and getattr(tts_backend, "_active_instance_id", None) == active:
+                model = instance.model_identity()
+    backends = public_backends(module.list_backends())
+    if family == "tts":
+        from services import settings_store
+
+        for backend in backends:
+            engine_id = backend.get("id")
+            if engine_id == active:
+                backend["supported_language_names"] = tts_backend.language_options(active)
+            if engine_id == active == "mlx-audio":
+                # Constructor resolves model preferences only; never loads weights.
+                backend["supports_cloning"] = tts_backend.MLXAudioBackend().supports_cloning
+            if engine_id in LICENSE_GATED_ENGINES:
+                backend["license_required"] = True
+                try:
+                    backend["license_accepted"] = settings_store.get_license_accepted(engine_id)
+                except Exception:
+                    logger.warning(
+                        "Could not read license acceptance for %s",
+                        engine_id,
+                        exc_info=True,
+                    )
+                    backend["license_accepted"] = False
     return {
-        "active": module.active_backend_id(),
+        # MPS hides the explicit compatibility row, so legacy configs report
+        # the visible canonical equivalent as active to picker consumers.
+        "active": active,
+        "active_model": model,
         "env_override": bool(os.environ.get(f"OMNIVOICE_{family.upper()}_BACKEND")),
-        "backends": public_backends(module.list_backends()),
+        "backends": backends,
     }
 
 def _is_hf_repo_id(value: str) -> bool:
@@ -61,18 +121,29 @@ def _is_hf_repo_id(value: str) -> bool:
     return True
 
 
+def _request_install_capability(payload, request):
+    allowed = bool(request and request.client and is_loopback(request.client.host))
+    result = dict(payload)
+    result["backends"] = [dict(entry) for entry in payload["backends"]]
+    for entry in result["backends"]:
+        if entry.get("one_click_install") and not allowed:
+            entry["one_click_install"] = False
+            entry["local_install_required"] = True
+    return result
+
+
 @router.get("/engines")
-def list_all_engines():
+def list_all_engines(request: Request):
     return {
-        "tts": _family_payload("tts", tts_backend),
+        "tts": _request_install_capability(_family_payload("tts", tts_backend), request),
         "asr": _family_payload("asr", asr_backend),
         "llm": _family_payload("llm", llm_backend),
     }
 
 
 @router.get("/engines/tts")
-def list_tts_backends():
-    return _family_payload("tts", tts_backend)
+def list_tts_backends(request: Request):
+    return _request_install_capability(_family_payload("tts", tts_backend), request)
 
 
 @router.get(
@@ -110,6 +181,90 @@ def list_effects_presets():
     return {"presets": list_effect_presets()}
 
 
+@router.get("/engines/diarisation")
+def diarisation_status():
+    """Describe the selected local diarisation runtime without loading weights."""
+    from services.diarization_runtime import (
+        PYANNOTE,
+        SORTFORMER,
+        selected_backend,
+        sortformer_status,
+    )
+
+    selected = selected_backend()
+    native = selected == SORTFORMER
+    options = []
+    from api.routers.setup.models import KNOWN_MODELS, cache_is_complete, is_cached
+    pyannote_repo = "pyannote/speaker-diarization-3.1"
+    spec = next(model for model in KNOWN_MODELS if model["repo_id"] == pyannote_repo)
+    pyannote_installed = is_cached(pyannote_repo) and cache_is_complete(spec)
+    pyannote_reason = None if pyannote_installed else "Install the pyannote model bundle"
+    options.append({
+        "id": PYANNOTE,
+        "label": "pyannote 3.1",
+        "model": pyannote_repo,
+        "installed": pyannote_installed,
+        "reason": pyannote_reason,
+    })
+
+    native_status = sortformer_status()
+    native_installed = native_status["installed"]
+    native_model = native_status["model"]
+    native_reason = native_status["reason"]
+    options.append({
+        "id": SORTFORMER,
+        "label": "Sortformer v1 (audio.cpp)",
+        "model": native_model,
+        "model_installed": native_status["model_installed"],
+        "runtime_installed": native_status["runtime_installed"],
+        "installed": native_installed,
+        "reason": native_reason,
+    })
+
+    if native:
+        from services.diarization_native import is_running
+        return {"active": SORTFORMER, "label": "Sortformer v1 (audio.cpp)",
+                "model": native_model, "installed": native_installed, "loaded": False,
+                "model_installed": native_status["model_installed"],
+                "runtime_installed": native_status["runtime_installed"],
+                "busy": is_running(), "reason": native_reason, "options": options}
+    from services import model_manager
+    return {"active": PYANNOTE, "label": "pyannote 3.1", "model": pyannote_repo,
+            "installed": pyannote_installed,
+            "loaded": model_manager._diar_pipeline is not None, "reason": pyannote_reason,
+            "options": options}
+
+
+class DiarisationSelection(BaseModel):
+    engine_id: str
+
+
+@router.post("/engines/diarisation/select", dependencies=[Depends(require_admin)])
+def select_diarisation_engine(request: DiarisationSelection):
+    """Persist an installed diarisation runtime; environment overrides still win."""
+    from services.diarization_runtime import SORTFORMER, select_backend, selected_backend
+
+    status = diarisation_status()
+    option = next(
+        (item for item in status["options"] if item["id"] == request.engine_id),
+        None,
+    )
+    if option is None:
+        raise HTTPException(404, "Unknown diarisation engine")
+    if not option["installed"]:
+        raise HTTPException(409, option.get("reason") or "Install this diarisation engine first")
+    select_backend(request.engine_id)
+    if request.engine_id == SORTFORMER:
+        # Native Sortformer is stateless. Release a previously loaded pyannote
+        # pipeline so Engine Ready cannot hide stale accelerator memory.
+        from services import model_manager
+        model_manager.unload_diarization_pipeline()
+    return {
+        "active": selected_backend(),
+        "env_override": bool(os.environ.get("OMNIVOICE_DIARIZATION_BACKEND")),
+    }
+
+
 @router.get("/engines/translation")
 def list_translation_engines():
     """Translation engines with per-engine pip-package availability.
@@ -120,12 +275,76 @@ def list_translation_engines():
     an engine whose Python dependency isn't importable yet.
     """
     return {
+        "active": prefs.get("translation_backend", "argos"),
         "engines": [
             {**entry, "availability_reason": public_unavailability(entry.get("availability_reason"))}
             for entry in translation_engines.list_engines()
         ],
         "sandboxed": translation_engines.is_frozen(),
     }
+
+
+class TranslationSelection(BaseModel):
+    engine_id: str
+
+
+class ArgosPackRequest(BaseModel):
+    source_lang: str | None = None
+    target_langs: list[str] = Field(min_length=1, max_length=32)
+    job_id: str | None = None
+
+
+def _argos_pack_request(request: ArgosPackRequest) -> tuple[str, list[str]]:
+    source = request.source_lang
+    if not source and request.job_id:
+        from api.routers.dub_core import _get_job
+
+        job = _get_job(request.job_id)
+        source = job.get("source_lang") if job else None
+    if not source:
+        raise HTTPException(422, "Transcribe the source before installing its language pack")
+    return source, request.target_langs
+
+
+@router.post(
+    "/engines/translation/argos/packs/status",
+    dependencies=[Depends(require_admin)],
+)
+def argos_pack_status(request: ArgosPackRequest):
+    source, targets = _argos_pack_request(request)
+    try:
+        return translation_engines.argos_pack_status(source, targets)
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/engines/translation/argos/packs/install",
+    dependencies=[Depends(require_admin)],
+)
+async def install_argos_packs(request: ArgosPackRequest):
+    source, targets = _argos_pack_request(request)
+    try:
+        return await asyncio.to_thread(
+            translation_engines.install_argos_packs,
+            source,
+            targets,
+        )
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/engines/translation/select", dependencies=[Depends(require_admin)])
+def select_translation_engine(request: TranslationSelection):
+    entry = translation_engines.get_engine(request.engine_id)
+    if not entry:
+        raise HTTPException(404, "Unknown translation engine")
+    if not translation_engines.is_installed(request.engine_id):
+        raise HTTPException(409, "Install this translation engine before selecting it")
+    if not translation_engines.is_ready(request.engine_id):
+        raise HTTPException(409, "Configure this translation provider before selecting it")
+    prefs.set_("translation_backend", request.engine_id)
+    return {"active": request.engine_id}
 
 
 @router.post(
@@ -188,10 +407,41 @@ async def uninstall_translation_engine(engine_id: str):
     pkg = entry.get("pip_package")
     if not pkg:
         return {"status": "no_op", "engine": engine_id}
+    # The builtin flag is a promise someone has to remember to make; this
+    # check does not depend on it (#2019).
+    blocked = translation_engines.uninstall_blocker(engine_id)
+    if blocked:
+        raise HTTPException(status_code=blocked[0], detail=blocked[1])
     rc, out = await translation_engines.run_pip(["uninstall", "-y", pkg])
     if rc != 0:
         raise HTTPException(status_code=500, detail=f"pip uninstall {pkg} failed ({rc}): {out[-1000:]}")
     return {"status": "uninstalled", "engine": engine_id, "package": pkg, "log_tail": out[-800:]}
+
+
+# ── Checksummed native audio.cpp runtime install ───────────────────────────
+
+
+@router.get(
+    "/engines/audiocpp/runtime/install/status",
+    dependencies=[Depends(require_admin)],
+)
+def audiocpp_runtime_install_status(request: Request):
+    from services import audiocpp_runtime_install
+
+    return {**audiocpp_runtime_install.status(), "install_allowed": bool(request.client and is_loopback(request.client.host))}
+
+
+@router.post(
+    "/engines/audiocpp/runtime/install",
+    dependencies=[Depends(require_admin), Depends(require_desktop)],
+)
+def install_audiocpp_runtime():
+    from services import audiocpp_runtime_install
+
+    try:
+        return audiocpp_runtime_install.start_install()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # ── One-click sidecar-engine install (IndexTTS-2 & friends) ────────────────
@@ -199,7 +449,7 @@ async def uninstall_translation_engine(engine_id: str):
 # Sidecar engines (dedicated venv + source checkout + weights, isolated from
 # the parent's transformers>=5.3) used to require four manual terminal steps.
 # These routes drive services.sidecar_install: POST starts a resumable
-# background job, GET polls its step-by-step status (the Model Catalogue → Engines
+# background job, GET polls its step-by-step status (the Model Catalogue
 # Install button polls this), DELETE removes an app-managed install.
 #
 # Path namespace: /engines/sidecar/{engine_id}/… — NOT /engines/{engine_id}/…
@@ -230,6 +480,11 @@ def install_sidecar_engine(engine_id: str):
     from services import sidecar_install
     try:
         return sidecar_install.start_install(engine_id)
+    except sidecar_install.HostUnsupported as exc:
+        # The engine has an installer, but not one that can work on this
+        # machine. 409, not 404: the route is right, the host is the problem,
+        # and the message (a VoiceStudio-owned sentence) says what to do.
+        raise HTTPException(status_code=409, detail=str(exc))
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -246,7 +501,7 @@ def install_sidecar_engine(engine_id: str):
     "/engines/sidecar/{engine_id}/install/status",
     dependencies=[Depends(require_admin)],
 )
-def sidecar_install_status(engine_id: str):
+def sidecar_install_status(engine_id: str, request: Request = None):
     """Step-by-step status of the sidecar install job (poll while running).
 
     Shape: ``{engine_id, installed, managed, install_dir, job}`` where job is
@@ -255,7 +510,7 @@ def sidecar_install_status(engine_id: str):
     """
     from services import sidecar_install
     try:
-        return sidecar_install.get_status(engine_id)
+        return {**sidecar_install.get_status(engine_id), "install_allowed": bool(request and request.client and is_loopback(request.client.host))}
     except KeyError:
         raise HTTPException(
             status_code=404,
@@ -354,6 +609,9 @@ def engine_health(engine_id: str):
         )
 
     t0 = perf_counter()
+    # Stable exception class when the probe itself raised, None when it merely
+    # returned not-available. Never the exception text — see the log line below.
+    raised_class: str | None = None
     if hasattr(cls, "health_check"):
         # SubprocessBackend path — spawn sidecar (if not running) and ping.
         # ``health_check`` already swallows its own exceptions per Plan
@@ -364,6 +622,7 @@ def engine_health(engine_id: str):
             ok, msg = instance.health_check()
         except Exception as exc:
             ok, msg = False, f"{type(exc).__name__}: {exc}"
+            raised_class = type(exc).__name__
     else:
         # In-process backend — `is_available()` is the classmethod-level
         # liveness check. Cheap and side-effect-free for every shipping
@@ -372,6 +631,7 @@ def engine_health(engine_id: str):
             ok, msg = cls.is_available()
         except Exception as exc:
             ok, msg = False, f"{type(exc).__name__}: {exc}"
+            raised_class = type(exc).__name__
 
     # Engine-owned output can contain much more than shaped HF tokens: local
     # paths, arbitrary credentials, source lines, or a nested traceback.
@@ -379,7 +639,38 @@ def engine_health(engine_id: str):
 
     latency_ms = (perf_counter() - t0) * 1000.0
     if not ok:
-        logger.warning("Engine health check failed; details withheld")
+        # The response tells the user to "check the backend log for details",
+        # and docs/engines/*.md asks a user diagnosing an unavailable engine to
+        # copy that engine's log lines. The old line named neither the engine
+        # nor anything about the probe, so neither instruction could be
+        # followed (#1866).
+        #
+        # `probe=` reports what the PROBE DID, not what went wrong. It cannot
+        # classify the cause: SubprocessBackend.health_check() swallows its own
+        # exceptions per Plan 02-01's contract, so a dead sidecar and a package
+        # that was never installed both arrive here as `returned-unavailable`.
+        # Separating those needs structured failure metadata from the probes
+        # themselves, which is a wider change than this one.
+        #
+        # Still no diagnostic text and still not the caller-supplied id: the
+        # engine id comes off the resolved registry class and a raised probe
+        # contributes only its exception class, the same shape
+        # core.public_errors.public_failure() logs as `class=`.
+        # tests/test_response_safety.py pins that boundary and passes
+        # unchanged.
+        #
+        # The id is a class attribute off the registry rather than caller
+        # input, but this line is a log-injection surface either way, so it is
+        # flattened to a single token before it goes in.
+        engine_label = str(getattr(cls, "id", None) or cls.__name__)
+        engine_label = "".join(
+            c if (c.isalnum() or c in "-_.") else "-" for c in engine_label
+        )[:64]
+        logger.warning(
+            "Engine health check failed; engine=%s probe=%s, details withheld",
+            engine_label or "unknown",
+            f"raised:{raised_class}" if raised_class else "returned-unavailable",
+        )
     return {
         "id": engine_id,
         "ok": bool(ok),
@@ -588,7 +879,15 @@ def select_engine(req: SelectEngineRequest):
     if not family:
         raise HTTPException(400, f"Unknown family: {req.family}. Expected one of tts/asr/llm.")
     module, pref_key = family
-    available = {b["id"]: b for b in module.list_backends()}
+    # MPS intentionally hides the redundant explicit OmniVoice sidecar from
+    # the picker, but existing scripts and saved preferences may still submit
+    # that supported compatibility id directly.
+    rows = (
+        module.list_backends(include_hidden=True)
+        if req.family == "tts"
+        else module.list_backends()
+    )
+    available = {b["id"]: b for b in rows}
     if req.backend_id not in available:
         raise HTTPException(400, f"Unknown {req.family} backend: {req.backend_id!r}")
     entry = available[req.backend_id]
@@ -607,7 +906,7 @@ def select_engine(req: SelectEngineRequest):
     # #981: mlx-audio multiplexes 7+ curated models behind one backend id —
     # persist the model pick alongside the backend id so the UI can actually
     # select which curated model gets loaded (previously it always defaulted
-    # to Kokoro no matter what the user downloaded in Model Catalogue → Models).
+    # to Kokoro no matter what the user downloaded in the engine's Weights list in Model Catalogue).
     if req.family == "tts" and req.backend_id == "mlx-audio" and req.model_id is not None:
         known_keys = tts_backend.MLXAudioBackend.CURATED_MODELS
         # Accept a curated key OR a raw HF repo id ("owner/name") — the same
@@ -628,6 +927,23 @@ def select_engine(req: SelectEngineRequest):
         if req.voice_id not in VOICES:
             raise HTTPException(400, "Unknown Gemini TTS voice.")
         prefs.set_("gemini_tts_voice", req.voice_id)
+    if req.family == "asr" and req.model_id is not None:
+        if req.backend_id not in {"faster-whisper", "faster-whisper-isolated"}:
+            raise HTTPException(400, "This ASR engine does not accept a CTranslate2 model")
+        from api.routers.setup.models import KNOWN_MODELS, is_cached
+
+        model = next((item for item in KNOWN_MODELS if item["repo_id"] == req.model_id), None)
+        compatible = req.model_id.startswith("Systran/faster-") or req.model_id == (
+            "deepdml/faster-whisper-large-v3-turbo-ct2"
+        )
+        if model is None or str(model.get("role", "")).lower() != "asr" or not compatible:
+            raise HTTPException(400, "This model is not compatible with Faster-Whisper")
+        if not is_cached(req.model_id):
+            raise HTTPException(409, "Install this ASR model before selecting it")
+        try:
+            asr_backend.select_faster_whisper_model(req.model_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     prefs.set_(pref_key, req.backend_id)
     return {
         "family": req.family,

@@ -1,8 +1,8 @@
 """CHANGELOG.md quiet-style linter — deterministic CI for the release-notes rule.
 
 CLAUDE.md, "Release notes / changelog" (hard rule, owner-restyled 2026-07-17):
-sections are **quiet and scannable** — a short `**Highlights**` bullet list
-first, then `### Changed` / `### Added` / … subsections where each entry is a
+change entries are **quiet and scannable** — an optional tagged-release
+introduction may precede the short `**Highlights**` bullet list, followed by `### Changed` / `### Added` / … subsections where each entry is a
 single one-liner carrying its `(#NNN)` ref and `— thanks @user!` credit where
 applicable. No multi-line paragraphs, no raw commit dumps.
 
@@ -33,6 +33,8 @@ _MAX_ENTRY_CHARS = 400
 # Entry subsections whose bullets must carry a `(#N)` ref or a
 # `— thanks @user!` credit. Changed/Docs/CI/License lines are often
 # owner-authored housekeeping without an issue, so only these two.
+# Unreleased CI entries are also checked below; published infrastructure
+# notes remain grandfathered so old releases do not need invented references.
 _REF_REQUIRED_SECTIONS = {"Added", "Fixed"}
 
 # Owner-authored infra entries allowed without a ref/credit (direct-to-main
@@ -94,6 +96,24 @@ def lint_changelog(text):
                 f"block — quiet style opens with a short Highlights bullet "
                 f"list ({_RULE})."
             )
+        # The presentation rule starts with v0.5.4. Published history and the
+        # growing Unreleased section retain their existing cardinality.
+        version = _HEADING.match(heading).group(1)
+        version_parts = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+        if has_highlights and version_parts and tuple(map(int, version_parts.groups())) >= (0, 5, 4):
+            in_highlights = False
+            highlight_count = 0
+            for _, line in body:
+                if line.strip() == "**Highlights**":
+                    in_highlights = True
+                elif in_highlights and line.startswith("### "):
+                    break
+                elif in_highlights and line.startswith("- "):
+                    highlight_count += 1
+            if not 3 <= highlight_count <= 5:
+                violations.append(
+                    f"{heading}: expected 3–5 Highlight bullets, found {highlight_count}."
+                )
         last_bullet = None  # (lineno, text) of the most recent bullet
         for lineno, line in body:
             if line.startswith("### "):
@@ -111,7 +131,8 @@ def lint_changelog(text):
                         f"({_RULE}): {line[:120]}…"
                     )
                 if (
-                    subsection in _REF_REQUIRED_SECTIONS
+                    (subsection in _REF_REQUIRED_SECTIONS
+                     or (heading == "## [Unreleased]" and subsection == "CI"))
                     and not _REF_AT_END.search(line)
                     and not _CREDIT.search(line)
                     and not any(a in line for a in _REF_ALLOWLIST)
@@ -157,6 +178,34 @@ def test_repo_changelog_is_quiet_style():
 
 
 # ── linter self-tests: each rule must actually fire ──────────────────────────
+
+
+def _duplicate_versions(text):
+    """Versions with more than one section, read by the app's own parser
+    (core.changelog), which strips whitespace and a leading "v" and skips
+    headings such as [Unreleased], so `[v0.5.2]` and `[0.5.2]` are one version."""
+    from core.changelog import parse_changelog
+
+    versions = [r["version"] for r in parse_changelog(text, limit_versions=10**6)]
+    return sorted({v for v in versions if versions.count(v) > 1})
+
+
+def test_every_version_has_one_section():
+    """release.yml publishes the FIRST `## [X.Y.Z]` section as the release
+    body and stops at the next heading, so a second section for the same
+    version silently drops out of the notes (v0.5.2 was prepared twice)."""
+    with open(_REPO_CHANGELOG, encoding="utf-8") as fh:
+        dupes = _duplicate_versions(fh.read())
+    assert not dupes, f"CHANGELOG.md has more than one section for: {dupes}"
+
+
+def test_duplicate_versions_are_found_however_the_heading_is_written():
+    text = (
+        "# Changelog\n\n## [Unreleased]\n\n## [v0.5.2] — 2026-09-10\n\n- a (#1)\n\n"
+        "## [ 0.5.2 ] — 2026-09-02\n\n- b (#2)\n\n## [0.5.1] — 2026-08-28\n\n- c (#3)\n"
+    )
+    assert _duplicate_versions(text) == ["0.5.2"]
+
 
 _GOOD = """# Changelog
 
@@ -248,3 +297,33 @@ def test_linter_scopes_by_date_not_position():
     assert len(v) == 2  # missing Highlights + missing ref, 1.0.1 only
     assert all("New-era" in x or "Highlights" in x for x in v)
     assert not any("Old-era" in x for x in v)
+
+
+def test_unreleased_ci_entries_require_a_reference():
+    text = "## [Unreleased]\n\n**Highlights**\n\n- Summary\n\n### CI\n\n- Packaging fix\n"
+    assert any("(#N)" in error for error in lint_changelog(text))
+    assert lint_changelog(text.replace("- Packaging fix", "- Packaging fix (#2157)")) == []
+
+
+def test_tagged_release_highlights_cardinality_ignores_the_introduction():
+    """New releases enforce 3–5 Highlights without counting intro bullets."""
+    for count in range(7):
+        text = (
+            "## [0.5.4] — 2026-09-17\n\nRelease introduction.\n\n"
+            "- [Download](https://example.com/app)\n\n"
+            "**Highlights**\n\n"
+            + "- A user-visible improvement\n" * count
+            + "\n### Fixed\n\n- A regression fixed (#2179)\n"
+        )
+        violations = lint_changelog(text)
+        if 3 <= count <= 5:
+            assert violations == []
+        else:
+            assert any("3–5 Highlight bullets" in item for item in violations)
+
+
+def test_highlight_cardinality_preserves_published_and_work_in_progress_notes():
+    """The new tagged-release limit must not rewrite historical or draft notes."""
+    for heading in ("## [0.5.3] — 2026-09-17", "## [Unreleased]"):
+        text = heading + "\n\n**Highlights**\n\n- One item\n\n### Fixed\n\n- Fix (#1)\n"
+        assert lint_changelog(text) == []

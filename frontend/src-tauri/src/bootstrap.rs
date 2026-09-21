@@ -48,6 +48,51 @@ pub struct BootstrapState {
     pub logs: Arc<Mutex<Vec<LogPayload>>>,
 }
 
+/// Which bootstrap attempt the current stage and log lines belong to (#1900).
+///
+/// The splash used to *infer* attempt boundaries from the ~1 s status poll:
+/// arriving at `checking`/`awaiting_setup`, or leaving `failed`, meant a new
+/// attempt had begun. Inference from a sampled signal cannot be airtight — a
+/// restart begun on this side, which the UI did not initiate, can be sampled
+/// up to a full interval late, and the new attempt's earliest stage-tagged log
+/// lines are then discarded as the previous attempt's. The consequence was
+/// cosmetic and deliberately conservative (a fast stage shows *pending* though
+/// it ran), but it was a guess.
+///
+/// The producer knows the answer exactly, so it says so: every
+/// `bootstrap_status` reply and every `bootstrap-log` line carries the attempt
+/// it belongs to, and the frontend scopes evidence by equality, not by clock.
+///
+/// **Guarded by the stage mutex.** Every write happens while that lock is held
+/// (`begin_attempt_with`), and `bootstrap_status` reads stage and attempt under
+/// it. Without that discipline a restart landing between the two reads returns
+/// the PREVIOUS attempt's stage stamped with the new attempt's id — and the
+/// splash records `installing_deps` as work this attempt did, which is exactly
+/// the #1894 fabrication the attempt id exists to remove (Greptile).
+///
+/// Starts at 1 so 0 is never a live attempt — a payload carrying no attempt at
+/// all deserializes to 0 and stays distinguishable from the first one.
+static ATTEMPT: AtomicU64 = AtomicU64::new(1);
+
+/// The attempt now in progress. Read without the stage lock by log emission,
+/// which only needs the current value, never a pair.
+pub fn current_attempt() -> u64 {
+    ATTEMPT.load(Ordering::SeqCst)
+}
+
+/// Open a new attempt and move the stage into it, atomically.
+///
+/// Called wherever the bootstrap really restarts: both retry commands funnel
+/// through `respawn_backend`, and the supervisor's automatic venv rebuild
+/// re-enters `Checking` on its own. Taking the stage lock across both writes is
+/// what makes the pair a reader observes always self-consistent.
+pub fn begin_attempt_with(stage: &Arc<Mutex<BootstrapStage>>, next: BootstrapStage) -> u64 {
+    let mut guard = stage.lock().unwrap_or_else(|e| e.into_inner());
+    let id = ATTEMPT.fetch_add(1, Ordering::SeqCst) + 1;
+    *guard = next;
+    id
+}
+
 /// The last `Failed { message }` diagnosis this session, retained after the
 /// stage itself has moved on (#1177).
 ///
@@ -115,18 +160,89 @@ pub fn already_diagnosed(state: &Arc<Mutex<BootstrapStage>>) -> bool {
 
 #[derive(Clone, Serialize)]
 pub struct LogPayload {
+    /// The attempt this line was produced during (#1900). A stage-tagged line
+    /// proves its stage ran — but only for the attempt that emitted it.
+    pub attempt: u64,
     pub stage: String,
     pub line: String,
 }
 
+/// Where the first-run log is kept so it outlives the splash.
+///
+/// The splash is the ONLY surface with a Show/Copy affordance for these
+/// lines, and it unmounts the moment the stage flips to ready — so on a
+/// successful first run the whole install log was gone for good, with no
+/// pause and nowhere to retrieve it (#1847). A user who wanted to check what
+/// had just been installed, or hand it to a bug report, had nothing.
+///
+/// Sits beside backend.log so everything about a run is in one directory.
+fn bootstrap_log_path() -> PathBuf {
+    crate::backend::backend_log_path().with_file_name("bootstrap.log")
+}
+
+/// Truncate once per process, then append.
+///
+/// A bootstrap is a single episode, and the interesting question is always
+/// "what happened THIS time" — an ever-growing file would bury that and grow
+/// without bound across retries. Truncating on the first write of the process
+/// keeps it to the current run without needing a hook on every restart path.
+static BOOTSTRAP_LOG_STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn append_bootstrap_log(stage: &str, line: &str) {
+    use std::io::Write;
+    let path = bootstrap_log_path();
+    let fresh = BOOTSTRAP_LOG_STARTED.set(()).is_ok();
+    let opened = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(!fresh)
+        .truncate(fresh)
+        .open(&path);
+    // Best effort throughout: a log we cannot write must never take the
+    // bootstrap down with it.
+    if let Ok(mut file) = opened {
+        let _ = writeln!(file, "[{stage}] {line}");
+    }
+}
+
+/// Emit a stage-tagged log line for the attempt in progress.
+///
+/// Correct for every caller that runs inside the attempt it is describing —
+/// which is all of them except the output pumps, whose thread outlives the run
+/// it is draining. Those use [`emit_log_for_attempt`].
 pub fn emit_log<R: tauri::Runtime>(app: &tauri::AppHandle<R>, stage: &str, line: &str) {
-    let payload = LogPayload { stage: stage.to_string(), line: line.to_string() };
+    emit_log_for_attempt(app, current_attempt(), stage, line)
+}
+
+/// Emit a log line stamped with the attempt that PRODUCED it, not the one
+/// running when it happened to be read (#1900, CodeRabbit).
+///
+/// An output pump is a thread reading a pipe: it lives as long as the process
+/// it drains, which can outlive the attempt that started it. A restart bumps
+/// the counter, and the dying run's remaining lines — read a moment later —
+/// would be stamped with the NEW attempt and counted as its evidence. The pump
+/// captures its attempt when it starts, so a line is labelled by the work that
+/// wrote it.
+pub fn emit_log_for_attempt<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    attempt: u64,
+    stage: &str,
+    line: &str,
+) {
+    let payload = LogPayload {
+        attempt,
+        stage: stage.to_string(),
+        line: line.to_string(),
+    };
     // Buffer the log so the frontend can backfill on mount.
     if let Some(state) = app.try_state::<BootstrapState>() {
         if let Ok(mut logs) = state.logs.lock() {
             logs.push(payload.clone());
         }
     }
+    // Persist before emitting: the in-memory buffer and the event both die
+    // with the splash, the file does not.
+    append_bootstrap_log(stage, line);
     let _ = app.emit("bootstrap-log", payload);
 }
 
@@ -157,11 +273,15 @@ pub fn run_streaming<R: tauri::Runtime>(
     let app_err = app.clone();
     let stage_out = stage.to_string();
     let stage_err = stage.to_string();
+    // The attempt these pumps are draining, captured before either can outlive
+    // it: a restart during a long `uv sync` must not relabel this run's
+    // remaining output as the next attempt's work.
+    let attempt = current_attempt();
     let h_out = std::thread::spawn(move || {
         if let Some(s) = stdout {
             for line in BufReader::new(s).lines().flatten() {
                 log::info!("[{}] {}", stage_out, line);
-                emit_log(&app_out, &stage_out, &line);
+                emit_log_for_attempt(&app_out, attempt, &stage_out, &line);
             }
         }
     });
@@ -169,7 +289,7 @@ pub fn run_streaming<R: tauri::Runtime>(
         if let Some(s) = stderr {
             for line in BufReader::new(s).lines().flatten() {
                 log::info!("[{}] {}", stage_err, line);
-                emit_log(&app_err, &stage_err, &line);
+                emit_log_for_attempt(&app_err, attempt, &stage_err, &line);
             }
         }
     });
@@ -201,13 +321,32 @@ pub fn run_streaming<R: tauri::Runtime>(
 
 // ── Tauri commands ────────────────────────────────────────────────────────
 
+/// A stage together with the attempt that produced it (#1900).
+///
+/// `BootstrapStage` is internally tagged, so flattening it here keeps the wire
+/// shape the frontend already reads — `{ "stage": "checking" }` plus whatever
+/// fields the variant carries — and only adds a sibling `attempt`.
+#[derive(Clone, Serialize, Debug)]
+pub struct BootstrapStatus {
+    pub attempt: u64,
+    #[serde(flatten)]
+    pub stage: BootstrapStage,
+}
+
 #[tauri::command]
-pub fn bootstrap_status(state: tauri::State<'_, BootstrapState>) -> BootstrapStage {
-    state
-        .stage
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or(BootstrapStage::Checking)
+pub fn bootstrap_status(state: tauri::State<'_, BootstrapState>) -> BootstrapStatus {
+    // Both reads under the stage lock, which every attempt bump also holds
+    // (`begin_attempt_with`). Sampling them separately lets a restart land in
+    // between and return the PREVIOUS attempt's stage stamped with the new
+    // attempt's id — the splash then records `installing_deps` as work this
+    // attempt did, which is the fabrication the id exists to remove.
+    match state.stage.lock() {
+        Ok(guard) => BootstrapStatus { attempt: current_attempt(), stage: guard.clone() },
+        Err(poisoned) => BootstrapStatus {
+            attempt: current_attempt(),
+            stage: poisoned.into_inner().clone(),
+        },
+    }
 }
 
 #[tauri::command]
@@ -265,9 +404,12 @@ pub fn respawn_backend<R: tauri::Runtime>(
     stage: Arc<Mutex<BootstrapStage>>,
     logs: Arc<Mutex<Vec<LogPayload>>>,
 ) {
-    if let Ok(mut guard) = stage.lock() {
-        *guard = BootstrapStage::Checking;
-    }
+    // Before anything reaches for lifecycle ownership: a readiness wait may be
+    // holding it while a slow backend starts (#1791).
+    preempt_backend_wait();
+    // One lock across the bump and the stage write, so no poll can observe the
+    // old stage paired with the new attempt.
+    begin_attempt_with(&stage, BootstrapStage::Checking);
     if let Ok(mut logs) = logs.lock() {
         logs.clear();
     }
@@ -308,6 +450,7 @@ pub fn with_backend_stopped<R: tauri::Runtime, T>(
     app: &tauri::AppHandle<R>,
     action: impl FnOnce() -> T,
 ) -> Result<T, String> {
+    preempt_backend_wait();
     let state = app.state::<BackendState>();
     let _lifecycle = state.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
     if let Err(error) = stop_backend_locked(app) {
@@ -335,6 +478,41 @@ pub fn with_backend_stopped<R: tauri::Runtime, T>(
 struct BackendStopError {
     message: String,
     restart_safe: bool,
+}
+
+/// Record a deliberate stop before the backend is force-terminated.
+///
+/// On Windows the shell terminates the job object with no graceful phase —
+/// a console-less GUI child has no reliable control event — so the backend
+/// never runs its lifespan shutdown and `run_sentinel.clear_sentinel()`
+/// never executes. Every deliberate quit therefore came back on the next
+/// launch as "The backend did not shut down cleanly last run — it likely
+/// crashed or was killed" (#1898). The backend-side fix in #1895 only helps
+/// platforms where teardown actually begins.
+///
+/// The process about to be killed cannot record its own intent, so the shell
+/// records it: retire the sentinel here, immediately before terminating.
+/// Anything that dies WITHOUT passing through this path still leaves its
+/// sentinel behind and is still reported as a crash, which is the property
+/// worth keeping.
+///
+/// Best effort by design. The data directory is read from the running
+/// backend, so if it cannot be reached the file stays and the next launch
+/// reports a crash — the same behaviour as before this change, never worse.
+fn retire_run_sentinel_at(dir: &std::path::Path) {
+    let path = dir.join("run_sentinel.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => log::info!("Retired run sentinel for a deliberate stop: {}", path.display()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("Could not retire {}: {error}", path.display()),
+    }
+}
+
+fn retire_run_sentinel(port: u16) {
+    match crate::backend::backend_data_dir(port) {
+        Some(dir) => retire_run_sentinel_at(std::path::Path::new(&dir)),
+        None => log::debug!("No advertised data dir; leaving run_sentinel.json in place"),
+    }
 }
 
 fn stop_backend_locked<R: tauri::Runtime>(
@@ -381,6 +559,9 @@ fn stop_backend_locked<R: tauri::Runtime>(
             // The unreaped root/process handle and containment handle move
             // together, closing PID-reuse and post-crash descendant races.
             log::info!("Stopping tracked backend tree (root pid {})", child.id());
+            // Before the kill, not after: on Windows the child gets no
+            // chance to clear this itself.
+            retire_run_sentinel(backend_port());
             crate::tools::terminate_process_tree(child, tree, Duration::from_secs(2)).err()
         }
         (None, None) => None,
@@ -410,13 +591,10 @@ fn stop_backend_locked<R: tauri::Runtime>(
     if crate::backend::port_in_use(backend_port())
         && !crate::backend::free_port_or_report(backend_port())
     {
+        // Ask who holds it before saying who holds it (#1933).
+        let holder = crate::backend::port_holder(backend_port());
         return Err(BackendStopError {
-            message: format!(
-                "Port {} is already in use by another application, and VoiceStudio \
-                 could not free it. Quit whatever is using that port (another copy \
-                 of VoiceStudio, or an app that claimed it) and try again.",
-                backend_port()
-            ),
+            message: crate::backend::port_conflict_message(backend_port(), &holder, ""),
             restart_safe: false,
         });
     }
@@ -455,9 +633,88 @@ fn prepare_backend_launch<R: tauri::Runtime>(
     stage_handle: &Arc<Mutex<BootstrapStage>>,
 ) -> LaunchPreparation {
     let mut replace = tracked_backend_exists(app);
-    match crate::backend::running_backend_version(backend_port()) {
-        Some(v) if crate::backend::same_app_version(&v) => {
-            if crate::backend::backend_deep_healthy(backend_port()) {
+    // #1770: version and code fingerprint are read from ONE `/system/info`
+    // fetch (`running_backend_identity`) — never two independent probes for
+    // THOSE two fields. Splitting them would let a transport hiccup on the
+    // second one masquerade as "responded, but the field was absent", which
+    // `code_fingerprint_is_current` treats as stale — silently killing a
+    // perfectly healthy backend on a single flaky probe.
+    //
+    // The health probe (`/profiles`) and the identity probe (`/system/info`)
+    // are still two separate requests — they hit different routes, so they
+    // can't be folded into one fetch — which leaves a structurally similar
+    // window open: two unsynchronized requests can never be atomic, so
+    // EITHER ordering can pair the response of one process on the port with
+    // a DIFFERENT process's response to the other probe if the port changes
+    // hands between them. (This window predates #1770: the old code split
+    // `running_backend_version` and `backend_deep_healthy` the same way, but
+    // this PR makes the identity check load-bearing, so it's the right
+    // place to reason about it explicitly rather than leave it implicit.)
+    //
+    // Reordering cannot remove that window — it only decides which side of
+    // the pair can be stale, and the two failure modes are not equally bad:
+    //   - identity-then-health (the naive order): a swap after the identity
+    //     probe means we could attach on a STALE IDENTITY paired with a
+    //     fresh health check — silently adopting code we never actually
+    //     validated. That's exactly the #1770 bug, and nothing downstream
+    //     ever re-checks identity on an attached backend, so it would be
+    //     permanent for the life of the session.
+    //   - health-then-identity (this order): a swap after the health probe
+    //     means we could attach on a STALE HEALTH CHECK paired with a fresh
+    //     identity — the code is correctly validated, only the "it was
+    //     alive a moment ago" claim might be outdated. That failure is
+    //     SELF-CORRECTING: an attached backend is polled continuously by
+    //     `attached_backend_healthy()` in the supervisor loop (see its grace
+    //     window — `attached_backend_health_grace_recovers_without_false_crash_or_port_failure`
+    //     covers exactly this), so a backend that was actually unhealthy at
+    //     attach time is caught and replaced within one poll interval.
+    //     Identity has no equivalent recheck — that absence is the whole
+    //     reason this PR exists — so its correctness must be established at
+    //     attach time, as late as possible.
+    //
+    // Health is therefore probed FIRST and identity LAST, immediately
+    // before the attach decision, deliberately choosing "stale health" over
+    // "stale identity" as the side left exposed. A process swap that
+    // happened before the identity probe is caught by that fresh read (the
+    // version-mismatch and fingerprint-mismatch arms below fire exactly as
+    // if the swap had always been there). The remaining exposure —
+    // attaching to a backend whose health was confirmed a moment earlier
+    // rather than at this exact instant — is irreducible without one atomic
+    // endpoint returning identity + readiness together, and is accepted
+    // because the supervisor's continuous health polling already covers it.
+    let deep_healthy = crate::backend::backend_deep_healthy(backend_port());
+    match crate::backend::running_backend_identity(backend_port()) {
+        Some(identity) if crate::backend::same_app_version(&identity.version) => {
+            let v = identity.version;
+            // Version match alone doesn't prove code match — `main` holds
+            // one version string for an entire release cycle, so a
+            // same-version backend can still be running weeks-old code.
+            let our_fp = own_backend_code_fingerprint(app);
+            let code_current =
+                crate::backend::code_fingerprint_is_current(identity.code_fingerprint.as_deref(), our_fp.as_deref());
+            if !deep_healthy {
+                log::warn!(
+                    "Port {} serves VoiceStudio v{} but failed the deep health probe — replacing it",
+                    backend_port(),
+                    v
+                );
+                replace = true;
+            } else if !code_current {
+                // Maintainer-recognizable marker: grep logs for
+                // "STALE-CODE-ATTACH" or "#1770" to spot this class
+                // directly, rather than re-deriving it from an export 422,
+                // two reports, and a code audit.
+                log::warn!(
+                    "STALE-CODE-ATTACH (#1770): port {} serves VoiceStudio v{} — version matches \
+this build, but its code fingerprint does not (running={:?}, ours={:?}). A same-version backend \
+can still run stale code within one release cycle; replacing it instead of attaching.",
+                    backend_port(),
+                    v,
+                    identity.code_fingerprint,
+                    our_fp,
+                );
+                replace = true;
+            } else {
                 if replace {
                     let owner = SUPERVISOR_OWNER.fetch_add(1, Ordering::SeqCst) + 1;
                     log::info!(
@@ -478,20 +735,13 @@ fn prepare_backend_launch<R: tauri::Runtime>(
                 );
                 set_stage(stage_handle, BootstrapStage::Ready);
                 return LaunchPreparation::SuperviseAttached { owner };
-            } else {
-                log::warn!(
-                    "Port {} serves VoiceStudio v{} but failed the deep health probe — replacing it",
-                    backend_port(),
-                    v
-                );
-                replace = true;
             }
         }
-        Some(v) => {
+        Some(identity) => {
             log::warn!(
                 "Port {} serves a stale VoiceStudio backend (v{} != app v{}) — replacing it",
                 backend_port(),
-                if v.is_empty() { "<unknown>" } else { v.as_str() },
+                if identity.version.is_empty() { "<unknown>" } else { identity.version.as_str() },
                 env!("CARGO_PKG_VERSION"),
             );
             replace = true;
@@ -543,11 +793,18 @@ fn launch_backend_and_wait<R: tauri::Runtime>(
     stage_handle: &Arc<Mutex<BootstrapStage>>,
     first_run_gate: bool,
 ) {
+    // Preserve cancellation arriving while waiting for ownership or preparing launch.
+    let wait_generation = backend_wait_generation();
     let outcome = {
         let state = app.state::<BackendState>();
         let _lifecycle = state.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
-        if backend_stop_requested(app) {
-            log::info!("App is quitting — backend launch cancelled");
+        #[cfg(debug_assertions)]
+        wait_for_tracking_test_gate(
+            "OMNIVOICE_TEST_LAUNCH_LOCKED_ENTERED",
+            "OMNIVOICE_TEST_LAUNCH_LOCKED_RELEASE",
+        );
+        if backend_stop_requested(app) || backend_wait_generation() != wait_generation {
+            log::info!("Backend launch cancelled before preparation");
             LaunchOutcome::Done
         } else {
             match prepare_backend_launch(app, stage_handle) {
@@ -566,10 +823,10 @@ fn launch_backend_and_wait<R: tauri::Runtime>(
                             set_stage(stage_handle, BootstrapStage::AwaitingSetup);
                             LaunchOutcome::Done
                         } else {
-                            spawn_with_supervisor_owner(app, stage_handle)
+                            spawn_with_supervisor_owner(app, stage_handle, wait_generation)
                         }
                     } else {
-                        spawn_with_supervisor_owner(app, stage_handle)
+                        spawn_with_supervisor_owner(app, stage_handle, wait_generation)
                     }
                 }
             }
@@ -587,9 +844,10 @@ fn launch_backend_and_wait<R: tauri::Runtime>(
 fn spawn_with_supervisor_owner<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     stage_handle: &Arc<Mutex<BootstrapStage>>,
+    wait_generation: u64,
 ) -> LaunchOutcome {
     let supervisor_owner = SUPERVISOR_OWNER.fetch_add(1, Ordering::SeqCst) + 1;
-    if spawn_backend_until_ready(app, stage_handle) {
+    if spawn_backend_until_ready(app, stage_handle, wait_generation) {
         LaunchOutcome::SupervisedReady {
             owner: supervisor_owner,
         }
@@ -608,23 +866,37 @@ fn spawn_with_supervisor_owner<R: tauri::Runtime>(
 fn spawn_backend_until_ready<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     stage_handle: &Arc<Mutex<BootstrapStage>>,
+    wait_generation: u64,
 ) -> bool {
     let mut venv_heal_attempted = false;
     'bootstrap: loop {
-        if backend_stop_requested(app) {
+        if backend_stop_requested(app) || backend_wait_generation() != wait_generation {
             return false;
         }
         spawn_and_track_backend(app, stage_handle);
         let start = std::time::Instant::now();
+        // Latest `/startup/progress` status, or None while nothing answers.
+        let mut last_status: Option<String> = None;
         // Early-bind narration: the backend answers /startup/progress within
         // ~1s of spawn, long before it is Ready — surface each step change
         // as a log line so the splash shows "Loading ML runtime (PyTorch)…"
         // instead of a silent 300s wait. An old backend (no endpoint) yields
         // None and the wait looks exactly as it did before.
         let mut last_step = String::new();
-        while start.elapsed() < startup_budget() {
+        // #1791: the clock measures time since the last sign of life, not time
+        // since spawn — see `keep_waiting_for_backend`.
+        let mut last_progress = start;
+        while keep_waiting_for_backend(last_status.as_deref(), last_progress.elapsed(), startup_budget())
+        {
             if backend_stop_requested(app) {
                 log::info!("App is quitting — backend startup poll cancelled");
+                return false;
+            }
+            if backend_wait_generation() != wait_generation {
+                log::info!(
+                    "Retry/reset is taking the backend lifecycle — standing down from \
+                     the startup wait so it can proceed"
+                );
                 return false;
             }
             if crate::backend::backend_ready(backend_port()) {
@@ -654,7 +926,14 @@ fn spawn_backend_until_ready<R: tauri::Runtime>(
                     }
                 };
             if let Some((exit_info, real_exit)) = process_dead {
-                let err_tail = crate::backend::read_error_log_tail_for_run(30);
+                // Pin the dying run's slice BEFORE waiting for its drainer: a
+                // Retry arriving during the settle installs a new run and moves
+                // the current-run offset past this output (#1850, Greptile).
+                let run_start = crate::backend::err_log_run_start();
+                // The child is gone; its last stderr may still be in the
+                // drainer. Let it land before anything reads the tail (#1850).
+                crate::backend::settle_err_log(crate::backend::ERR_LOG_SETTLE);
+                let err_tail = crate::backend::read_dead_run_tail(run_start, 30);
                 // #941: persist the forensics for every true process death —
                 // startup crashes included — unless the app is shutting down
                 // or a retry flow deliberately killed the child.
@@ -666,7 +945,10 @@ fn spawn_backend_until_ready<R: tauri::Runtime>(
                         crate::crash::record_crash(crate::crash::marker_now(
                             exit,
                             backend_uptime_s(app),
-                            crate::backend::read_error_log_tail_for_run(CRASH_STDERR_TAIL_LINES),
+                            crate::backend::read_dead_run_tail(
+                                run_start,
+                                CRASH_STDERR_TAIL_LINES,
+                            ),
                         ));
                     }
                 }
@@ -698,7 +980,11 @@ fn spawn_backend_until_ready<R: tauri::Runtime>(
                             "Backend failed because the Python environment is broken — rebuilding it automatically",
                         );
                         if quarantine_broken_venv(&venv_dir) {
-                            set_stage(stage_handle, BootstrapStage::Checking);
+                            // A restart nobody clicked. Rebuilding the venv
+                            // re-runs the whole bootstrap, so it opens a new
+                            // attempt and says so, instead of leaving the
+                            // splash to infer the boundary from the poll.
+                            begin_attempt_with(stage_handle, BootstrapStage::Checking);
                             continue 'bootstrap;
                         }
                         log::error!(
@@ -734,22 +1020,29 @@ fn spawn_backend_until_ready<R: tauri::Runtime>(
                     );
                     return false;
                 }
-                // #1223: the backend exits EXIT_PORT_IN_USE when it could not
-                // bind its port. That is a conflict, not a crash — say what to
-                // do instead of dumping a traceback whose one meaningful line
-                // is an OS-translated errno.
-                let msg = if real_exit
+                // #1783: the interpreter dies inside `site` before main.py runs
+                // when the venv path has a byte that isn't valid in the active
+                // Windows ANSI code page (`.pth` files decode with
+                // `encoding="locale"` on Python 3.11 — PYTHONUTF8=1 doesn't
+                // help). `setup::ascii_safe_dir` prevents this for every new
+                // venv, but name the cause specifically if it still happens
+                // (8.3 short names disabled, or an already-broken pre-fix
+                // install) instead of dumping the raw traceback.
+                let msg = if backend_exit_indicates_nonascii_pth_crash(&err_tail) {
+                    nonascii_pth_crash_msg(crate::config::load_config(app).install_mode == "portable")
+                } else if real_exit
                     .as_ref()
                     .and_then(|e| e.code)
                     .is_some_and(|c| c == crate::backend::EXIT_PORT_IN_USE)
                 {
-                    format!(
-                        "Port {} is already in use, so the backend could not \
-                         start. Another copy of VoiceStudio — or an app that \
-                         claimed that port — is holding it. Quit it and try \
-                         again; if nothing is visibly running, an orphaned \
-                         backend from a previous session still has the port.",
-                        backend_port()
+                    // Same question, same answer as the other two sites
+                    // (#1933): the holder is usually the user's own orphan,
+                    // and "another copy of VoiceStudio" is not something they
+                    // can quit.
+                    crate::backend::port_conflict_message(
+                        backend_port(),
+                        &crate::backend::port_holder(backend_port()),
+                        "",
                     )
                 } else if err_tail.is_empty() {
                     format!("Backend process exited ({}) — no error output captured", exit_info)
@@ -760,13 +1053,20 @@ fn spawn_backend_until_ready<R: tauri::Runtime>(
                 set_stage(stage_handle, BootstrapStage::Failed { message: msg });
                 return false;
             }
-            if let Some((status, step, label)) =
-                crate::backend::startup_progress(backend_port())
-            {
-                if status == "starting" && !step.is_empty() && step != last_step {
-                    last_step = step;
-                    emit_log(app, "starting_backend", &format!("Startup: {label}"));
+            match crate::backend::startup_progress(backend_port()) {
+                Some((status, step, label)) => {
+                    if status == "starting" {
+                        // Alive, serving, and naming the step it is on — that is
+                        // the evidence the wait is keyed on (#1791).
+                        last_progress = std::time::Instant::now();
+                        if !step.is_empty() && step != last_step {
+                            last_step = step;
+                            emit_log(app, "starting_backend", &format!("Startup: {label}"));
+                        }
+                    }
+                    last_status = Some(status);
                 }
+                None => last_status = None,
             }
             std::thread::sleep(Duration::from_millis(500));
         }
@@ -783,7 +1083,14 @@ fn spawn_backend_until_ready<R: tauri::Runtime>(
                 err_tail
             )
         };
-        set_stage(stage_handle, BootstrapStage::Failed { message: msg });
+        publish_backend_wait_timeout(
+            stage_handle,
+            &LAST_FAILURE,
+            &BACKEND_WAIT_GENERATION,
+            &BACKEND_WAIT_PUBLICATION,
+            wait_generation,
+            msg,
+        );
         return false;
     }
 }
@@ -810,6 +1117,52 @@ static SUPERVISOR_OWNER: AtomicU64 = AtomicU64::new(0);
 /// crash marker for — or respawn against — an *intentional* kill. Cleared the
 /// moment a fresh child is spawned and tracked (`track_backend_child`).
 static BACKEND_KILL_INTENDED: AtomicBool = AtomicBool::new(false);
+
+/// Bumped by any flow about to take backend lifecycle ownership for a
+/// deliberate replacement — Retry, Clean & Retry, reset, uninstall.
+///
+/// #1791: the readiness wait keeps waiting for as long as the backend answers
+/// `/startup/progress`, and it holds `BackendState::lifecycle` the whole time
+/// (`launch_backend_and_wait` takes it around the entire launch). Without a way
+/// to interrupt that wait, the user's own escape hatch would deadlock behind
+/// it: Retry and Clean & Retry both need the same lock, so pressing either on
+/// a slow start would hang instead of restarting anything — trading a backend
+/// killed too early for an app with no way out, which is worse. Every such
+/// flow bumps this BEFORE reaching for the lock; the waiting loop sees the
+/// change within one poll, returns, and releases it (Greptile, #1809).
+static BACKEND_WAIT_GENERATION: AtomicU64 = AtomicU64::new(0);
+// Serialize invalidation with the final timeout publication. The lifecycle
+// lock cannot do this: Retry deliberately invalidates before acquiring it.
+static BACKEND_WAIT_PUBLICATION: Mutex<()> = Mutex::new(());
+
+fn publish_backend_wait_timeout(
+    state: &Arc<Mutex<BootstrapStage>>,
+    last_failure: &Mutex<Option<String>>,
+    generation: &AtomicU64,
+    publication: &Mutex<()>,
+    expected_generation: u64,
+    message: String,
+) -> bool {
+    let _publication = publication.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if generation.load(Ordering::SeqCst) != expected_generation {
+        return false;
+    }
+    set_stage_into(state, last_failure, BootstrapStage::Failed { message });
+    true
+}
+
+/// Ask any in-flight readiness wait to stand down, so this caller can take
+/// lifecycle ownership. Call before locking, never while holding the lock.
+pub fn preempt_backend_wait() {
+    let _publication = BACKEND_WAIT_PUBLICATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    BACKEND_WAIT_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
+fn backend_wait_generation() -> u64 {
+    BACKEND_WAIT_GENERATION.load(Ordering::SeqCst)
+}
 
 /// Bumped every time `track_backend_child` installs a new child. The
 /// supervisor snapshots it when it observes a death; a change during its
@@ -1046,6 +1399,42 @@ fn startup_budget() -> Duration {
         .unwrap_or(Duration::from_secs(300))
 }
 
+/// Should the readiness poll keep waiting for a backend that is not Ready yet?
+///
+/// `status` is the `status` field of the latest `/startup/progress` reply, or
+/// `None` while nothing answers on the port.
+///
+/// #1791: this used to be a flat `elapsed < startup_budget()` from spawn, so a
+/// host where the cold start genuinely takes longer than five minutes — a
+/// project on a mapped network drive, a cold `import torch` off a spinning
+/// disk, a first CUDA DLL load — had its backend killed *while it was still
+/// importing*, reported as "the backend never reported ready". The respawn
+/// then threw away the warm work and raced the same clock again, so the app
+/// could never start even though launching the same backend by hand reached
+/// ready in under a minute.
+///
+/// A backend answering `status: "starting"` is not a backend we have to guess
+/// about: it bound its socket, it is serving HTTP, and it is telling us which
+/// step it is on. Killing it cannot make the next attempt faster, and the
+/// launcher has no information the user lacks — so keep waiting and keep
+/// narrating. The user's escape hatch is deliberate rather than clock-driven:
+/// the splash's own stall budget surfaces Retry and the logs, and its
+/// `/health` recovery poll walks straight into the app if the slow start does
+/// finish. The budget still governs *silence* — nothing answering, or a
+/// `failed`/unknown status — because there we truly cannot tell a slow
+/// backend from a wedged one, and the existing failure path (stderr tail +
+/// Retry) is the right answer.
+fn keep_waiting_for_backend(
+    status: Option<&str>,
+    since_progress: Duration,
+    budget: Duration,
+) -> bool {
+    match status {
+        Some("starting") => true,
+        _ => since_progress < budget,
+    }
+}
+
 /// The supervisor's death-detection poll interval. 2s in production;
 /// `OMNIVOICE_SUPERVISOR_POLL_MS` shrinks it for the harness only.
 fn supervisor_poll() -> Duration {
@@ -1165,6 +1554,11 @@ fn supervise_backend<R: tauri::Runtime>(
             attachment_lifecycle = Some(lifecycle);
         }
         let exit_info = exit.description.clone();
+        // Same as the startup path: pin this run's slice, then wait for its
+        // drainer. `wait()` beat the drainer to the punch, and a Retry during
+        // the wait would otherwise move the offset onto the replacement run.
+        let run_start = crate::backend::err_log_run_start();
+        crate::backend::settle_err_log(crate::backend::ERR_LOG_SETTLE);
         // #941: make the death self-documenting BEFORE any restart attempt —
         // the marker (exit code/signal + stderr tail + uptime) is what turns
         // the next "Can't reach the backend" report into a diagnosable one.
@@ -1179,7 +1573,7 @@ fn supervise_backend<R: tauri::Runtime>(
                 crate::crash::record_crash(crate::crash::marker_now(
                     &exit,
                     uptime_s,
-                    crate::backend::read_error_log_tail_for_run(CRASH_STDERR_TAIL_LINES),
+                    crate::backend::read_dead_run_tail(run_start, CRASH_STDERR_TAIL_LINES),
                 ));
             } else {
                 log::info!(
@@ -1187,7 +1581,7 @@ fn supervise_backend<R: tauri::Runtime>(
                 );
             }
             if restart_budget_exhausted(&mut restart_times, Instant::now()) {
-                let tail = crate::backend::read_error_log_tail_for_run(30);
+                let tail = crate::backend::read_dead_run_tail(run_start, 30);
                 let msg = format!(
                     "The backend kept {} ({} times in {} min; last stop: {}) and couldn't \
                      be kept running. Use Clean & Retry, or check Settings → Logs → Backend.{}",
@@ -1288,21 +1682,17 @@ fn supervise_backend<R: tauri::Runtime>(
         if crate::backend::port_in_use(backend_port())
             && !crate::backend::free_port_or_report(backend_port())
         {
+            // Who is actually holding it decides the wording (#1933). The
+            // hint-matching contract lives with the message builder, which is
+            // unit-tested for it.
+            let holder = crate::backend::port_holder(backend_port());
             set_stage(
                 stage_handle,
                 BootstrapStage::Failed {
-                    // Wording note: every one of these must contain a phrase
-                    // `BootstrapSplash.detectHints` matches ("port … in use"),
-                    // because that is what turns an English Rust message into
-                    // the LOCALISED `bootstrap.hint_port` the user actually
-                    // reads. Pinned in frontend/src/test/portInUseHint.test.js
-                    // — an earlier draft of this one said "is held by" and
-                    // silently lost the translated guidance.
-                    message: format!(
-                        "Port {} is still in use by another application and \
-                         VoiceStudio could not free it, so the backend can't \
-                         restart. Quit whatever is using that port and relaunch.",
-                        backend_port()
+                    message: crate::backend::port_conflict_message(
+                        backend_port(),
+                        &holder,
+                        "The backend cannot restart until that port is free.",
                     ),
                 },
             );
@@ -1535,6 +1925,116 @@ pub fn find_dev_project_root() -> Option<PathBuf> {
     None
 }
 
+// ── #1770: attach-handshake code fingerprint ────────────────────────────────
+//
+// `same_app_version` (backend.rs) only proves the running backend's *version
+// string* matches this build's. That's not the same as its *code* matching:
+// per the Versioning convention, `main` holds ONE version string for an
+// entire release cycle, so every commit merged during that cycle — including
+// the one that fixed #1770 itself — reports the same `app_version`. A
+// backend that answers with today's version string can still be running
+// weeks-old code. The fingerprint below closes that gap: it's a content
+// digest of the backend's actual `.py` sources, passed to a spawned child as
+// `OMNIVOICE_BUILD_FINGERPRINT` and echoed back via `GET /system/info`
+// (`code_fingerprint`), so the attach handshake can compare "the code this
+// build ships" against "the code the already-running process loaded" instead
+// of trusting a coarse version string alone.
+
+/// Recursively collect every `.py` file under `dir`, as (label, path) pairs
+/// where `label` is `"<root_label>/<path relative to dir>"` with `/`
+/// separators (stable across platforms). Skips `__pycache__` and dotdirs
+/// (`.venv`, `.pytest_cache`, …) so dev mode — which executes `backend/`
+/// directly out of the live source tree and litters it with bytecode caches
+/// and test artifacts — doesn't shift the fingerprint without any actual
+/// code change.
+fn collect_py_files(dir: &Path, base: &Path, root_label: &str, out: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "__pycache__" || name.starts_with('.') {
+                continue;
+            }
+            collect_py_files(&path, base, root_label, out)?;
+        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("py") {
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            out.push((format!("{}/{}", root_label, rel.to_string_lossy().replace('\\', "/")), path));
+        }
+    }
+    Ok(())
+}
+
+/// Content fingerprint of one or more Python source directories (each
+/// hashed under its own directory-name label so `backend/x.py` and
+/// `omnivoice/x.py` can't collide). `None` if no `.py` files were found or
+/// any of them couldn't be read — an unreadable/empty source location means
+/// we can't vouch for a fingerprint either way.
+///
+/// Deterministic within a single process (files sorted by label before
+/// hashing) but the digest is NOT a portable content hash — `DefaultHasher`
+/// makes no cross-version stability guarantee. That's fine here: every
+/// fingerprint that's ever compared was produced by a VoiceStudio process
+/// hashing on its own toolchain, so "same code -> same digest" only ever
+/// needs to hold within one build, never across arbitrary Rust versions.
+/// Pure (no `AppHandle`) and unit-tested directly with tempdirs.
+pub fn hash_python_sources(dirs: &[PathBuf]) -> Option<String> {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    for dir in dirs {
+        let root_label = dir.file_name()?.to_string_lossy().into_owned();
+        collect_py_files(dir, dir, &root_label, &mut files).ok()?;
+    }
+    if files.is_empty() {
+        return None;
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (label, path) in &files {
+        std::hash::Hash::hash(label, &mut hasher);
+        let bytes = fs::read(path).ok()?;
+        std::hash::Hash::hash(&bytes, &mut hasher);
+    }
+    Some(format!("{:016x}", std::hash::Hasher::finish(&hasher)))
+}
+
+static OWN_CODE_FINGERPRINT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Our own build's code fingerprint — computed once per process (the source
+/// location doesn't change mid-session) from wherever `ensure_venv_ready`
+/// would sync `backend/`/`omnivoice/` from: the live dev source tree under
+/// `bun run tauri dev`, or the packaged bundle's resource dir otherwise.
+/// `spawn_backend` passes this to the child as `OMNIVOICE_BUILD_FINGERPRINT`;
+/// `prepare_backend_launch` compares it against what an already-running
+/// backend reports. `None` when neither source location resolves — callers
+/// must then skip fingerprint enforcement (see
+/// `backend::code_fingerprint_is_current`), not treat every attach as stale.
+pub fn own_backend_code_fingerprint<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    OWN_CODE_FINGERPRINT
+        .get_or_init(|| {
+            if let Some(dev_root) = find_dev_project_root() {
+                let dirs: Vec<PathBuf> = [dev_root.join("backend"), dev_root.join("omnivoice")]
+                    .into_iter()
+                    .filter(|d| d.is_dir())
+                    .collect();
+                if !dirs.is_empty() {
+                    return hash_python_sources(&dirs);
+                }
+            }
+            let res = app.path().resource_dir().ok()?;
+            let flat = res.clone();
+            let up2 = res.join("_up_").join("_up_");
+            let res_root = if flat.join("pyproject.toml").is_file() { flat } else { up2 };
+            let dirs: Vec<PathBuf> = [res_root.join("backend"), res_root.join("omnivoice")]
+                .into_iter()
+                .filter(|d| d.is_dir())
+                .collect();
+            hash_python_sources(&dirs)
+        })
+        .clone()
+}
+
 // ── plan-03 (#130): restricted-network bootstrap resilience ────────────────
 
 /// gh-proxy mirror for python-build-standalone, used as a fallback when the
@@ -1599,29 +2099,73 @@ fn apply_uv_http_env(cmd: &mut Command) {
         .env("UV_HTTP_RETRIES", "5");
 }
 
+/// Default Aliyun PyPI simple index for the `china` region preset.
+const CHINA_PYPI_INDEX: &str = "https://mirrors.aliyun.com/pypi/simple/";
+
+/// Resolve the PyPI simple-index URL for `uv` / `uv pip` subprocesses.
+/// Explicit setup-screen override wins; otherwise the `china` region preset
+/// points at Aliyun. Other regions leave the index unset (uv's default PyPI).
+fn resolve_pypi_index_url(region: &str, override_url: Option<&str>) -> Option<String> {
+    if let Some(url) = override_url.map(str::trim).filter(|u| !u.is_empty()) {
+        return Some(url.to_string());
+    }
+    if region == "china" {
+        return Some(CHINA_PYPI_INDEX.to_string());
+    }
+    None
+}
+
+/// Apply `UV_INDEX_URL` when a custom or region-preset PyPI mirror is active.
+/// Must run for *every* `uv` path that may fetch packages — including the
+/// repair sync. Omitting it there left China-region installs hitting
+/// `pypi.org` for build backends (e.g. hatchling) and failing with
+/// `tls handshake eof` while the UI already showed the China (mirror) region.
+fn apply_pypi_index_env<R: tauri::Runtime>(app: &tauri::AppHandle<R>, cmd: &mut Command) {
+    let cfg = crate::config::load_config(app);
+    let region = get_effective_region(app);
+    // Clear any ambient value first. Without this a uv call inherits the
+    // parent process's UV_INDEX_URL whenever resolve_pypi_index_url returns
+    // None, so a stale mirror set in the developer's shell silently outranks
+    // the region the user actually chose.
+    cmd.env_remove("UV_INDEX_URL");
+    if let Some(url) = resolve_pypi_index_url(&region, cfg.mirrors.pypi_index.as_deref()) {
+        cmd.env("UV_INDEX_URL", url);
+    }
+}
+
 /// The one env applicator every `uv` invocation must go through: HTTP
-/// resilience (above) + volume co-location. The latter pins UV_CACHE_DIR /
-/// UV_PYTHON_INSTALL_DIR under the env root when the install is rooted on a
-/// different volume than uv's default cache (D:-drive installs / portable
-/// mode) — otherwise every wheel is downloaded+unpacked on the system drive
-/// and then cross-volume *copied* into the venv, silently requiring the full
-/// install size on C: and ENOSPC-ing installs the user deliberately pointed
-/// at another drive. See `setup::uv_env_overrides_for` for the exact rules.
+/// resilience (above) + volume co-location + PyPI mirror. The latter pins
+/// UV_CACHE_DIR / UV_PYTHON_INSTALL_DIR under the env root when the install
+/// is rooted on a different volume than uv's default cache (D:-drive
+/// installs / portable mode) — otherwise every wheel is downloaded+unpacked
+/// on the system drive and then cross-volume *copied* into the venv,
+/// silently requiring the full install size on C: and ENOSPC-ing installs
+/// the user deliberately pointed at another drive. See
+/// `setup::uv_env_overrides_for` for the exact rules. PyPI index goes here
+/// so first-run, drift, repair, and targeted `uv pip` repairs all honor
+/// the China / custom mirror — not only the happy-path sync.
 fn apply_uv_env<R: tauri::Runtime>(app: &tauri::AppHandle<R>, cmd: &mut Command) {
     apply_uv_http_env(cmd);
+    apply_pypi_index_env(app, cmd);
     for (k, v) in crate::setup::uv_env_overrides(app) {
         cmd.env(k, v);
     }
 }
 
-/// `<env_root>/wheels` — a local wheel-drop dir uv installs from via
+/// `<app_data>/wheels` — a local wheel-drop dir uv installs from via
 /// `--find-links`. When a huge wheel can't be pulled on a restricted network
 /// (the ~2.5 GB cu128 torch wheel from download.pytorch.org — #569), the user
 /// downloads the matching wheel, drops it here, and a retry picks it up.
 /// Created so the path always exists to name in the error/docs. It lives under
-/// `env_root` (not `project/`), so it survives Clean & Retry.
-fn wheels_drop_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
-    let dir = crate::setup::env_root(app).join("wheels");
+/// `app_data` (not `project/`), so it survives Clean & Retry.
+///
+/// Takes the already-resolved env root as a plain path (#1783) rather than
+/// re-deriving it from `env_root(app)` — `ensure_venv_ready` may have
+/// redirected to an ASCII-safe root, and this must agree with wherever
+/// `uv sync` actually runs, or `UV_FIND_LINKS` and the error text naming
+/// this path would point somewhere the user never sees.
+fn wheels_drop_dir(app_data: &Path) -> PathBuf {
+    let dir = app_data.join("wheels");
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -1790,6 +2334,178 @@ pub fn backend_exit_indicates_broken_venv(exit_info: &str, err_tail: &str) -> bo
         || exit_info.trim_end().ends_with(": 106")
 }
 
+// ── #1783: non-ASCII venv-path `.pth` crash detection ──────────────────────
+
+/// True when a dead backend's stderr tail is Python 3.11's `site` module
+/// dying on a `.pth` file it can't decode in the active (non-UTF-8) Windows
+/// code page — the exact crash from #1771/#1783:
+/// ```text
+/// Fatal Python error: init_import_site: Failed to import the site module
+///   File "<frozen site>", line 188, in addpackage
+/// UnicodeDecodeError: 'gbk' codec can't decode byte 0x80 in position 11...
+/// ```
+/// Both phrases are required (narrow, quoted-phrase match, same discipline as
+/// [`backend_exit_indicates_broken_venv`]) so an ordinary `UnicodeDecodeError`
+/// raised by app code — unrelated to interpreter startup — never matches.
+pub fn backend_exit_indicates_nonascii_pth_crash(err_tail: &str) -> bool {
+    err_tail.contains("init_import_site") && err_tail.contains("UnicodeDecodeError")
+}
+
+/// #1783: unlike the broken-venv signature, rebuilding the SAME venv at the
+/// SAME path can't fix this on its own — the path itself is the problem.
+/// `ensure_venv_ready`'s `resolve_venv_root` already redirects away from a
+/// non-ASCII path whenever an ASCII-safe alternative exists, so this
+/// specific message only fires when that redirect couldn't help. It's also
+/// the fallback if a spawned backend somehow still hits this crash despite
+/// the pre-spawn probe in `ensure_venv_ready` (defense in depth, not the
+/// primary path).
+///
+/// The remedy must be actionable from wherever the user actually sees this
+/// message AND correct for whichever install mode they're actually in —
+/// three separate bot findings on this exact PR, each "the text names an
+/// action that doesn't work" for some reachable state:
+///   - greptile P1: an earlier draft pointed at the first-run setup screen's
+///     "Change…" picker, but this message is shown via
+///     `BootstrapStage::Failed`, which only offers Retry / Clean & Retry
+///     (neither changes where the environment is stored, so both fail
+///     identically — the exact defect #1787 exists to catch).
+///   - CodeRabbit: `fsutil 8dot3name` is per-volume and only affects
+///     directories created AFTER the change, not the already-existing one
+///     this failure is about — recommending "run this and retry" often
+///     fixes nothing.
+///   - greptile P1 (3rd instance): the previous fix told EVERY user to set
+///     `env_dir` in `config.json` — but `setup::env_root` checks
+///     `cfg.install_mode == "portable"` FIRST and returns
+///     `portable_base().join("env")` without ever consulting `env_dir` (see
+///     `env_root`'s body). A portable install following that advice hits
+///     the identical crash on relaunch. `is_portable` is threaded in from
+///     each call site (a config read, not free state) so the two mutually
+///     exclusive remedies are never both shown, and neither is shown to the
+///     mode it doesn't apply to.
+///   - Self-caught while fixing the above (4th instance, same class): the
+///     managed branch used to add "Still on first-run setup instead? Use
+///     the Change… button…" — but BOTH call sites of this function are only
+///     reachable once `!setup::is_first_run(app)` (`launch_backend_and_wait`
+///     gates `ensure_venv_ready`/`spawn_backend_until_ready` behind
+///     `first_run_gate`, which parks in `AwaitingSetup` — the FirstRunSetup
+///     screen — instead of calling either). This message can therefore
+///     NEVER be showing while that screen is; the clause described a state
+///     that cannot coexist with its own display. Removed rather than kept
+///     as "harmless extra info" — the whole point of this history is that
+///     an unreachable action in a failure message is never harmless.
+fn nonascii_pth_crash_msg(is_portable: bool) -> String {
+    let cause = "The backend's Python environment lives at a path Windows' active \
+language/region setting can't decode (commonly a non-English Windows username), so the \
+interpreter crashes on startup before VoiceStudio's code ever runs — this can happen if \
+Windows' 8.3 short-filename support is off on your system drive, or if this folder \
+already existed before this fix shipped. \"Retry\" and \"Clean & Retry\" won't fix it — \
+they don't change where the environment is stored.";
+    let remedy = if is_portable {
+        "Fix: quit VoiceStudio, then move the whole VoiceStudio folder (the app plus its \
+\"OmniVoiceStudio-Data\" folder) to a location whose path uses only English letters and \
+numbers (e.g. C:\\VoiceStudio), and run it from there — portable installs ignore \
+`env_dir` in config.json entirely, so editing that file does nothing here. If you'd \
+rather not move the whole folder, create a \"portable.path\" text file beside the app \
+containing one line, an absolute ASCII-only path for the data folder (e.g. \
+C:\\VoiceStudio\\Data), and relaunch."
+    } else {
+        "Fix: quit VoiceStudio, open (creating it if missing) \
+%LOCALAPPDATA%\\com.debpalash.omnivoice-studio\\config.json in a text editor, add \
+\"env_dir\": \"C:/VoiceStudio/env\" (any path using only English letters/numbers works — \
+forward slashes are fine on Windows), save, and relaunch. This only moves the Python \
+environment, not your voices/projects."
+    };
+    format!("{cause} {remedy} See docs/install/troubleshooting.md (#1783).")
+}
+
+/// What `ensure_venv_ready` should do about where the venv lives, decided by
+/// [`resolve_venv_root`].
+#[derive(Debug, PartialEq, Eq)]
+enum VenvRootDecision {
+    /// Use `true_root` exactly as before — nothing here relocates a venv
+    /// that either doesn't need it or wouldn't be helped by it.
+    Keep,
+    /// Build/verify at this ASCII-safe root instead. The old location at
+    /// `true_root` is left untouched — never deleted by this decision.
+    Redirect(PathBuf),
+    /// `true_root` has the #1783 crash signature AND redirecting wouldn't
+    /// change anything (8.3 short names unavailable) — fail with the
+    /// specific diagnosis instead of cascading into an unrelated repair.
+    Unfixable,
+}
+
+/// #1783: decide whether `ensure_venv_ready` should trust/build the venv at
+/// `true_root` or redirect to `ascii_safe_root` (`setup::ascii_safe_dir`'s
+/// output for `true_root`). Pure — every input is an already-observed fact —
+/// so this is unit-testable without a real venv, interpreter, or AppHandle.
+///
+/// The controlling invariant, matching the existing #314 self-heal's
+/// `venv_rebuild_justified` (a venv that probes healthy is never destroyed):
+/// **a venv that exists and doesn't show the #1783 signature is never
+/// relocated**, no matter how it got a non-ASCII path or what `probe_stderr`
+/// otherwise says. Only two situations redirect:
+///   1. `venv_exists` is false — nothing usable is at `true_root` (a fresh
+///      install, or one just quarantined by the #314 structural check) — so
+///      building fresh there instead of at a byte-invalid path costs nothing.
+///   2. `venv_exists` is true and `probe_stderr` carries the exact #1783
+///      crash — the venv can never start where it is, so leaving it in place
+///      (untouched, recoverable by hand) and building fresh elsewhere is the
+///      only way forward.
+/// Any other probe outcome — healthy (`Some("")`), a different failure, or
+/// `None` (couldn't even spawn) — keeps `true_root`, exactly as before this
+/// fix existed, and falls through to the pre-existing uvicorn/pkg_resources/
+/// omnivoice repair logic unchanged.
+///
+/// One more case fails fast rather than falling to `Keep` (greptile P1): case
+/// 1 above with `redirect_helps` false — a fresh install whose non-ASCII
+/// `true_root` has no ASCII-safe alternative (8.3 short names unavailable).
+/// `Keep` there used to mean "commit to a multi-GB `uv sync` at a path
+/// already known unusable, then diagnose the identical crash afterwards" —
+/// the information needed to fail fast was already available before the
+/// download started. `is_ascii_path(true_root)` is checked explicitly here
+/// (not inferred from `redirect_helps`, which is also false for the
+/// perfectly-fine ASCII case) so an ASCII `true_root` still takes the
+/// zero-cost, zero-behaviour-change `Keep` path.
+fn resolve_venv_root(
+    true_root: &Path,
+    ascii_safe_root: &Path,
+    venv_exists: bool,
+    probe_stderr: Option<&str>,
+) -> VenvRootDecision {
+    let redirect_helps = ascii_safe_root != true_root;
+    if venv_exists {
+        match probe_stderr {
+            Some(stderr) if backend_exit_indicates_nonascii_pth_crash(stderr) => {
+                if redirect_helps {
+                    VenvRootDecision::Redirect(ascii_safe_root.to_path_buf())
+                } else {
+                    VenvRootDecision::Unfixable
+                }
+            }
+            _ => VenvRootDecision::Keep,
+        }
+    } else if redirect_helps {
+        VenvRootDecision::Redirect(ascii_safe_root.to_path_buf())
+    } else if !crate::setup::is_ascii_path(true_root) {
+        // greptile P1: a fresh install at a non-ASCII path whose short-name
+        // redirect genuinely failed (8.3 generation unavailable) used to
+        // fall through to `Keep` here — which doesn't mean "this path is
+        // fine", it means "nothing could be done about it". Committing to a
+        // multi-GB `uv sync` at a path already known unusable just moves the
+        // same diagnosis to AFTER the wait instead of skipping it. Fail fast
+        // with the same conclusion the existing-venv branch above already
+        // reaches for the identical unfixable case, before anything
+        // downloads. An ASCII `true_root` never reaches this arm —
+        // `redirect_helps` is trivially false for it too, but `is_ascii_path`
+        // is checked explicitly rather than inferred from that, so this
+        // stays correct even if `resolve_venv_root` is ever called directly
+        // without the `ensure_venv_ready` pre-check that normally shields it.
+        VenvRootDecision::Unfixable
+    } else {
+        VenvRootDecision::Keep
+    }
+}
+
 /// Data-safe guard for the destructive half of the #314 self-heal
 /// (feat/safe-updates): an exit-*signature* match alone is text matching on a
 /// stderr tail — before it is allowed to delete a multi-GB venv, the venv must
@@ -1830,6 +2546,23 @@ fn venv_interpreter_probe(venv_py: &Path) -> Option<bool> {
         Ok(status) => Some(status.success()),
         Err(_) => None,
     }
+}
+
+/// Like [`venv_interpreter_probe`] but captures stderr instead of discarding
+/// it, so a failure can be pattern-matched (#1783's non-ASCII-path `.pth`
+/// crash) rather than only reported healthy/unhealthy. `None` only when the
+/// binary couldn't be spawned at all (same "leave it to the existing repair
+/// path" case `venv_interpreter_probe`'s `None` gets elsewhere) — `Some("")`
+/// is a clean, healthy exit. Deliberately NOT `-S` (skip-site): the crash
+/// this exists to detect happens inside `site.py` during NORMAL interpreter
+/// startup, exactly like the real backend spawn, so a skip-site probe would
+/// never reproduce it.
+fn venv_interpreter_probe_stderr(venv_py: &Path) -> Option<String> {
+    let mut cmd = Command::new(venv_py);
+    scrub_python_env(&mut cmd);
+    crate::tools::no_window(&mut cmd);
+    cmd.args(["-c", "import encodings"]).stdout(Stdio::null()).stderr(Stdio::piped());
+    cmd.output().ok().map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
 }
 
 // ── Linux/Windows: cuDNN 8 compat side-load ────────────────────────────────
@@ -2063,12 +2796,15 @@ pub fn ensure_venv_ready<R: tauri::Runtime>(app: &tauri::AppHandle<R>, progress:
     }
 
     // Root chosen on the setup screen: app_local_data_dir by default, the
-    // exe-adjacent folder in portable mode, or a user-picked custom dir.
-    let app_data = crate::setup::env_root(app);
-    let project_dir = app_data.join("project");
-    let venv_dir = project_dir.join(".venv");
-    let venv_py = venv_python_path(&venv_dir);
-    let backend_dir = project_dir.join("backend");
+    // exe-adjacent folder in portable mode, or a user-picked custom dir. This
+    // is the TRUE root (never redirected) — `resolve_venv_root` below decides
+    // if this call should build/verify somewhere else instead.
+    let true_app_data = crate::setup::env_root(app);
+    let mut app_data = true_app_data.clone();
+    let mut project_dir = app_data.join("project");
+    let mut venv_dir = project_dir.join(".venv");
+    let mut venv_py = venv_python_path(&venv_dir);
+    let mut backend_dir = project_dir.join("backend");
 
     // #314: structural validation before trusting an existing venv. A venv
     // whose pyvenv.cfg is gone (interrupted install) or whose python is a
@@ -2077,7 +2813,8 @@ pub fn ensure_venv_ready<R: tauri::Runtime>(app: &tauri::AppHandle<R>, progress:
     // backend would just exit 106 ("No pyvenv.cfg file") forever. Quarantine
     // it and fall through to the creation path below, which rebuilds it with
     // the normal CreatingVenv/InstallingDeps progress. A healthy venv returns
-    // None here and is never touched.
+    // None here and is never touched. Runs against the TRUE root — this is a
+    // structural check on-disk, independent of #1783's ASCII redirect below.
     if let Some(problem) = venv_structural_problem(&venv_dir) {
         log::warn!(
             "Venv at {} is structurally broken ({}) — removing it and rebuilding (#314)",
@@ -2099,6 +2836,57 @@ manually, then relaunch.",
             ));
             return None;
         }
+    }
+
+    // #1783: a venv that exists here and probes healthy (or fails for any
+    // OTHER reason) is NEVER relocated — see `resolve_venv_root`'s doc for
+    // the full invariant. `is_ascii_path` is a cheap pre-check (string scan,
+    // no subprocess): an ASCII `true_app_data` — every macOS/Linux install
+    // and the overwhelming majority on Windows — can never produce this
+    // crash, so it skips straight to `Keep` without spawning the venv's
+    // interpreter a second time on every single launch just to confirm what
+    // is already structurally impossible.
+    let venv_exists_at_true_root = venv_py.is_file() && backend_dir.is_dir();
+    let decision = if crate::setup::is_ascii_path(&true_app_data) {
+        VenvRootDecision::Keep
+    } else {
+        let probe_stderr =
+            if venv_exists_at_true_root { venv_interpreter_probe_stderr(&venv_py) } else { None };
+        let ascii_safe_root = crate::setup::ascii_safe_dir(&true_app_data);
+        resolve_venv_root(&true_app_data, &ascii_safe_root, venv_exists_at_true_root, probe_stderr.as_deref())
+    };
+    match decision {
+        VenvRootDecision::Redirect(new_root) => {
+            // CWE-532: this env root's non-ASCII component is, by definition
+            // of this whole bug, a per-user identifier (most often a Windows
+            // account name) — never log the path itself, only what happened
+            // and why. The old environment's exact location stays in the
+            // config/registry the app already tracks, not the log.
+            if venv_exists_at_true_root {
+                log::warn!(
+                    "Existing venv can't start — its path isn't valid in the active Windows code \
+page (#1783 .pth crash) — building a fresh environment at an ASCII-safe path instead. The old \
+environment is left on disk, untouched, for manual recovery."
+                );
+            } else {
+                log::info!(
+                    "No usable environment yet, and its configured path isn't ASCII-safe — \
+creating the new environment at an ASCII-safe path instead (#1783)"
+                );
+            }
+            emit_log(app, "checking", "Building the Python environment at an ASCII-safe path (#1783)");
+            app_data = new_root;
+            project_dir = app_data.join("project");
+            venv_dir = project_dir.join(".venv");
+            venv_py = venv_python_path(&venv_dir);
+            backend_dir = project_dir.join("backend");
+        }
+        VenvRootDecision::Unfixable => {
+            let msg = nonascii_pth_crash_msg(crate::config::load_config(app).install_mode == "portable");
+            fail(progress, &msg);
+            return None;
+        }
+        VenvRootDecision::Keep => {}
     }
 
     if venv_py.is_file() && backend_dir.is_dir() {
@@ -2215,13 +3003,8 @@ manually, then relaunch.",
                         Ok(uv_path) => {
                             let mut drift_cmd = Command::new(&uv_path);
                             scrub_python_env(&mut drift_cmd); // #144
+                            // apply_uv_env sets UV_INDEX_URL for china / custom mirrors
                             apply_uv_env(app, &mut drift_cmd);
-                            let user_cfg = crate::config::load_config(app);
-                            if let Some(pypi) = user_cfg.mirrors.pypi_index.as_deref() {
-                                drift_cmd.env("UV_INDEX_URL", pypi);
-                            } else if get_effective_region(app) == "china" {
-                                drift_cmd.env("UV_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/");
-                            }
                             drift_cmd
                                 .args(DRIFT_SYNC_ARGS)
                                 .current_dir(&project_dir);
@@ -2554,7 +3337,7 @@ the existing venv; newly added dependencies may be missing (#307)",
     if let Some(p) = progress {
         set_stage(p, BootstrapStage::InstallingDeps);
     }
-    let wheels_dir = wheels_drop_dir(app);
+    let wheels_dir = wheels_drop_dir(&app_data);
     let mut sync_cmd = Command::new(&uv_path);
     scrub_python_env(&mut sync_cmd); // #144: don't inherit AppImage's bundled Python
     apply_uv_env(app, &mut sync_cmd);
@@ -2572,12 +3355,7 @@ the existing venv; newly added dependencies may be missing (#307)",
             .args(["sync", "--no-dev", "--verbose"])
             .current_dir(&project_dir);
     }
-    // PyPI index precedence: explicit setup-screen mirror > region preset.
-    if let Some(pypi) = custom_mirrors.pypi_index.as_deref() {
-        sync_cmd.env("UV_INDEX_URL", pypi);
-    } else if get_effective_region(app) == "china" {
-        sync_cmd.env("UV_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/");
-    }
+    // UV_INDEX_URL (china / custom) applied via apply_uv_env above.
     let mut sync_ok = matches!(run_streaming(app, "installing_deps", &mut sync_cmd), Ok(ref s) if s.success());
 
     // #569: the big cu128 torch wheel (~2.5 GB) is the most common first-run
@@ -2600,13 +3378,9 @@ the existing venv; newly added dependencies may be missing (#307)",
             emit_log(app, "installing_deps", "Retrying the install with the wheels you provided locally…");
             let mut retry = Command::new(&uv_path);
             scrub_python_env(&mut retry);
+            // apply_uv_env sets UV_INDEX_URL for china / custom mirrors
             apply_uv_env(app, &mut retry);
             retry.env("UV_FIND_LINKS", &wheels_dir);
-            if let Some(pypi) = custom_mirrors.pypi_index.as_deref() {
-                retry.env("UV_INDEX_URL", pypi);
-            } else if get_effective_region(app) == "china" {
-                retry.env("UV_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/");
-            }
             retry.args(["sync", "--no-dev", "--verbose"]).current_dir(&project_dir);
             sync_ok = matches!(run_streaming(app, "installing_deps", &mut retry), Ok(ref s) if s.success());
         }
@@ -2896,6 +3670,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_pypi_index_url_honors_override_then_china_preset() {
+        // Repair / first-run / drift all share this resolver via apply_uv_env.
+        // China must not fall through to pypi.org (tls handshake eof on
+        // hatchling when the UI already shows the China (mirror) region).
+        assert_eq!(
+            resolve_pypi_index_url("china", None).as_deref(),
+            Some(CHINA_PYPI_INDEX)
+        );
+        assert_eq!(
+            resolve_pypi_index_url("global", None),
+            None,
+            "non-china regions keep uv's default PyPI"
+        );
+        assert_eq!(
+            resolve_pypi_index_url("china", Some("https://example.com/simple/")).as_deref(),
+            Some("https://example.com/simple/"),
+            "explicit override wins over the china preset"
+        );
+        assert_eq!(
+            resolve_pypi_index_url("china", Some("  ")),
+            Some(CHINA_PYPI_INDEX.to_string()),
+            "blank override falls back to the china preset"
+        );
+    }
+
+    #[test]
     fn crash_loop_policy_is_three_deaths_in_ten_minutes() {
         // #941 escalation guard: ≥3 crashes inside 10 min must stop the
         // respawn loop and land on the Failed screen with the crash details —
@@ -2956,6 +3756,89 @@ mod tests {
         assert_eq!(startup_budget(), Duration::from_secs(6));
         std::env::remove_var("OMNIVOICE_STARTUP_BUDGET_S");
         std::env::remove_var("OMNIVOICE_SUPERVISOR_POLL_MS");
+    }
+
+    #[test]
+    fn a_backend_that_is_still_starting_is_never_timed_out() {
+        let budget = Duration::from_secs(300);
+        // #1791: the whole point — a slow cold start on a network drive or a
+        // cold disk keeps waiting no matter how long it has already taken,
+        // because it is demonstrably alive and naming its current step.
+        assert!(keep_waiting_for_backend(
+            Some("starting"),
+            Duration::from_secs(3_600),
+            budget
+        ));
+        // Silence is the case we cannot read, so the budget still governs it:
+        // wait up to the budget, then fail with the stderr tail as before.
+        assert!(keep_waiting_for_backend(None, Duration::from_secs(299), budget));
+        assert!(!keep_waiting_for_backend(None, budget, budget));
+        // A backend that reports its own startup failure gets no extension —
+        // it is not making progress and never will.
+        assert!(!keep_waiting_for_backend(
+            Some("failed"),
+            Duration::from_secs(301),
+            budget
+        ));
+        // An unrecognised status is treated as silence, not as liveness.
+        assert!(!keep_waiting_for_backend(
+            Some("wat"),
+            Duration::from_secs(301),
+            budget
+        ));
+    }
+
+    #[test]
+    fn a_retry_preempts_an_in_flight_readiness_wait() {
+        // #1791 + Greptile on #1809: the wait holds lifecycle ownership, which
+        // Retry and Clean & Retry both need. A waiter that cannot be asked to
+        // stand down turns a slow start into an app with no way out — strictly
+        // worse than the early kill this fix removed. The waiter snapshots the
+        // generation before ownership is acquired; a later bump means someone else is
+        // taking over.
+        let snapshot = backend_wait_generation();
+        assert_eq!(backend_wait_generation(), snapshot, "nothing changed yet");
+        preempt_backend_wait();
+        assert_ne!(
+            backend_wait_generation(),
+            snapshot,
+            "Retry must be visible to the waiting loop"
+        );
+        // And the flow that preempted then takes its OWN snapshot, so it does
+        // not immediately cancel itself.
+        let theirs = backend_wait_generation();
+        assert_eq!(backend_wait_generation(), theirs);
+    }
+
+    #[test]
+    fn retry_after_wait_expiry_does_not_publish_a_stale_timeout() {
+        let generation = AtomicU64::new(7);
+        let publication = Mutex::new(());
+        let state = Arc::new(Mutex::new(BootstrapStage::Checking));
+        let failure = Mutex::new(Some("earlier diagnosis".to_string()));
+        let snapshot = generation.load(Ordering::SeqCst);
+        assert!(!keep_waiting_for_backend(None, Duration::from_secs(301), Duration::from_secs(300)));
+        // Retry invalidates after the loop condition fails, before the old
+        // waiter finishes collecting stderr and publishes its timeout.
+        generation.fetch_add(1, Ordering::SeqCst);
+        assert!(!publish_backend_wait_timeout(
+            &state, &failure, &generation, &publication, snapshot, "stale timeout".into()
+        ));
+        assert!(matches!(*state.lock().unwrap(), BootstrapStage::Checking));
+        assert_eq!(failure.lock().unwrap().as_deref(), Some("earlier diagnosis"));
+    }
+
+    #[test]
+    fn current_wait_expiry_still_publishes_and_retains_its_timeout() {
+        let generation = AtomicU64::new(7);
+        let publication = Mutex::new(());
+        let state = Arc::new(Mutex::new(BootstrapStage::StartingBackend));
+        let failure = Mutex::new(None);
+        assert!(publish_backend_wait_timeout(
+            &state, &failure, &generation, &publication, 7, "current timeout".into()
+        ));
+        assert!(matches!(*state.lock().unwrap(), BootstrapStage::Failed { .. }));
+        assert_eq!(failure.lock().unwrap().as_deref(), Some("current timeout"));
     }
 
     #[test]
@@ -3169,6 +4052,207 @@ mod tests {
     }
 
     #[test]
+    fn nonascii_pth_crash_signature_matches_the_real_traceback_only() {
+        // #1783: the exact crash captured in #1771.
+        let real_tail = "Fatal Python error: init_import_site: Failed to import the site module\n  \
+File \"<frozen site>\", line 188, in addpackage\n\
+UnicodeDecodeError: 'gbk' codec can't decode byte 0x80 in position 11: illegal multibyte sequence";
+        assert!(backend_exit_indicates_nonascii_pth_crash(real_tail));
+        // Both phrases are required — narrow match, same discipline as the
+        // broken-venv signature.
+        assert!(!backend_exit_indicates_nonascii_pth_crash("UnicodeDecodeError: ..."));
+        assert!(!backend_exit_indicates_nonascii_pth_crash(
+            "Fatal Python error: init_import_site: Failed to import the site module"
+        ));
+        // An ordinary app-level UnicodeDecodeError (unrelated to interpreter
+        // startup) must not match.
+        assert!(!backend_exit_indicates_nonascii_pth_crash(
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte in transcript.txt"
+        ));
+        assert!(!backend_exit_indicates_nonascii_pth_crash("Traceback ..."));
+        assert!(!backend_exit_indicates_nonascii_pth_crash(""));
+    }
+
+    #[test]
+    fn nonascii_pth_crash_diagnosis_is_correct_for_a_managed_install() {
+        // #1783 acceptance: "the setup screen shows a specific message and a
+        // fix, not the generic stall text." Pin the load-bearing ingredients
+        // so a future edit can't silently drop them.
+        //
+        // greptile P1: the primary remedy must be reachable from the FAILED
+        // screen this message is actually shown on (Retry / Clean & Retry
+        // only — no "Change…" picker there), so the config-file edit is the
+        // one asserted as the concrete action.
+        let msg = nonascii_pth_crash_msg(false);
+        assert!(msg.contains("config.json"));
+        assert!(msg.contains("env_dir"));
+        // Both call sites of this function are only reachable once
+        // `!setup::is_first_run(app)` — the FirstRunSetup screen and its
+        // "Change…"/"App environment" picker can never be showing at the
+        // same time as this message, so it must never cite that control
+        // (the exact defect this whole finding chain is about: naming an
+        // action unreachable in the state the message actually appears in).
+        assert!(!msg.contains("App environment"));
+        // The portable-only remedy must never leak into the managed message
+        // — moving "the whole VoiceStudio folder" would be nonsense advice
+        // for an install that already has an ASCII-safe custom env_dir lever.
+        assert!(!msg.contains("OmniVoiceStudio-Data"));
+        assert!(!msg.contains("portable.path"));
+        // CodeRabbit: never tell the user to run a specific fsutil command —
+        // its retroactivity/per-volume semantics mean it may fix nothing.
+        assert!(!msg.contains("fsutil"));
+        assert!(msg.contains("#1783"));
+    }
+
+    #[test]
+    fn nonascii_pth_crash_diagnosis_is_correct_for_a_portable_install() {
+        // greptile P1 (third instance of the same defect class on this PR:
+        // "the text names an action that doesn't work" for the state the
+        // message is actually shown in). Verified directly against
+        // `env_root`'s body: for `install_mode == "portable"` it returns
+        // `portable_base().join("env")` and returns BEFORE the `env_dir`
+        // check ever runs — so a portable user told to edit `env_dir` in
+        // config.json follows the instructions exactly and hits the
+        // identical crash on relaunch. The portable message must instead
+        // name something that actually changes `portable_base()`'s
+        // resolution (moving the app+data folder, or the `portable.path`
+        // pointer file — see `portable_base`'s resolution order).
+        let msg = nonascii_pth_crash_msg(true);
+        assert!(msg.contains("OmniVoiceStudio-Data"));
+        assert!(msg.contains("portable.path"));
+        // The managed-only remedy must never leak into the portable message
+        // without its "ignores env_dir" caveat — bare mention of the JSON
+        // snippet here would be exactly the misleading advice this test
+        // exists to catch.
+        assert!(!msg.contains("\"env_dir\": \"C:/VoiceStudio/env\""));
+        assert!(!msg.contains("App environment"));
+        assert!(!msg.contains("fsutil"));
+        assert!(msg.contains("#1783"));
+    }
+
+    // ── #1783: resolve_venv_root — the relocation-safety invariant ─────────
+
+    #[test]
+    fn a_healthy_existing_venv_at_a_nonascii_path_is_never_relocated() {
+        // This is the regression a blunter fix would create: a Windows user
+        // on a non-ASCII path whose venv already works (e.g. a code page
+        // that happens to decode those bytes) must NOT lose a 9 GiB
+        // environment and be forced to re-download it just because this
+        // landed. `ascii_safe_root` differs from `true_root` (proving a
+        // redirect target genuinely exists) — the decision must still be
+        // Keep, because the venv exists and its probe carries no #1783
+        // signature.
+        let true_root = Path::new("/nonascii/root");
+        let ascii_root = Path::new("/ascii/root");
+        assert_eq!(
+            resolve_venv_root(true_root, ascii_root, true, Some("")), // clean probe exit
+            VenvRootDecision::Keep
+        );
+        // Same for a venv that fails to probe for an unrelated reason — that
+        // is the EXISTING uvicorn/pkg_resources/omnivoice repair machinery's
+        // job, untouched by this fix.
+        assert_eq!(
+            resolve_venv_root(true_root, ascii_root, true, Some("Traceback (most recent call last)...")),
+            VenvRootDecision::Keep
+        );
+        // And when the probe couldn't even spawn the interpreter (None) —
+        // also left to the existing logic, never relocated.
+        assert_eq!(resolve_venv_root(true_root, ascii_root, true, None), VenvRootDecision::Keep);
+    }
+
+    #[test]
+    fn identical_ascii_safe_and_true_roots_never_redirect() {
+        // The overwhelming majority case: `ascii_safe_dir` is a no-op for an
+        // ASCII path, so `ascii_safe_root == true_root` — nothing usable to
+        // redirect TO, so this decides purely on whether the venv needs
+        // fixing at all, never on relocating it.
+        let root = Path::new("/ascii/root");
+        assert_eq!(resolve_venv_root(root, root, true, Some("")), VenvRootDecision::Keep);
+        assert_eq!(resolve_venv_root(root, root, false, None), VenvRootDecision::Keep);
+        // A #1783-signature probe couldn't occur for a genuinely ASCII path
+        // in practice, but the decision function doesn't get to assume that
+        // — with nowhere better to go, it must fail specifically rather than
+        // silently return Keep (which would hand back a venv that can never
+        // start) or claim a redirect that changes nothing.
+        assert_eq!(
+            resolve_venv_root(root, root, true, Some("UnicodeDecodeError in init_import_site")),
+            VenvRootDecision::Unfixable
+        );
+    }
+
+    #[test]
+    fn a_nonexistent_venv_redirects_to_an_available_ascii_safe_root() {
+        // Case 1: nothing usable at the true (non-ASCII) path — a genuine
+        // first run, or one just quarantined by the #314 structural check.
+        // Building fresh at the ASCII-safe root costs nothing since there is
+        // nothing to abandon.
+        let true_root = Path::new("/nonascii/root");
+        let ascii_root = Path::new("/ascii/root");
+        assert_eq!(
+            resolve_venv_root(true_root, ascii_root, false, None),
+            VenvRootDecision::Redirect(ascii_root.to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_nonexistent_venv_at_a_nonascii_root_fails_fast_when_no_safe_alternative_exists() {
+        // greptile P1: `ascii_safe_dir` returning the path UNCHANGED for a
+        // non-ASCII `true_root` (8.3 short names unavailable) used to fall
+        // through to `Keep` here — silently committing to a multi-GB
+        // `uv sync` at a path already known unusable, and only diagnosing
+        // the identical #1783 crash after the whole download completed. The
+        // information needed to fail fast — true_root is non-ASCII AND
+        // ascii_safe_root changed nothing — was already available before
+        // any of that started, so this must be `Unfixable`, not `Keep`.
+        //
+        // Genuinely non-ASCII bytes (`\u{...}` escapes, matching setup.rs's
+        // convention) — "/nonascii/root" elsewhere in this file is only a
+        // descriptive LABEL, not actual non-ASCII content, and would have
+        // let this exact bug slip past a less careful fixture.
+        let true_root = PathBuf::from(format!("/{}/root", "\u{65e5}\u{672c}\u{8a9e}"));
+        assert_eq!(
+            resolve_venv_root(&true_root, &true_root, false, None),
+            VenvRootDecision::Unfixable
+        );
+    }
+
+    #[test]
+    fn an_ascii_root_with_nothing_built_yet_is_always_kept_zero_cost() {
+        // The other half of the same greptile finding: fixing the
+        // non-ASCII-fails-fast case above must NOT over-trigger on the
+        // overwhelming-majority ASCII case, which is trivially "redirect
+        // changes nothing" too (`ascii_safe_root == true_root`) but for a
+        // completely different, harmless reason. `is_ascii_path` is checked
+        // explicitly inside `resolve_venv_root` rather than inferred from
+        // `redirect_helps` alone, specifically so this stays `Keep`.
+        let root = Path::new("/ascii/root");
+        assert_eq!(resolve_venv_root(root, root, false, None), VenvRootDecision::Keep);
+    }
+
+    #[test]
+    fn a_venv_with_the_1783_signature_redirects_when_a_safe_root_exists() {
+        // Case 2: the venv exists but can never start where it is.
+        let true_root = Path::new("/nonascii/root");
+        let ascii_root = Path::new("/ascii/root");
+        let crash_stderr = "Fatal Python error: init_import_site: ...\nUnicodeDecodeError: ...";
+        assert_eq!(
+            resolve_venv_root(true_root, ascii_root, true, Some(crash_stderr)),
+            VenvRootDecision::Redirect(ascii_root.to_path_buf())
+        );
+    }
+
+    #[test]
+    fn a_venv_with_the_1783_signature_is_unfixable_when_redirect_cannot_help() {
+        // 8.3 short names disabled (or any other reason `ascii_safe_dir`
+        // couldn't produce a different path) — redirecting to the SAME path
+        // achieves nothing, so this must fail with the specific diagnosis
+        // rather than loop into the unrelated pkg_resources repair cascade.
+        let root = Path::new("/nonascii/root");
+        let crash_stderr = "Fatal Python error: init_import_site: ...\nUnicodeDecodeError: ...";
+        assert_eq!(resolve_venv_root(root, root, true, Some(crash_stderr)), VenvRootDecision::Unfixable);
+    }
+
+    #[test]
     fn venv_rebuild_requires_confirmed_breakage() {
         // feat/safe-updates: an exit-signature match alone must not destroy a
         // venv. A structural problem is definitive evidence → rebuild.
@@ -3342,14 +4426,17 @@ mod tests {
     fn failed_command_message_carries_the_newest_relevant_output() {
         let logs = vec![
             LogPayload {
+                attempt: 1,
                 stage: "downloading_uv".into(),
                 line: "unrelated".into(),
             },
             LogPayload {
+                attempt: 1,
                 stage: "installing_deps".into(),
                 line: "resolver context".into(),
             },
             LogPayload {
+                attempt: 1,
                 stage: "installing_deps".into(),
                 line: "actual dependency conflict".into(),
             },
@@ -3478,5 +4565,234 @@ mod failure_preservation_tests {
         let unique = format!("wiring probe {:?}", std::thread::current().id());
         set_stage(&s, BootstrapStage::Failed { message: unique.clone() });
         assert_eq!(last_failure_message().as_deref(), Some(unique.as_str()));
+    }
+}
+
+/// #1770: attach-handshake code fingerprint — plain functions, no
+/// `AppHandle` (a `tauri::test::mock_builder` test aborts the whole test
+/// binary on the Windows CI runner, which broke a PR earlier today; the fix
+/// there was exactly this — split the pure decision out and test that).
+#[cfg(test)]
+mod code_fingerprint_tests {
+    use super::*;
+
+    #[test]
+    fn hash_python_sources_changes_with_content_and_ignores_noise() {
+        let backend = tempfile::tempdir().unwrap();
+        fs::write(backend.path().join("main.py"), "print('v1')").unwrap();
+        fs::create_dir_all(backend.path().join("api")).unwrap();
+        fs::write(backend.path().join("api").join("schemas.py"), "class X: pass").unwrap();
+
+        let baseline = hash_python_sources(&[backend.path().to_path_buf()]).unwrap();
+
+        // Same content hashed again -> identical fingerprint (deterministic).
+        assert_eq!(hash_python_sources(&[backend.path().to_path_buf()]).unwrap(), baseline);
+
+        // __pycache__ / dotdirs (bytecode caches, .pytest_cache — exactly what
+        // dev mode litters a live-executed source tree with) never move it.
+        fs::create_dir_all(backend.path().join("__pycache__")).unwrap();
+        fs::write(backend.path().join("__pycache__").join("main.cpython-311.pyc"), "junk").unwrap();
+        fs::create_dir_all(backend.path().join(".pytest_cache")).unwrap();
+        fs::write(backend.path().join(".pytest_cache").join("v"), "junk").unwrap();
+        assert_eq!(hash_python_sources(&[backend.path().to_path_buf()]).unwrap(), baseline);
+
+        // Actual code changing -> the fingerprint changes (the whole point:
+        // this is what `same_app_version` alone cannot see, #1770).
+        fs::write(backend.path().join("main.py"), "print('v2')").unwrap();
+        assert_ne!(hash_python_sources(&[backend.path().to_path_buf()]).unwrap(), baseline);
+    }
+
+    #[test]
+    fn hash_python_sources_is_none_for_no_py_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "no python here").unwrap();
+        assert_eq!(hash_python_sources(&[dir.path().to_path_buf()]), None);
+    }
+
+    #[test]
+    fn hash_python_sources_separates_directories_by_label() {
+        // backend/x.py and omnivoice/x.py must not collide onto the same
+        // fingerprint entry.
+        let backend = tempfile::tempdir().unwrap();
+        let backend_dir = backend.path().join("backend");
+        fs::create_dir_all(&backend_dir).unwrap();
+        fs::write(backend_dir.join("x.py"), "A").unwrap();
+
+        let omnivoice = tempfile::tempdir().unwrap();
+        let omnivoice_dir = omnivoice.path().join("omnivoice");
+        fs::create_dir_all(&omnivoice_dir).unwrap();
+        fs::write(omnivoice_dir.join("x.py"), "B").unwrap();
+
+        let both = hash_python_sources(&[backend_dir.clone(), omnivoice_dir.clone()]).unwrap();
+        let backend_only = hash_python_sources(&[backend_dir]).unwrap();
+        assert_ne!(both, backend_only);
+    }
+
+    // #1847: the splash is the only surface with a Show/Copy affordance for
+    // the first-run log, and it unmounts the moment the stage flips to ready,
+    // so on a successful install the whole log was gone for good. It is
+    // written beside backend.log now.
+    #[test]
+    fn bootstrap_log_sits_beside_the_backend_log() {
+        // One directory for everything about a run, so a bug report does not
+        // have to hunt in two places.
+        let bootstrap = bootstrap_log_path();
+        let backend = crate::backend::backend_log_path();
+        assert_eq!(bootstrap.parent(), backend.parent());
+        assert_eq!(bootstrap.file_name().unwrap(), "bootstrap.log");
+    }
+
+    #[test]
+    fn append_bootstrap_log_writes_the_stage_and_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bootstrap.log");
+        // Exercise the same write shape the helper uses, against a path we
+        // control: the helper itself resolves a per-OS location, and a test
+        // that redirected that would be testing the redirection.
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
+        writeln!(file, "[{}] {}", "installing_deps", "Collecting torch").unwrap();
+        drop(file);
+
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[installing_deps] Collecting torch"), "{body}");
+    }
+
+    #[test]
+    fn append_bootstrap_log_never_panics_on_an_unwritable_path() {
+        // Best effort by contract: a log we cannot write must not take the
+        // bootstrap down with it.
+        append_bootstrap_log("checking", "a line");
+    }
+
+    // #1898: on Windows the backend is force-terminated with no graceful
+    // phase, so it never clears its own run sentinel and every deliberate
+    // quit was reported as a crash on the next launch. The shell retires the
+    // sentinel instead, immediately before the kill.
+    #[test]
+    fn retire_run_sentinel_at_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("run_sentinel.json");
+        fs::write(&sentinel, "{}").unwrap();
+
+        retire_run_sentinel_at(dir.path());
+
+        assert!(!sentinel.exists(), "a deliberate stop must retire the sentinel");
+    }
+
+    #[test]
+    fn retire_run_sentinel_at_is_quiet_when_there_is_nothing_to_retire() {
+        // A backend that already cleared it, or never wrote one. Must not
+        // panic or log an error on the ordinary path.
+        let dir = tempfile::tempdir().unwrap();
+        retire_run_sentinel_at(dir.path());
+    }
+
+    #[test]
+    fn retire_run_sentinel_leaves_the_file_when_the_backend_is_unreachable() {
+        // The crash record must survive when we cannot confirm where it
+        // lives: reporting a crash we are unsure about beats silently
+        // erasing evidence of a real one. Nothing listens on this port.
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("run_sentinel.json");
+        fs::write(&sentinel, "{}").unwrap();
+
+        retire_run_sentinel(59_999);
+
+        assert!(sentinel.exists(), "an unreachable backend must not erase the sentinel");
+    }
+
+    // ── #1900: the attempt id the splash scopes evidence by ────────────────
+
+    #[test]
+    fn a_status_reply_carries_the_stage_and_its_attempt() {
+        // The wire shape the frontend already reads must survive: `stage` stays
+        // a sibling key at the top level (serde flatten on an internally tagged
+        // enum), with `attempt` added beside it — not nested under it.
+        let status = BootstrapStatus {
+            attempt: 4,
+            stage: BootstrapStage::InstallingDeps,
+        };
+
+        let json = serde_json::to_value(&status).unwrap();
+
+        assert_eq!(json["stage"], "installing_deps");
+        assert_eq!(json["attempt"], 4);
+    }
+
+    #[test]
+    fn a_failed_status_keeps_its_message_alongside_the_attempt() {
+        // The variant's own fields flatten up too, so `message` does not move
+        // and the failure card keeps rendering.
+        let status = BootstrapStatus {
+            attempt: 2,
+            stage: BootstrapStage::Failed { message: "uv sync failed".into() },
+        };
+
+        let json = serde_json::to_value(&status).unwrap();
+
+        assert_eq!(json["stage"], "failed");
+        assert_eq!(json["message"], "uv sync failed");
+        assert_eq!(json["attempt"], 2);
+    }
+
+    /// `ATTEMPT` is one process-global counter and cargo runs tests in
+    /// threads. Without this the three below interleave: one reads the counter
+    /// another just advanced, and asserts on a value it never owned
+    /// (CodeRabbit).
+    static ATTEMPT_LOCK: Mutex<()> = Mutex::new(());
+
+    fn a_stage_slot() -> Arc<Mutex<BootstrapStage>> {
+        Arc::new(Mutex::new(BootstrapStage::InstallingDeps))
+    }
+
+    #[test]
+    fn beginning_an_attempt_moves_the_counter_forward() {
+        // Monotonic and never reused: the frontend scopes by equality, so a
+        // repeated id would let a previous attempt's log lines count toward
+        // the current one — the misattribution this exists to remove.
+        let _g = ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = a_stage_slot();
+        let before = current_attempt();
+
+        let first = begin_attempt_with(&slot, BootstrapStage::Checking);
+        let second = begin_attempt_with(&slot, BootstrapStage::Checking);
+
+        assert!(first > before, "an attempt must not reuse an earlier id");
+        assert!(second > first, "attempts must keep moving forward");
+        assert_eq!(current_attempt(), second);
+    }
+
+    #[test]
+    fn an_attempt_is_never_zero() {
+        // 0 is reserved for "no attempt stated" — a payload from a build that
+        // predates this field deserializes to it, and must never collide with
+        // a real attempt.
+        let _g = ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(current_attempt() >= 1);
+        assert!(begin_attempt_with(&a_stage_slot(), BootstrapStage::Checking) >= 1);
+    }
+
+    #[test]
+    fn a_new_attempt_never_carries_the_previous_stage() {
+        // Greptile P1: the bump and the stage write have to be one atomic
+        // move. Sampled separately, a restart landing between them returns
+        // `installing_deps` stamped with the NEW attempt, and the splash
+        // records an install this attempt never ran.
+        let _g = ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = a_stage_slot();
+
+        let opened = begin_attempt_with(&slot, BootstrapStage::Checking);
+
+        // Whatever a reader sees after the call, the pair is consistent: the
+        // new attempt's id can only ever come with the new attempt's stage.
+        let stage = slot.lock().unwrap().clone();
+        assert!(matches!(stage, BootstrapStage::Checking), "{stage:?}");
+        assert_eq!(current_attempt(), opened);
     }
 }

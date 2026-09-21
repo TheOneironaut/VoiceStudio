@@ -37,11 +37,10 @@ def test_concurrency_is_capped_regardless_of_card_size():
     assert derive_concurrency(backend="cuda", free_memory_bytes=200 * GB) == 4
 
 
-def test_model_that_does_not_fit_returns_zero():
-    """A 4 GB card refusing a 6 GB engine is correct behaviour (#1226), and the
-    scheduler must read it as 'send it elsewhere', never as a worker fault."""
-    assert derive_concurrency(backend="cuda", free_memory_bytes=4 * GB, min_model_bytes=6 * GB) == 0
-    assert derive_concurrency(backend="mps", free_memory_bytes=4 * GB, min_model_bytes=6 * GB) == 0
+def test_under_provisioned_model_keeps_one_advisory_slot():
+    """The VRAM floor changes the deadline; it does not disable the engine."""
+    assert derive_concurrency(backend="cuda", free_memory_bytes=4 * GB, min_model_bytes=6 * GB) == 1
+    assert derive_concurrency(backend="mps", free_memory_bytes=4 * GB, min_model_bytes=6 * GB) == 1
 
 
 def test_large_model_reduces_derived_concurrency():
@@ -319,3 +318,10 @@ def test_latency_tracks_a_link_that_degrades():
 
 def test_latency_for_an_unknown_worker_is_ignored():
     _pool_with_worker().record_latency("nosuch", 5.0)
+
+
+@pytest.mark.parametrize("value", [None, 0.0, 72.5])
+def test_capacity_snapshot_preserves_gpu_utilization(value):
+    capacity = WorkerCapacity(worker_id="gpu", max_concurrent_tasks=1)
+    capacity.gpu_utilization_percent = value
+    assert capacity.to_dict()["gpu_utilization_percent"] == value

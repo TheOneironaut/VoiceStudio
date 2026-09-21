@@ -325,10 +325,9 @@ async def create_speech(req: SpeechRequest):
 
     # Routing gate (#21 — no silent CPU fallback), identical to REST /generate.
     from core.device_caps import detect_host_caps
-    from services.engine_routing import resolve_routing, routing_notice
-    _routing = resolve_routing(
-        getattr(backend, "gpu_compat", ("cpu",)), detect_host_caps(),
-        getattr(backend, "min_vram_gb", 0.0),
+    from services.engine_routing import routing_notice, runtime_compute_profile_async
+    _routing = await runtime_compute_profile_async(
+        backend, detect_host_caps()
     )
     if _routing["routing_status"] == "unavailable":
         raise HTTPException(status_code=400, detail=_routing["routing_reason"])
@@ -436,7 +435,7 @@ async def create_speech(req: SpeechRequest):
             detail=(
                 f"TTS engine '{backend.id}' did not finish loading within its "
                 f"model-load budget — on a first run this usually means the weight "
-                f"download is slow or stalled (check Model Catalogue → Models for "
+                f"download is slow or stalled (check the engine's Weights list in Model Catalogue for "
                 f"progress), not that generation failed. Retry once the model "
                 f"shows as installed."
             ),
@@ -639,11 +638,12 @@ async def create_transcription(
 
         if response_format == "vtt":
             from fastapi.responses import PlainTextResponse
+            from services.srt_parser import escape_webvtt_text
             vtt_lines = ["WEBVTT\n"]
             for seg in segments:
                 start = seg.get("start", 0.0)
                 end = seg.get("end", 0.0)
-                text = seg.get("text", "").strip()
+                text = escape_webvtt_text(seg.get("text", "").strip(), preserve_markup=False)
                 vtt_lines.append(
                     f"{_format_ts_vtt(start)} --> {_format_ts_vtt(end)}\n{text}\n"
                 )
@@ -722,17 +722,11 @@ def list_voices():
 
 def _format_ts_srt(seconds: float) -> str:
     """Format seconds as SRT timestamp: HH:MM:SS,mmm"""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    from services.srt_parser import format_cue_timestamp
+    return format_cue_timestamp(seconds, ",")
 
 
 def _format_ts_vtt(seconds: float) -> str:
     """Format seconds as VTT timestamp: HH:MM:SS.mmm"""
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    from services.srt_parser import format_cue_timestamp
+    return format_cue_timestamp(seconds, ".")

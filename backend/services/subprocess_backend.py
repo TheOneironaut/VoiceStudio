@@ -41,8 +41,10 @@ from __future__ import annotations
 import atexit
 import base64
 import contextlib
+import collections
 import json
 import logging
+import math
 import os
 import struct
 import subprocess
@@ -97,11 +99,36 @@ SIDECAR_INBOUND_OPS = frozenset({"ping", "synthesize", "transcribe", "shutdown"}
 #: emitting the first frame; 30 s is a comfortable upper bound that still
 #: surfaces a hung sidecar within a single CI run.
 SPAWN_READY_TIMEOUT_S = 30.0
+# How much of a sidecar's stderr a failed ready handshake quotes (#2026).
+_STDERR_TAIL_LINES = 12
+_STDERR_TAIL_CHARS = 800
 
 #: Per-frame _recv read timeout (best-effort — applies to header read; body
-#: read is uninterruptible on a stdlib BufferedReader). Used in health_check
-#: and generate to bound a hung sidecar.
+#: read is uninterruptible on a stdlib BufferedReader). Used by health_check
+#: to bound a hung sidecar: a ping must stay fast, so this stays short.
 RECV_TIMEOUT_S = 60.0
+
+#: Floor for the generate() deadline of a sidecar that does not choose its own.
+#:
+#: It must not undercut the budget the job was already granted by
+#: services.model_manager.generate_timeout_s — 300s on an accelerated host,
+#: 600s on a CPU one — or the watchdog kills a synthesis the caller still
+#: considers valid, which is #2103. 600s is that CPU floor.
+#:
+#: A floor, not the whole answer: that budget also scales with text length, so
+#: _effective_recv_timeout_s derives the real per-request deadline and falls
+#: back to this value when the budget cannot be computed.
+#:
+#: Every engine that overrode the hook picked somewhere in 300s..900s, i.e. at
+#: or above the accelerated budget; only the ones that stayed silent got 60s.
+#:
+#: A literal rather than an import of model_manager.CPU_JOB_TIMEOUT_S: that
+#: value is read from the environment at import time and monkeypatched by
+#: tests, and a class-attribute default that moves with the environment is
+#: harder to reason about than one that does not. This module also reaches
+#: model_manager only lazily, from inside functions. The two are held in
+#: lockstep by backend/tests/test_subprocess_recv_timeout.py instead.
+GENERATE_RECV_TIMEOUT_S = 600.0
 
 
 # ── Idle sidecar reaping (parity Action 13) ─────────────────────────────────
@@ -374,21 +401,35 @@ class SubprocessBackend(TTSBackend):
 
     # Per-engine recv timeout for generate(): how long the parent waits for the
     # sidecar's audio frame before the watchdog hard-kills the child and reclaims
-    # its VRAM/device. Default is the conservative RECV_TIMEOUT_S (60s). A
-    # subclass whose legitimate generates run longer overrides it (or exposes it
-    # as a property) so a slow-but-valid synth is not falsely killed, while a
-    # genuinely wedged one is still reclaimed. health_check() keeps using
-    # RECV_TIMEOUT_S directly, since a ping must stay fast.
-    recv_timeout_s: float = RECV_TIMEOUT_S
+    # its VRAM/device. A subclass whose legitimate generates run longer overrides
+    # it (or exposes it as a property) so a slow-but-valid synth is not falsely
+    # killed, while a genuinely wedged one is still reclaimed. health_check()
+    # keeps using RECV_TIMEOUT_S directly, since a ping must stay fast.
+    #
+    # The default is GENERATE_RECV_TIMEOUT_S, not RECV_TIMEOUT_S: 60s is a
+    # health-check ping budget, and inheriting it as a *generation* deadline
+    # killed four engines mid-sentence (#2103). Overriding remains the way to
+    # ask for more; inheriting no longer means asking for less than the job's
+    # own budget.
+    recv_timeout_s: float = GENERATE_RECV_TIMEOUT_S
 
     # ── instance state (initialised in __init__) ───────────────────────────
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
+        # A failed bounded reap must retain ownership and forbid reuse. This
+        # lock is separate from _lock: the receive owner joins its watchdog.
+        self._timeout_quarantine: list[subprocess.Popen] = []
+        self._timeout_quarantine_lock = threading.Lock()
         # Single lock serialises spawn + every send/recv pair so two threads
         # can't interleave half-frames on the same pipe.
         self._lock = threading.Lock()
         self._stderr_thread: Optional[threading.Thread] = None
+        # The current sidecar's last stderr lines and whether the last
+        # receive hit its deadline, so a failed ready handshake can say
+        # which way it failed (#2026).
+        self._stderr_tail: collections.deque = collections.deque(maxlen=_STDERR_TAIL_LINES)
+        self._last_recv_timed_out = False
         # Monotonic timestamp of the last sidecar activity, for the idle reaper
         # (parity Action 13). Registered in the weak live-backend set so the
         # reaper can find this instance's sidecar.
@@ -451,6 +492,10 @@ class SubprocessBackend(TTSBackend):
     def _spawn(self) -> None:
         """Launch the sidecar if not already running. Blocks on the ready
         handshake. Caller must hold self._lock."""
+        if not self._retry_timeout_cleanup():
+            raise RuntimeError(
+                f"{self.id} sidecar is still stopping after a timeout; retry once it exits"
+            )
         if self._proc is not None and self._proc.poll() is None:
             return  # already up
 
@@ -494,7 +539,7 @@ class SubprocessBackend(TTSBackend):
         from services.binary_preflight import InvalidBinaryError, validate_executable
         _venv_hint = (
             f"the '{self.id}' engine's private environment is broken — "
-            f"reinstall the engine from Model Catalogue → Engines"
+            f"reinstall the engine from Model Catalogue"
         )
         validate_executable(python_path, hint=_venv_hint)
         # Basenames only — absolute paths embed the user's home directory,
@@ -516,8 +561,13 @@ class SubprocessBackend(TTSBackend):
         # a full pipe. Lines flow into the root logger; AUTH-05's
         # HFTokenRedactor (already installed in Phase 1) strips token bytes.
         # See T-02-03.
+        # A fresh buffer per process, owned by its drain thread: a previous
+        # process's drain that is still finishing writes to its own buffer,
+        # never into the one this start-up failure will quote.
+        self._stderr_tail = collections.deque(maxlen=_STDERR_TAIL_LINES)
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, daemon=True,
+            args=(self._proc, self._stderr_tail),
             name=f"{self.id}-stderr-drain",
         )
         self._stderr_thread.start()
@@ -530,18 +580,125 @@ class SubprocessBackend(TTSBackend):
             self._force_kill()
             raise
         if not frame or frame.get("op") != "ready":
+            # Read the cause before the kill: afterwards every child has
+            # an exit code, and it is ours.
+            reason = self._ready_failure_reason(frame)
             self._force_kill()
-            raise RuntimeError(
-                f"{self.id} sidecar did not signal ready: {frame!r}"
-            )
+            raise RuntimeError(f"{self.id} sidecar did not signal ready: {reason}")
         logger.info("[%s] sidecar ready", self.id)
         self._touch()
         _ensure_reaper_running()
+
+    def _ready_failure_reason(self, frame: Optional[dict]) -> str:
+        """Say which of the three handshake failures happened (#2026).
+
+        ``_recv`` returns None on EOF, and a watchdog kill closes stdout just
+        like a sidecar that crashed on its own, so the frame alone reads
+        ``None`` for both. The deadline flag, the child's exit code and its
+        last stderr lines tell them apart.
+        """
+        from core.scrub import scrub_text
+
+        if frame:
+            op = frame.get("op")
+            if op == "error":
+                message = scrub_text(str(frame.get("message") or ""))[:_STDERR_TAIL_CHARS]
+                reason = f"it reported an error instead: {message}"
+            else:
+                reason = f"it sent op={op!r} instead of 'ready' (a protocol mismatch)"
+        elif self._last_recv_timed_out:
+            reason = (
+                f"no ready frame within {self.spawn_ready_timeout_s:g}s, so it was stopped"
+            )
+        else:
+            code = None
+            proc = self._proc
+            if proc is not None:
+                try:
+                    code = proc.wait(timeout=2)
+                except Exception:
+                    code = proc.poll()
+            reason = (
+                f"it exited with code {code} before signalling ready"
+                if code is not None
+                else "it closed its output before signalling ready"
+            )
+        tail = self._stderr_tail_text()
+        return f"{reason}. Last stderr: {tail}" if tail else f"{reason} (no stderr output)"
+
+    def _effective_recv_timeout_s(self, text: str) -> float:
+        """This request's silence deadline: never under the budget it was granted.
+
+        ``recv_timeout_s`` is a per-engine constant, but ``generate_timeout_s``
+        scales the wall-clock budget with text length, so only a per-request
+        deadline can satisfy "the watchdog must not fire before the caller's
+        own budget expires".
+
+        An engine that overrode the hook keeps exactly its own value, including
+        a smaller one: #1611 asks for more and #2103 asks that opting down stay
+        possible.
+        """
+        own = self.recv_timeout_s
+        for klass in type(self).__mro__:
+            if klass is SubprocessBackend:
+                break  # reached the base without finding an override
+            if "recv_timeout_s" in klass.__dict__:
+                return own  # the engine chose; that choice is the answer
+        try:
+            from services.model_manager import generate_timeout_s
+
+            budget = float(generate_timeout_s(text, engine=self, _include_sidecar_grace=False))
+        except Exception:
+            # Budget probing is advisory: a failure here must not turn a
+            # working generate into an error. Fall back to the class floor.
+            return own
+        if not math.isfinite(budget):
+            return own
+        return max(own, budget)
+
+    def _generate_failure_reason(self, elapsed_s: float, deadline_s: float) -> str:
+        """Say whether generate() lost the sidecar to the deadline or a crash.
+
+        The spawn handshake already distinguishes these (#2026); generate() did
+        not, so a watchdog kill surfaced as "sidecar closed pipe mid-generate"
+        and every reporter reasonably read it as a crash (#2103). The deadline
+        is the one fact that explains the failure, so it belongs in the message
+        the caller sees, not only in the backend log.
+        """
+        if not self._last_recv_timed_out:
+            # Unchanged wording for a genuine crash: only the deadline case was
+            # misreported, and #2026 already gave the spawn path its own tail.
+            return f"{self.id} sidecar closed pipe mid-generate"
+        reason = (
+            f"{self.id} sidecar sent nothing for {deadline_s:g}s "
+            f"(elapsed {elapsed_s:.0f}s), so VoiceStudio stopped it. It may "
+            f"simply be slower than that deadline on this host; retry or increase "
+            f"this engine's receive timeout (see Troubleshooting)."
+        )
+        tail = self._stderr_tail_text()
+        return f"{reason}. Last stderr: {tail}" if tail else reason
+
+    def _stderr_tail_text(self) -> str:
+        """The sidecar's last stderr lines, scrubbed for a user-visible error."""
+        from core.scrub import scrub_text
+
+        thread = self._stderr_thread
+        if thread is not None and thread.is_alive():
+            # The child is gone or going; let the drain catch its last lines.
+            thread.join(timeout=1.0)
+        lines = list(getattr(self, "_stderr_tail", ()))
+        if not lines:
+            return ""
+        text = scrub_text(" | ".join(lines))
+        if len(text) > _STDERR_TAIL_CHARS:
+            text = "…" + text[-_STDERR_TAIL_CHARS:]
+        return text
 
     def shutdown(self) -> None:
         """Idempotent. Sends {op:shutdown}; falls back to terminate/kill."""
         proc = self._proc
         if proc is None:
+            self._retry_timeout_cleanup()
             return
         try:
             try:
@@ -577,6 +734,7 @@ class SubprocessBackend(TTSBackend):
                         pass
         finally:
             self._proc = None
+            self._retry_timeout_cleanup()
 
     def _force_kill(self) -> None:
         """Internal: kill a sidecar that never reached the ready state."""
@@ -633,6 +791,7 @@ class SubprocessBackend(TTSBackend):
         sample rate. Decodes the int16 PCM the sidecar returns into float32
         in [-1, 1].
         """
+        self._check_language(kw.get("language"))
         # On-pool callers (every HTTP/dub/batch generate, dispatched via
         # run_on_gpu_pool_guarded) already own a pool slot; re-acquiring would
         # self-deadlock on a 1-worker (MPS) pool, so skip it. Off-pool callers
@@ -669,6 +828,9 @@ class SubprocessBackend(TTSBackend):
             with self._lock:
                 self._validate_generate_authorization()
                 self._spawn()
+                # getattr keeps lightweight protocol-loop test doubles valid;
+                # real instances always initialise _proc in __init__.
+                proc = getattr(self, "_proc", None)
                 msg = {"op": "synthesize", "text": text}
                 # Filter kwargs to JSON-safe primitives. Tensor / Path / etc.
                 # don't survive json.dumps and are silently dropped — the
@@ -676,8 +838,17 @@ class SubprocessBackend(TTSBackend):
                 for k, v in kw.items():
                     if _is_jsonable(v):
                         msg[k] = v
-                self._send(msg)
-                reply = self._recv_with_timeout(self.recv_timeout_s)
+                deadline_s = self._effective_recv_timeout_s(text)
+                started_at = time.monotonic()
+                try:
+                    self._send(msg)
+                    reply = self._recv_with_timeout(deadline_s)
+                except (RuntimeError, OSError):
+                    # A broken or malformed protocol stream cannot be reused.
+                    # Reap it before releasing the request lock so an immediate
+                    # retry cannot race poll() and write to the same dead pipe.
+                    self._reap_unusable_process(proc)
+                    raise
                 # A cold sidecar may emit non-terminal {"op": "progress"} frames
                 # (during a model load, etc.) before the terminal audio frame.
                 # Each recv re-arms the watchdog, so a long-but-active load
@@ -701,12 +872,32 @@ class SubprocessBackend(TTSBackend):
                             report_model_load_activity()
                     except Exception:
                         pass  # the heartbeat is best-effort; never fail a synth over it
-                    reply = self._recv_with_timeout(self.recv_timeout_s)
-            if not reply:
-                raise RuntimeError(f"{self.id} sidecar closed pipe mid-generate")
+                    try:
+                        reply = self._recv_with_timeout(deadline_s)
+                    except (RuntimeError, OSError):
+                        self._reap_unusable_process(proc)
+                        raise
+                if not reply:
+                    # Same EOF for a deadline kill and a crash; _last_recv_timed_out
+                    # is what tells them apart (#2026's spawn path does the same).
+                    reason = self._generate_failure_reason(
+                        time.monotonic() - started_at, deadline_s
+                    )
+                    self._reap_unusable_process(proc)
+                    raise RuntimeError(reason)
             if reply.get("op") == "error":
+                stage = str(reply.get("stage") or "unknown")
+                message = str(reply.get("message") or "unknown sidecar error")
+                traceback_text = str(reply.get("traceback") or "").strip()
+                logger.error(
+                    "[%s] sidecar %s error: %s%s",
+                    self.id,
+                    stage,
+                    message,
+                    f"\n{traceback_text[:20_000]}" if traceback_text else "",
+                )
                 raise RuntimeError(
-                    f"{self.id} sidecar error: {reply.get('message')!r}"
+                    f"{self.id} sidecar {stage} error: {message}"
                 )
             if reply.get("op") != "audio":
                 raise RuntimeError(
@@ -777,49 +968,127 @@ class SubprocessBackend(TTSBackend):
         return msg
 
     def _recv_with_timeout(self, timeout_s: float) -> Optional[dict]:
-        """Recv that aborts if the sidecar goes silent.
+        """Read one frame, finishing timeout cleanup before the caller can retry.
 
-        Implemented by polling the proc for liveness with a deadline. We
-        don't block on a `select` of the pipe because Windows can't select
-        on subprocess pipes — keeping the implementation cross-platform
-        means a simpler polling loop here.
+        A watchdog closes the pipe on timeout; Windows cannot select on pipes.
+        EOF alone does not prove the owned process/supervisor has exited.
         """
         # On Unix we could use selectors; on Windows the pipe is not
         # selectable. Use a watchdog thread that kills the sidecar on
         # timeout — that triggers EOF on stdout, so _recv returns None
         # and the caller raises.
-        watchdog = threading.Timer(timeout_s, self._timeout_kill)
-        watchdog.daemon = True
+        proc = self._proc
+        fired = threading.Event()
+
+        def _on_timeout() -> None:
+            fired.set()
+            self._timeout_kill(proc)
+
+        from services.inference_cancellation import current_cancellation
+        cancellation = current_cancellation()
+        stop_watchdog = threading.Event()
+
+        def _watch() -> None:
+            deadline = time.monotonic() + timeout_s
+            while not stop_watchdog.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or (cancellation and cancellation.cancelled.is_set()):
+                    _on_timeout()  # captured process only; never a later retry
+                    return
+                stop_watchdog.wait(min(remaining, 0.05))
+
+        if cancellation is None:
+            watchdog = threading.Timer(timeout_s, _on_timeout)
+            watchdog.daemon = True
+        else:
+            watchdog = threading.Thread(target=_watch, daemon=True)
         watchdog.start()
         try:
             return self._recv()
         finally:
-            watchdog.cancel()
+            stop_watchdog.set()
+            if cancellation is None:
+                watchdog.cancel()
+            # cancel() cannot stop an already-running callback. Finish its
+            # bounded reap before another receive or generation starts.
+            watchdog.join()
+            # EOF reads the same after a deadline kill and after a crash;
+            # this is what tells the two apart (#2026).
+            self._last_recv_timed_out = fired.is_set()
             self._touch()  # any reply (or attempt) counts as recent activity
 
-    def _timeout_kill(self) -> None:
-        proc = self._proc
+    def _timeout_kill(self, proc: Optional[subprocess.Popen]) -> None:
+        """Kill only the child this receive captured, then reap its owner."""
+        if proc is None:
+            return
+        logger.error("[%s] sidecar exceeded recv timeout; killing", self.id)
+        try:
+            proc.kill()
+        except Exception:
+            # A raced exit can make kill fail, but its owner still needs reaping.
+            pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            # Do not discard a possibly live owner, or replace a newer _proc.
+            with self._timeout_quarantine_lock:
+                if not any(item is proc for item in self._timeout_quarantine):
+                    self._timeout_quarantine.append(proc)
+        else:
+            with self._timeout_quarantine_lock:
+                self._timeout_quarantine = [
+                    item for item in self._timeout_quarantine if item is not proc
+                ]
+
+    def _reap_unusable_process(self, proc: Optional[subprocess.Popen]) -> None:
+        """Synchronously retire a sidecar whose protocol pipe is unusable."""
         if proc is None:
             return
         try:
-            logger.error(
-                "[%s] sidecar exceeded recv timeout; killing",
-                self.id,
-            )
-            proc.kill()
+            proc.wait(timeout=0.25)
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:
+                with self._timeout_quarantine_lock:
+                    if not any(item is proc for item in self._timeout_quarantine):
+                        self._timeout_quarantine.append(proc)
+                return
+        with self._timeout_quarantine_lock:
+            self._timeout_quarantine = [
+                item for item in self._timeout_quarantine if item is not proc
+            ]
+
+    def _retry_timeout_cleanup(self) -> bool:
+        """Retry bounded cleanup, retaining every owner that could still be live."""
+        with self._timeout_quarantine_lock:
+            pending = tuple(self._timeout_quarantine)
+        for proc in pending:
+            self._timeout_kill(proc)
+        with self._timeout_quarantine_lock:
+            return not self._timeout_quarantine
 
     # ── stderr drain ───────────────────────────────────────────────────────
 
-    def _drain_stderr(self) -> None:
+    def _drain_stderr(
+        self,
+        proc: Optional[subprocess.Popen] = None,
+        tail: Optional[collections.deque] = None,
+    ) -> None:
         """Pump sidecar stderr lines into the parent logger.
 
         Prefixes each line with `[<engine_id>]`. The HFTokenRedactor filter
         installed at the root logger in Phase 1 redacts any token bytes
         that slip through. See T-02-03.
         """
-        proc = self._proc
+        # Bound at spawn: a drain thread that starts late must still read
+        # its own process, never a replacement published since (#2026).
+        if proc is None:
+            proc = self._proc
         if proc is None or proc.stderr is None:
             return
         try:
@@ -830,6 +1099,8 @@ class SubprocessBackend(TTSBackend):
                     line = repr(raw)
                 if line:
                     logger.info("[%s] %s", self.id, line)
+                    if tail is not None:
+                        tail.append(line)
         except Exception as exc:
             logger.debug("[%s] stderr drain ended: %s", self.id, exc)
 

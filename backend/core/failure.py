@@ -53,6 +53,7 @@ _REDACTED_VALUE = "***REDACTED***"
 # taxonomy; the docs URL itself stays owned by error_docs_map.
 _HINTS: dict[str, str] = {
     "GPU_OOM": "Close other GPU-heavy apps or unload models, then retry. You can also choose CPU in Settings → Performance & Device or select a smaller TTS engine.",
+    "GPU_ARCH_UNSUPPORTED": "This PyTorch build does not support your GPU. Choose CPU in Settings → Performance & Device, or install a compatible PyTorch build.",
     "WORKER_AT_CAPACITY": "Wait for a running job on that worker to finish, or choose another available worker and retry.",
     "MODEL_NOT_INSTALLED": "Install or enable this engine on the worker machine, then refresh its capabilities and retry.",
     "MODEL_NOT_DOWNLOADED": "Open Models, install this model on the selected worker, then retry when the download completes.",
@@ -85,6 +86,8 @@ _HINTS: dict[str, str] = {
     "GATEKEEPER_QUARANTINE": "Clear the macOS quarantine flag (xattr -cr the app), then reopen.",
     "APPIMAGE_WEBKIT_WHITESCREEN": "Launch with WEBKIT_DISABLE_DMABUF_RENDERER=1 set.",
     "HF_AUTH_FAILED": "Set a valid HF_TOKEN in Settings → Hugging Face and retry.",
+    "DIARIZATION_MODEL_MISSING": "Install or repair the selected diarisation model in Settings > Models > Diarisation, then retry transcription.",
+    "DIARIZATION_LOAD_FAILED": "Open Settings > Logs > Backend for the model load error, then retry transcription after correcting it.",
     "PYANNOTE_LICENSE_REQUIRED": "Accept the pyannote model licenses on Hugging Face, then retry.",
     "POCKETTTS_GATED_WEIGHTS": "PocketTTS weights are gated on HuggingFace. Accept the access agreement at huggingface.co/kyutai/pocket-tts, then set HF_TOKEN in Settings → Hugging Face and retry.",
     "COMPUTE_TYPE_UNSUPPORTED": "Your GPU doesn't support float16 — VoiceStudio retried on int8. If transcription still fails, set OMNIVOICE/ASR_COMPUTE_TYPE=int8 or use CPU.",
@@ -94,9 +97,12 @@ _HINTS: dict[str, str] = {
     # fail with "file not found" for exactly the users most likely to need it
     # (greptile on #1377). tests/test_failure_classify.py pins these literals
     # to the constraint file so they cannot drift when the pins bump.
-    "TRANSFORMERS_IMPORT": "Your transformers install is incomplete, or a package it loads models through (torchaudio, torchvision) is missing or mismatched with your torch — a torch/torchvision version mismatch fails with exactly this wording. Reinstall them together at the pinned versions (`uv pip install --python .venv --reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 transformers` in the project folder), then restart the backend. If only transcription is affected, switching ASR to faster-whisper (Model Catalogue → Models) also works around it.",
+    "TRANSFORMERS_IMPORT": "Your transformers install is incomplete, or a package it loads models through (torchaudio, torchvision) is missing or mismatched with your torch — a torch/torchvision version mismatch fails with exactly this wording. Reinstall them together at the pinned versions (`uv pip install --python .venv --reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 transformers` in the project folder), then restart the backend. If only transcription is affected, switching ASR to faster-whisper (Use on its row in Model Catalogue) also works around it.",
     "WINDOWS_APP_CONTROL_BLOCKED": "Windows refused to load a file VoiceStudio needs — an Application Control policy (Smart App Control, WDAC, or AppLocker) blocked it. On a personal PC: Windows Security → App & browser control → Smart App Control → Off (Windows only lets you turn it off once — re-enabling requires a Windows reset), then restart VoiceStudio. On a managed/work PC, ask IT to allow the VoiceStudio install folder.",
     "WINDOWS_PAGING_FILE_TOO_SMALL": "Windows ran out of virtual memory while mapping the model into memory — its paging file is smaller than the model needs. This is not the same as your RAM being full, and closing other apps usually won't fix it: Windows has to be allowed to back the mapping. Set a bigger paging file — Settings → System → About → Advanced system settings → Performance → Settings → Advanced → Virtual memory → Change: untick \"Automatically manage\", pick your system drive, choose \"Custom size\" and set both Initial and Maximum to at least 32768 MB (more than the model's size), then OK and restart Windows. A smaller/quantized engine (OmniVoice GGUF, Supertonic-3) also avoids the large mapping entirely.",
+    "WINDOWS_UNTRUSTED_MOUNT": "Windows refused to walk a folder on the way to this file because the path crosses a mount point it does not trust (WinError 448). That is a Windows rule about the VOLUME, not about VoiceStudio or the file itself — it turns up on Dev Drives, on mounted VHD/ReFS volumes, and on junctions pointing into another user profile, so retrying the same link cannot help. Point VoiceStudio at a folder on an ordinary local drive instead: Settings → Storage → data directory, or the download/output folder named in the message. If that folder has to stay where it is, trust the volume with `fsutil devdrv trust <drive>:` from an elevated prompt and restart.",
+    "INPUT_TOO_SHORT": "The input was too short for this engine to process — its first convolution needs more frames than the text (or the reference clip) produced. This is a hard limit of the model, not a transient failure, so retrying the same input will fail the same way. Give it a few more words, or a longer reference clip: a short phrase rather than one or two characters, and about a second of speech rather than a fragment.",
+    "CLONE_REFERENCE_MISSING": "This engine was asked to clone a voice but got no reference audio to clone FROM, and the model folder carries no built-in voice either. Pick a voice profile that has a saved reference clip, or record/upload a few seconds of clean speech as the reference, then generate again. A designed voice with no saved reference cannot be cloned from — synthesize with it directly instead.",
     "MEDIA_TOOL_MISSING": "VoiceStudio's media engine (ffmpeg/ffprobe) wasn't on the system path when a component went looking for it. Open Settings → Audio tools and use Download/Repair to fetch the bundled copy, then retry — a restart picks it up for everything. If you'd rather use a system install, install ffmpeg (macOS: `brew install ffmpeg`; Windows: `winget install Gyan.FFmpeg`; Linux: your package manager) and restart VoiceStudio, or point FFMPEG_PATH / OMNIVOICE_FFPROBE_PATH at the binaries in Settings.",
     "AUDIO_IO_FAILED": "An audio file couldn't be read or written at the OS level. Check the drive isn't full, that the output and temp folders exist and are writable, and that antivirus or OneDrive isn't locking them (add a VoiceStudio exclusion if you use one).",
     "VIDEO_DOWNLOAD_OS_ERROR": "The OS refused a file operation while saving the downloaded video — this is a disk/folder problem, not a network one, so retrying the same link won't help. The download is written to a job folder under your VoiceStudio data directory (Settings → Storage shows the path): check that drive isn't full, that the folder exists and is writable, and that antivirus or a cloud-sync client (OneDrive, Dropbox) isn't locking it — add a VoiceStudio exclusion if you use one. If your data directory sits on a synced or network drive, move it to a local one.",
@@ -104,6 +110,9 @@ _HINTS: dict[str, str] = {
     "SOCKS_PROXY_SUPPORT_MISSING": "A SOCKS proxy is configured in your environment (ALL_PROXY/HTTPS_PROXY=socks5://…) and the backend's HTTP client is missing SOCKS support. Newer VoiceStudio builds ship SOCKS support (the socksio package) — update the app. If you still see this, unset ALL_PROXY/HTTPS_PROXY for VoiceStudio, or run `uv pip install 'httpx[socks]'` in the backend venv, then restart.",
     "SSL_HANDSHAKE_FAILURE": "A corporate or antivirus proxy is intercepting HTTPS traffic and re-signing certificates with its own CA — your OS trusts that CA, but Python's bundled certifi CA list doesn't, so the TLS handshake fails even though the connection reached the server. Newer VoiceStudio builds trust the OS certificate store at startup (the truststore package), which should already fix this — update the app and retry. If you still see this, add an HTTPS-scanning exclusion for VoiceStudio/Python in your antivirus, or ask IT for the proxy's CA bundle and set SSL_CERT_FILE to it, then restart.",
     "UNSUPPORTED_VIDEO_URL": "This link isn't a directly downloadable video. Paste a direct video page (e.g. a youtube.com/watch?v=… or douyin.com/video/<id> link), not a share/profile/feed link — or download the file and drop it in directly.",
+    # #2034: yt-dlp's own advice names CLI flags (--cookies-from-browser)
+    # that a VoiceStudio user has no way to pass.
+    "VIDEO_DOWNLOAD_BOT_CHECK": "YouTube refused this download until it can confirm a signed-in person is asking (its “Sign in to confirm you’re not a bot” check), so retrying the same link won’t help. Sign in to YouTube in your browser, export its cookies as a Netscape cookies.txt file (a cookies.txt browser extension does this), and attach it in Dub with “Choose a cookies.txt export” before importing the link again. The desktop app accepts cookie exports; a browser connection needs HTTPS. Or download the video yourself and upload the file.",
     "VIDEO_DRM_PROTECTED": "The video host only offered VoiceStudio a DRM-protected copy, which can't be downloaded. This is often not a property of the video itself — the host serves a different format set to different clients, and VoiceStudio already retried through every client it has. Try the link again in a minute, or download the video with a browser extension / the host's own download button and drop the file into Dubbing directly.",
     # #1301: distinct from SSL_HANDSHAKE_FAILURE. The handshake did not fail on
     # trust — the connection was CUT while TLS was in progress, so the certifi /
@@ -118,7 +127,7 @@ _HINTS: dict[str, str] = {
     # told the reporter to reinstall transformers — advice that cannot work,
     # because nothing is wrong with their install. Checked first so the cause
     # wins over the symptom.
-    "MODEL_DOWNLOAD_INTERRUPTED": "A model download was cut off mid-request, and the component it was fetching then failed to load. Nothing is wrong with your install — reinstalling won't help, and the partial download is resumed rather than restarted. Just retry. If it keeps happening, check your connection (and any VPN, proxy or HF mirror setting); if only transcription is affected, switching ASR to faster-whisper in Model Catalogue → Models avoids the pipeline that downloads this component.",
+    "MODEL_DOWNLOAD_INTERRUPTED": "A model download was cut off mid-request, and the component it was fetching then failed to load. Nothing is wrong with your install — reinstalling won't help, and the partial download is resumed rather than restarted. Just retry. If it keeps happening, check your connection (and any VPN, proxy or HF mirror setting); if only transcription is affected, switching ASR to faster-whisper in Model Catalogue avoids the pipeline that downloads this component.",
     "BROKEN_VENV": "The Python backend environment was moved or damaged. VoiceStudio rebuilds it automatically on the next launch; if it keeps failing, use Clean & Retry on the setup screen.",
     "MODEL_CACHE_CORRUPT": "A model file is missing or damaged — a download that stopped part-way, a broken link to downloaded data, or a file changed on disk after it arrived (interrupted renames and antivirus interference both cause this). VoiceStudio repairs it automatically and retries the load once, re-downloading the damaged file where a resume would not have replaced it. If the error persists, quit VoiceStudio, delete the model's models--<org>--<name> folder inside the Hugging Face cache, and restart — the model re-downloads automatically.",
     # HF_MIRROR_UNREACHABLE has a DYNAMIC hint (it names the configured mirror)
@@ -294,6 +303,24 @@ _CONTEXT_FREE_HINT_CLASSES = frozenset({
     # Device allocator signatures are specific enough to attach the shared
     # recovery without exposing CUDA's process table or filesystem paths.
     "GPU_OOM",
+    # #2177: CUDA's own "no kernel image is available for execution" — a driver
+    # sentence no other failure produces, and the one class a streaming render
+    # on an unsupported card hits every single time. The non-streaming path has
+    # named this since #756; the streaming frame could only answer with the
+    # floor message, so the report arrived as a bare RuntimeError.
+    "GPU_ARCH_UNSUPPORTED",
+    # #1227's trigger is the numeric WinError (4551/1260), locale-independent
+    # and unmistakable — the same reasoning that already admits
+    # WINDOWS_UNTRUSTED_MOUNT (448) and WINDOWS_PAGING_FILE_TOO_SMALL (1455).
+    # Left out when those two were added, so a blocked load reached a streaming
+    # render with no way to learn an Application Control policy caused it.
+    "WINDOWS_APP_CONTROL_BLOCKED",
+    # Matched on the library name or ``audio_io.AUDIO_WRITE_FAILED_MARKER`` — a
+    # marker chosen over generic wording precisely so an unrelated open cannot
+    # claim the audio remedy. The desktop app already routes this topic to
+    # Settings → Storage, a recovery that could never fire while the hint was
+    # dropped before reaching the client.
+    "AUDIO_IO_FAILED",
     "SOCKS_PROXY_SUPPORT_MISSING",
     "SSL_HANDSHAKE_FAILURE",
     # Its trigger is an exact OpenSSL string, so it cannot be confused with
@@ -308,7 +335,44 @@ _CONTEXT_FREE_HINT_CLASSES = frozenset({
     # a Windows virtual-memory setting rather than a connectivity problem, and
     # the detailed hint we already had for it never reached them.
     "WINDOWS_PAGING_FILE_TOO_SMALL",
+    # #1957: triggered by WinError 448 or the literal "untrusted mount
+    # point" — both unmistakable, and it reaches the user as a bare
+    # download failure with only the OS sentence attached.
+    "WINDOWS_UNTRUSTED_MOUNT",
+    # #1826: torch's own conv wording, which nothing else produces, and it
+    # reaches the user through the generic 500.
+    "INPUT_TOO_SHORT",
+    # #1879: matched on wording no other failure produces, and it reaches the
+    # user as a bare 400 carrying only the library sentence.
+    "CLONE_REFERENCE_MISSING",
+    # Its trigger is a VoiceStudio-authored sentence — "the TTS model cache
+    # for … is incomplete" plus "could not be auto-repaired" / "weights
+    # missing" — so it cannot be produced by an unrelated library. The 500
+    # handler is the surface a corrupt cache actually reaches, and dropping
+    # its hint there would leave the user with no way to know a redownload
+    # is the fix.
+    "MODEL_CACHE_CORRUPT",
 })
+
+
+#: Classes that cannot succeed on a retry of the same request. The failure is in
+#: the build, the device selection or an OS policy — none of which a second
+#: render changes — so the stream frame marks them terminal rather than
+#: inviting the "try again" the floor message ends with. #2177's reporter ran
+#: the same generation twice, ninety seconds apart, to the same result.
+#:
+#: `terminal` also stops the client re-rendering the whole text on the classic
+#: path (``shouldFallbackToClassic``), which for these classes would fail
+#: identically after paying for the render twice.
+_TERMINAL_FAILURE_CLASSES = frozenset({
+    "GPU_ARCH_UNSUPPORTED",
+    "WINDOWS_APP_CONTROL_BLOCKED",
+})
+
+
+def is_terminal_failure_topic(topic: str | None) -> bool:
+    """Whether repeating the same render cannot repair the diagnosed cause."""
+    return topic in _TERMINAL_FAILURE_CLASSES
 
 
 def append_hint(text: str) -> str:
@@ -368,6 +432,15 @@ def classify(reason: str) -> str:
     low = (reason or "").lower()
     if is_gpu_oom(low):
         return "GPU_OOM"
+    # #2177: the GPU's compute capability isn't in this torch build's arch list,
+    # so CUDA refuses to launch kernels. Checked after the OOM branch so real
+    # memory pressure is never relabelled, and matched on CUDA's own sentence —
+    # nothing else produces it, which is what makes the hint safe to attach on
+    # the context-free surfaces. ``generation.py`` already re-raises this class
+    # with the same remedy; without a topic the streaming frame could only show
+    # "Generation failed. Check the selected engine and try again."
+    if "no kernel image is available" in low:
+        return "GPU_ARCH_UNSUPPORTED"
     if "pkg_resources" in low:
         return "PKG_RESOURCES_MISSING"
     if "quarantine" in low or "is damaged" in low or "gatekeeper" in low:
@@ -381,7 +454,22 @@ def classify(reason: str) -> str:
         or "access conditions" in low
     ) and ("pocket" in low or "kyutai" in low):
         return "POCKETTTS_GATED_WEIGHTS"
-    if "pyannote" in low or ("gated" in low and "model" in low) or "accept the" in low:
+    diarisation = any(marker in low for marker in (
+        "pyannote", "diarization", "diarisation", "sortformer",
+    ))
+    access_failure = any(marker in low for marker in (
+        "gated", "unauthorized", "forbidden", "401", "403",
+        "accept the", "license", "user conditions",
+    ))
+    if diarisation and not access_failure:
+        if any(marker in low for marker in (
+            "files are missing", "files are missing or incomplete",
+            "filenotfounderror", "localentrynotfounderror", "model is missing",
+        )):
+            return "DIARIZATION_MODEL_MISSING"
+        if any(marker in low for marker in ("failed to load", "load failed", "runtime failed")):
+            return "DIARIZATION_LOAD_FAILED"
+    if (diarisation and access_failure) or ("gated" in low and "model" in low) or "accept the" in low:
         return "PYANNOTE_LICENSE_REQUIRED"
     # ASR robustness (#551 / #549): name the class so the no-segments toast is
     # actionable. Place before the generic returns so a compute-type/transformers
@@ -549,6 +637,11 @@ def classify(reason: str) -> str:
     # download path now escalates the client the way it does for a 403. If
     # every client still says DRM, the video genuinely can't be fetched and the
     # user needs to hear that rather than retry a fourth time.
+    # #2034: YouTube's anti-automation wall. Not transient and not a
+    # player-client format set, so it must reach neither the network retry
+    # nor the 403 client escalation; the remedy is signed-in cookies.
+    if "not a bot" in low and ("sign in" in low or "cookies" in low):
+        return "VIDEO_DOWNLOAD_BOT_CHECK"
     if "drm protected" in low or "drm-protected" in low:
         return "VIDEO_DRM_PROTECTED"
     if (
@@ -569,6 +662,34 @@ def classify(reason: str) -> str:
         or "application control policy" in low
     ):
         return "WINDOWS_APP_CONTROL_BLOCKED"
+    # #1957: the path to a download or output file crosses a mount point
+    # Windows will not traverse (Dev Drive, mounted VHD/ReFS, a junction into
+    # another profile). Matched on the numeric code first because the OS
+    # translates the sentence, with the English phrase as a fallback.
+    if "[winerror 448]" in low or "untrusted mount point" in low:
+        return "WINDOWS_UNTRUSTED_MOUNT"
+    # #1826: a degenerate-length input reaches a conv layer whose kernel is
+    # wider than the tensor, and torch says so in its own terms — "Calculated
+    # padded input size per channel: (1). Kernel size: (2). Kernel size can't
+    # be greater than actual input size". That arrived doubly wrapped in
+    # "Underlying error:" and told the user nothing they could act on, when
+    # the fix is simply "type more than one character".
+    if "kernel size can't be greater than actual input size" in low or (
+        "calculated padded input size per channel" in low
+    ):
+        return "INPUT_TOO_SHORT"
+    # #1879: mlx-audio (and the Chatterbox-family models under it) raise a
+    # bare ValueError naming their own parameters — "No conditionals
+    # available. Either provide audio_prompt/audio_prompt_sr ... or ensure
+    # conds.safetensors is in the model directory." The generate route passed
+    # that straight through as the 400 detail, so the user was told to supply
+    # an argument they have no way to name and to check for a file they have
+    # never heard of. What actually happened is "you asked to clone without a
+    # reference clip".
+    if "no conditionals available" in low or (
+        "audio_prompt" in low and "conds.safetensors" in low
+    ):
+        return "CLONE_REFERENCE_MISSING"
     # #1221: libsndfile failed an OS-level audio read/write. Its own wording is
     # a bare "System error.", so match the library name — audio_io already
     # prefixes the target path and free space onto the write-path failures.

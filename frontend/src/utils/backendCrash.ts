@@ -1,3 +1,5 @@
+import { abortableDelay } from './abortableDelay.ts';
+import { deploymentMode, type DeploymentMode } from './deploymentMode.ts';
 /**
  * backendCrash — frontend bridge to the desktop shell's crash forensics
  * (#941, src-tauri/src/crash.rs).
@@ -189,6 +191,55 @@ export async function getUnacknowledgedBackendCrash(): Promise<BackendCrashMarke
   return marker && !marker.acknowledged ? marker : null;
 }
 
+/** Wait, briefly, for the shell to record a crash marker.
+ *
+ * #1119: the desktop shell learns the backend died from a ~2 s POLL — it has
+ * to notice the child exit and write the marker. Asking for that marker ONCE,
+ * at the instant a request fails, races that poll and loses: we find nothing
+ * and conclude "no crash". That conclusion then gets stated as fact to the
+ * user, which is how #1802/#1805 came to read "it most likely crashed or was
+ * killed mid-request" on a backend that had left no evidence of dying at all.
+ *
+ * Outside the Tauri shell there is no death watcher to wait for — the
+ * run-sentinel record only appears after the backend RESTARTS — so one
+ * immediate ask is all the information there is, and a browser/Docker user is
+ * never stalled to learn nothing more.
+ *
+ * `getCrash` and `sleep` are injectable seams so the branch logic is
+ * unit-testable without a shell or real time.
+ */
+export async function awaitBackendCrashMarker(
+  getCrash: () => Promise<BackendCrashMarker | null> = getUnacknowledgedBackendCrash,
+  opts: {
+    waitMs?: number;
+    intervalMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    signal?: AbortSignal | null;
+  } = {},
+): Promise<{ crash: BackendCrashMarker | null; unavailable: boolean }> {
+  const waitMs = opts.waitMs ?? 8_000;
+  const intervalMs = opts.intervalMs ?? 1_000;
+  const sleep = opts.sleep ?? ((ms: number) => abortableDelay(ms, opts.signal));
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    opts.signal?.throwIfAborted();
+    let crash: BackendCrashMarker | null = null;
+    try {
+      crash = await getCrash();
+    } catch {
+      opts.signal?.throwIfAborted();
+      // Forensics unavailable — "no marker" would be a lie, so say so and let
+      // the caller keep its own wording rather than assert anything.
+      return { crash: null, unavailable: true };
+    }
+    opts.signal?.throwIfAborted();
+    if (crash) return { crash, unavailable: false };
+    if (!inTauri()) return { crash: null, unavailable: false };
+    if (Date.now() >= deadline) return { crash: null, unavailable: false };
+    await sleep(intervalMs);
+  }
+}
+
 /** Mark the newest crash as seen (the marker itself is retained for reports). */
 export async function acknowledgeBackendCrash(): Promise<void> {
   if (!inTauri()) {
@@ -337,7 +388,7 @@ export function crashCauseHint(
       defaultValue:
         'It was force-killed (signal 9), which usually means the operating system ran out of ' +
         'memory (RAM) and stopped it. Close memory-heavy apps, pick a smaller ASR model in ' +
-        'Model Catalogue → Models, or flush the TTS model before transcribing.',
+        'the engine Weights list in Model Catalogue, or flush the TTS model before transcribing.',
     });
   }
   // Ordered deliberately, between the two explicit-fact branches.
@@ -376,8 +427,8 @@ export function crashCauseHint(
         'It crashed inside the compute stack rather than running out of memory — that points ' +
         'at a GPU driver that does not match the bundled CUDA runtime, or a model file that ' +
         'downloaded incompletely. Update your GPU driver, then re-download the model from ' +
-        'Model Catalogue → Models (it repairs a partial download in place). If it keeps happening, ' +
-        'switch to a crash-isolated engine in Model Catalogue → Engines — "VoiceStudio (subprocess)" ' +
+        'the engine Weights list in Model Catalogue (it repairs a partial download in place). If it keeps happening, ' +
+        'switch to a crash-isolated engine in Model Catalogue — "VoiceStudio (subprocess)" ' +
         'for synthesis, "Faster-Whisper (crash-isolated subprocess)" for transcription. Those ' +
         'run the model in a separate process, so a crash like this takes down that process ' +
         'instead of the whole backend.',
@@ -387,7 +438,7 @@ export function crashCauseHint(
     defaultValue:
       'On smaller GPUs the usual cause is running out of VRAM while loading the ASR model on ' +
       'top of the TTS model: flush the TTS model first, or pick a smaller ASR model in ' +
-      'Model Catalogue → Models.',
+      'the engine Weights list in Model Catalogue.',
   });
 }
 
@@ -449,6 +500,7 @@ export async function streamDropError(
     intervalMs?: number;
     sleep?: (ms: number) => Promise<void>;
     probeAlive?: () => Promise<boolean>;
+    mode?: DeploymentMode;
   } = {},
 ): Promise<Error> {
   // #1119: the shell learns the backend died from a ~2 s POLL — it must notice
@@ -458,27 +510,8 @@ export async function streamDropError(
   // the backend had in fact just died. That's the same race #1102 fixed for
   // apiFetch, which this path never got. Give the shell time to catch up before
   // believing there was no crash.
-  const waitMs = opts.waitMs ?? 8_000;
-  const intervalMs = opts.intervalMs ?? 1_000;
-  const sleep = opts.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-
-  let crash: BackendCrashMarker | null = null;
-  const deadline = Date.now() + waitMs;
-  for (;;) {
-    try {
-      crash = await getCrash();
-    } catch {
-      return new Error(fallbackMessage); // forensics unavailable — don't mask the caller
-    }
-    if (crash) break;
-    // Outside the Tauri shell there is no death watcher to wait for — the
-    // run-sentinel record (#1164) only appears after the backend RESTARTS,
-    // so one immediate ask is all the information there is; don't stall a
-    // browser/Docker user for 8 s to learn nothing more.
-    if (!inTauri()) break;
-    if (Date.now() >= deadline) break;
-    await sleep(intervalMs);
-  }
+  const { crash, unavailable } = await awaitBackendCrashMarker(getCrash, opts);
+  if (unavailable) return new Error(fallbackMessage); // don't mask the caller
   if (!crash) {
     // No crash marker — but "no marker" is not "the backend died and we missed
     // it". Outside the Tauri shell there is no death watcher at all, so this
@@ -495,6 +528,24 @@ export async function streamDropError(
     // out the SSE connection.
     const probeAlive = opts.probeAlive ?? _probeBackendAlive;
     if (await probeAlive()) {
+      // #2108: the proxy diagnosis below is only possible where a proxy can
+      // exist. The desktop webview and `bun run dev` talk to 127.0.0.1
+      // directly; a drop there is the local connection dying under a step
+      // that went byte-silent for minutes — and the backend kept going (the
+      // reporter's transcript was saved 20 min after the UI gave up). Say
+      // that, and where to look, instead of handing out nginx advice.
+      if ((opts.mode ?? deploymentMode()) !== 'server') {
+        return new Error(
+          i18next.t('errors.stream_cut_backend_alive_local', {
+            defaultValue:
+              'The stream ended early, but the backend is still running — so it did not crash. ' +
+              'The app lost its connection to the backend mid-job; that happens when a long step ' +
+              'goes quiet for minutes, and the backend usually finishes the job anyway. Give it a ' +
+              'few minutes and reopen the job from its history, or check the backend log ' +
+              '(Settings → Logs → Backend) for what it was doing.',
+          }),
+        );
+      }
       return new Error(
         i18next.t('errors.stream_cut_backend_alive', {
           defaultValue:

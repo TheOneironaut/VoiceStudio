@@ -1,5 +1,23 @@
 # VoiceStudio — Install on macOS
 
+## Electron desktop (current)
+
+From the repository root, install Bun and uv, then run:
+
+```sh
+bun install
+bun run setup:api  # prepare Python dependencies before starting Electron
+bun run dev
+```
+
+Use `bun run desktop-prod` to build and launch Electron, or `bun run dist`
+to create local installers without publishing. The app manages its backend.
+See [Electron setup](../../electron/README.md) and [migration notes](../electron-migration.md).
+
+## Legacy Tauri installation and troubleshooting
+
+The instructions below apply to the sunset Tauri app and existing Tauri installers.
+
 This page is self-contained: follow it top to bottom and you'll end up with a
 working VoiceStudio install on macOS (Apple Silicon).
 
@@ -36,7 +54,7 @@ Everything above, plus the toolchain:
 - **Python 3.11+** — `brew install python@3.11` (or use `pyenv` / the system Python if you already have ≥3.11).
 - **Bun** — `curl -fsSL https://bun.sh/install | bash`.
 - **Rust / Cargo** — `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` or `brew install rust`.
-  If you use rustup, reopen the terminal or source `"$HOME/.cargo/env"` before running `bun run desktop-prod`.
+  If you use rustup, reopen the terminal or source `"$HOME/.cargo/env"` before running `bun run tauri:desktop-prod`.
 
 FFmpeg/FFprobe and yt-dlp are **not** prerequisites on any install path: the
 app resolves them itself (a static build ships with the Python environment;
@@ -63,7 +81,7 @@ Or manually:
 git clone https://github.com/debpalash/VoiceStudio.git
 cd VoiceStudio
 bun install
-bun run desktop-prod
+bun run tauri:desktop-prod
 ```
 
 The first launch builds the Tauri shell, creates the Python venv via `uv`,
@@ -157,7 +175,7 @@ without the quarantine step.
 - **Apple Silicon (M-series):** VoiceStudio automatically picks the `mlx-whisper`
   and `mlx-audio` backends where available — these use the Apple Neural Engine
   and Metal Performance Shaders for ~2× the throughput of the CPU path.
-  Installing the **Parakeet TDT v3 (MLX)** model from **Model Catalogue → Models**
+  Installing the **Parakeet TDT v3 (MLX)** model from **Model Catalogue** (ASR tab → the engine's **Weights**)
   additionally makes dictation/capture prefer the `parakeet-mlx` engine
   (25 European languages, word timestamps, ~2 GB unified memory) — it is never
   downloaded without that explicit install, and it is only auto-preferred when
@@ -170,7 +188,7 @@ without the quarantine step.
   works only when pointed at a remote backend (**Settings → Sharing → Remote
   backend**).
 
-The picker in **Model Catalogue → Engines** shows which backend is active.
+The picker in **Model Catalogue** shows which backend is active.
 
 ## Hugging Face token (optional but recommended)
 
@@ -190,3 +208,21 @@ Hit a wall? See [docs/install/troubleshooting.md](troubleshooting.md).
 The in-app error UI (the React error boundary that fires on backend errors)
 includes an **"Open docs for this error"** button — that button deeplinks
 back into this docs tree at the right section for the error class.
+
+### Desktop window chrome
+
+The main window uses native macOS traffic lights with an overlay title bar;
+window sizing, resize limits, and application file-drop behavior match the
+other desktop platforms. The platform configuration repeats the complete window
+list because Tauri replaces arrays when merging it with the shared config.
+The capture widget remains a separate borderless window created at runtime.
+Its window-scoped Tauri capability permits hiding after recording or idle
+reconciliation on every desktop platform.
+
+### Fast process shutdown
+
+A process that exits while shutdown is signalling it can report a macOS
+permission error. VoiceStudio accepts this only after confirming the original
+process exited without being reaped (macOS can take a moment to report that
+exit, so it waits up to a quarter of a second), then still waits for nested
+operations to drain. Live-process permission errors and lost process ownership remain failures.

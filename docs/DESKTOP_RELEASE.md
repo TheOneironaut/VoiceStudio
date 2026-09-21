@@ -1,5 +1,11 @@
 # Desktop release plan — VoiceStudio
 
+> **Historical/manual-only Tauri plan.** Everything below is retained solely to
+> audit or manually reconstruct the final v0.5.3 Tauri release. Its build,
+> signing, and publication instructions are not maintained and must not be used
+> for a current release. Electron is the only maintained desktop app; follow
+> [RELEASING.md](RELEASING.md) for all current build and publication work.
+
 A shippable macOS (and eventually cross-platform) desktop release where the user drags the `.app` to `Applications`, double-clicks once, and does **everything else from the UI** — dependency runtime, model weights, first-run consent, all inside the app.
 
 Stack: Tauri v2 + FastAPI sidecar + PyInstaller. Target: ~500 MB signed + notarized arm64 DMG, with matching Windows `.msi`/`.nsis` later. Large optional payloads (CUDA libs, extra model packs) ship as separate lazy-download tarballs, not in the base DMG.
@@ -69,7 +75,7 @@ We exclude every `nvidia.*` wheel from the Apple Silicon build (saves ~2 GB) and
 
 For us:
 - **Base DMG ships MPS + MLX path only.** Excludes `nvidia.*`, `triton`, `flash-attn`, anything CUDA-specific in the spec.
-- **Optional pack: VoxCPM2** (requires CUDA). Not installed by default. Model Catalogue → Engines → "Install VoxCPM2" triggers download from our `voxcpm2-cu128-v1.tar.gz` release asset.
+- **Optional pack: VoxCPM2** (requires CUDA). Not installed by default. Model Catalogue → "Install VoxCPM2" triggers download from our `voxcpm2-cu128-v1.tar.gz` release asset.
 - **Optional pack: pyannote** (HF-token gated). Default off. Settings → Speaker diarisation → "Enable" prompts for HF token, downloads + installs.
 - **Optional pack: MOSS-TTS-Nano.** Same pattern.
 

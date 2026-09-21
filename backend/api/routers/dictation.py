@@ -21,7 +21,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
 
 from api.dependencies import require_local
 from api.public_engine_metadata import public_unavailability
@@ -84,6 +84,23 @@ def list_dictation_models():
         "engine_reason": None if available else public_unavailability(reason),
         "default_model_id": sd.DEFAULT_MODEL_ID,
     }
+
+
+@router.get("/dictation/readiness", dependencies=[Depends(require_local)])
+def dictation_readiness(
+    model_id: str | None = None,
+    purpose: Literal["dictation", "transcribe"] = "dictation",
+) -> dict:
+    """Check a selected ASR path without loading or downloading weights."""
+    from services.asr_backend import asr_model_missing_error
+
+    missing = asr_model_missing_error(
+        purpose=purpose,
+        sherpa_model_id=(model_id or _read_prefs()["model_id"])
+        if purpose == "dictation"
+        else None,
+    )
+    return {"ready": missing is None, "missing": missing}
 
 
 @router.get("/dictation/prefs", dependencies=[Depends(require_local)])

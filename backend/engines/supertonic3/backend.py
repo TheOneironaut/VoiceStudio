@@ -35,6 +35,7 @@ Threat model (per Plan 03-01 frontmatter):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 from pathlib import Path
@@ -47,6 +48,15 @@ if TYPE_CHECKING:
     import torch  # noqa: F401
 
 logger = logging.getLogger("omnivoice.supertonic3")
+
+_VENV_ENV_VAR = "OMNIVOICE_SUPERTONIC3_DIR"
+
+
+def _own_venv_python() -> "Path | None":
+    """The venv the one-click installer made for this engine, if any."""
+    from services.sidecar_install import engine_venv_python
+
+    return engine_venv_python(_VENV_ENV_VAR)
 
 
 # Absolute path to the sidecar script ‑‑ same pattern as IndexTTS's
@@ -80,15 +90,28 @@ class Supertonic3Backend(SubprocessBackend):
 
     @classmethod
     def venv_python(cls) -> Path:
-        """Supertonic-3 lives in the main OmniVoice venv ‑‑ no dedicated
-        venv. ``sys.executable`` is the parent interpreter, which is the
-        same Python that ``uv sync --extra supertonic`` populated.
+        """Its own venv when the one-click installer made one. Otherwise the
+        parent interpreter, the same Python ``uv sync --extra supertonic``
+        populated.
         """
-        return Path(sys.executable)
+        return _own_venv_python() or Path(sys.executable)
 
     @classmethod
     def sidecar_script(cls) -> Path:
         return SUPERTONIC3_SIDECAR_SCRIPT
+
+    @property
+    def recv_timeout_s(self) -> float:
+        """Receive timeout in seconds for the Supertonic-3 sidecar process (#2103)."""
+        # Supertonic-3 runs ONNX on CPU; cold load downloads ~400MB and long
+        # synthesis benefits from more headroom than 60s. OMNIVOICE_SUPERTONIC3_RECV_TIMEOUT_S (#2103).
+        try:
+            v = float(os.environ.get("OMNIVOICE_SUPERTONIC3_RECV_TIMEOUT_S", "300"))
+        except (ValueError, TypeError):
+            return 300.0
+        if not math.isfinite(v):
+            return 300.0
+        return max(30.0, v)
 
     # ── availability ───────────────────────────────────────────────────
 
@@ -96,14 +119,16 @@ class Supertonic3Backend(SubprocessBackend):
     def is_available(cls) -> tuple[bool, str]:
         # 1. Optional-dep gate (TTS-02). The ``supertonic`` wheel is only
         #    installed when the user opted in via ``--extra supertonic``.
-        try:
-            import supertonic  # type: ignore[import-not-found]  # noqa: F401
-        except ImportError:
-            return False, (
-                "supertonic package not installed. Enable in "
-                "Model Catalogue → Engines (installs `supertonic` via `uv add --optional "
-                "supertonic supertonic==1.3.1`)."
-            )
+        #    Its own venv (made by the one-click installer, which verified the
+        #    import there) or the app's environment (`uv sync --extra`).
+        if _own_venv_python() is None:
+            try:
+                import supertonic  # type: ignore[import-not-found]  # noqa: F401
+            except ImportError:
+                return False, (
+                    "supertonic package not installed. Install it from "
+                    "Model Catalogue."
+                )
 
         # 2. License acceptance gate (TTS-05). Defence in depth: the
         #    settings_store helper handles the read; we just refuse
@@ -120,7 +145,7 @@ class Supertonic3Backend(SubprocessBackend):
             accepted = False
         if not accepted:
             return False, (
-                "Supertonic-3 license not accepted. Open Model Catalogue → Engines → "
+                "Supertonic-3 license not accepted. Open Model Catalogue → "
                 "Supertonic-3 and click Accept to enable. "
                 "(MIT code license + OpenRAIL-M model license.)"
             )

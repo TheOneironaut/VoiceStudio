@@ -12,7 +12,11 @@ import {
 } from '../utils/streamingTts';
 import { probeAudioDuration } from '../utils/format';
 import { CLONE_MAX_SECONDS, PRESETS } from '../utils/constants';
-import { buildDesignInstruct, designModeProfileId } from '../utils/voiceInstruct';
+import {
+  buildDesignInstruct,
+  designModeProfileId,
+  mergeDescribedAttrs,
+} from '../utils/voiceInstruct';
 import { toast } from 'react-hot-toast';
 import { toastErrorWithReport } from '../utils/errorToast';
 import { modelNotDownloadedPayload, toastModelNotDownloaded } from '../utils/modelNotDownloaded';
@@ -66,6 +70,9 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
   const [pendingTrimFile, setPendingTrimFile] = useState(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationTime, setGenerationTime] = useState(0);
+  // Real 0–100 progress when the active delivery path can measure it.
+  // null means the backend has not supplied a meaningful fraction yet.
+  const [generationProgress, setGenerationProgress] = useState(null);
   const timerRef = useRef(null);
   const textAreaRef = useRef(null);
 
@@ -104,7 +111,12 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
 
   const applyPreset = useCallback(
     (preset) => {
-      useAppStore.getState().setVdStates(preset.attrs);
+      // #1771: run every "replace the whole vdStates" entry point through the
+      // same accent/dialect exclusivity guard the live picker uses — today's
+      // hardcoded PRESETS never set both, but a future one (or a hand-edited
+      // constants.js) shouldn't be able to rebuild the conflict the engine
+      // rejects.
+      useAppStore.getState().setVdStates(mergeDescribedAttrs(preset.attrs));
       if (preset.tags && !text.includes(preset.tags.trim())) insertTag(preset.tags);
     },
     [text, insertTag],
@@ -117,13 +129,11 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
     addBreadcrumb(`generate:start (${defineMethod})`);
     setIsGenerating(true);
     setGenerationTime(0);
+    setGenerationProgress(null);
     const st = Date.now();
     timerRef.current = setInterval(() => {
       const elapsed = ((Date.now() - st) / 1000).toFixed(1);
-      setGenerationTime((prev) => {
-        const suffix = /\(\d+%\)$/.exec(String(prev))?.[0];
-        return suffix ? `${elapsed} ${suffix}` : elapsed;
-      });
+      setGenerationTime(elapsed);
     }, 100);
     let abortTimer = null;
     try {
@@ -161,6 +171,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
             instruct: safeInstruct,
             unsupported,
             duplicates,
+            conflicts,
           } = buildDesignInstruct({}, instruct);
           if (unsupported.length) {
             toast(t('tts_errors.ignored_unsupported', { items: unsupported.join(', ') }), {
@@ -169,6 +180,15 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
           }
           if (duplicates.length) {
             toast(t('tts_errors.ignored_duplicate', { items: duplicates.join(', ') }), {
+              icon: '⚠️',
+            });
+          }
+          // #1771: a Chinese dialect and an English accent typed together
+          // (e.g. into a clone's free-text style field) — the engine rejects
+          // the combination outright, so drop the loser client-side instead of
+          // round-tripping a 400.
+          if (conflicts.length) {
+            toast(t('tts_errors.ignored_conflict', { items: conflicts.join(', ') }), {
               icon: '⚠️',
             });
           }
@@ -187,6 +207,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
           instruct: finalInstruct,
           unsupported,
           duplicates,
+          conflicts,
         } = buildDesignInstruct(vdStates, instruct);
         if (unsupported.length) {
           toast(t('tts_errors.ignored_unsupported', { items: unsupported.join(', ') }), {
@@ -195,6 +216,14 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
         }
         if (duplicates.length) {
           toast(t('tts_errors.ignored_duplicate', { items: duplicates.join(', ') }), {
+            icon: '⚠️',
+          });
+        }
+        // #1771: backstop for a dialect+accent pick that reached here anyway
+        // (the picker and vdStates-restore paths already prevent this) — drop
+        // the loser instead of letting the engine 400 on it.
+        if (conflicts.length) {
+          toast(t('tts_errors.ignored_conflict', { items: conflicts.join(', ') }), {
             icon: '⚠️',
           });
         }
@@ -264,8 +293,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
           }
         }
       };
-      const setProgressPct = (pct) =>
-        setGenerationTime((prev) => `${prev.toString().split(' ')[0]} (${pct}%)`);
+      const setProgressPct = (pct) => setGenerationProgress(pct);
 
       // Streaming preview (feat: streaming-tts-preview): playback starts from
       // the FIRST synthesized chunk while the rest is still rendering, via
@@ -327,6 +355,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
             'Streaming preview failed mid-stream; falling back to the classic generate:',
             err?.message || err,
           );
+          setGenerationProgress(null);
           addBreadcrumb('generate:stream-fallback');
         }
       }
@@ -382,6 +411,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
       if (abortTimer) clearTimeout(abortTimer);
       clearInterval(timerRef.current);
       setIsGenerating(false);
+      setGenerationProgress(null);
     }
   }, [
     text,
@@ -416,6 +446,7 @@ export default function useTTS({ selectedProfile, setSelectedProfile, loadHistor
     setPendingTrimFile,
     isGenerating,
     generationTime,
+    generationProgress,
     textAreaRef,
     ingestRefAudio,
     insertTag,

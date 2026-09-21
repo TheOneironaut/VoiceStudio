@@ -33,6 +33,7 @@ from worker.transport.client import (
     WorkerConfig,
     backoff_delay,
     config_from_token,
+    describe_host,
 )
 from worker.transport.server import (
     PROTOCOL_VERSION,
@@ -43,6 +44,14 @@ from worker.transport.server import (
 )
 
 ENGINE, MODEL, OP = "indextts", "IndexTTS-2", "tts"
+
+
+def test_describe_host_reports_system_memory(monkeypatch):
+    import psutil
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: SimpleNamespace(total=64 * 1024**3))
+
+    assert describe_host()["system_memory_bytes"] == 64 * 1024**3
 
 
 @pytest.fixture
@@ -317,12 +326,19 @@ def test_apple_capability_stays_serial():
 
 
 def test_capability_round_trips():
-    original = {**_capabilities(resident=True)[0], "display_name": "IndexTTS 2"}
+    original = {
+        **_capabilities(resident=True)[0],
+        "display_name": "IndexTTS 2",
+        "backend": "vulkan",
+        "free_memory_bytes": 4 * 1024**3,
+    }
     restored = codec.capability_from_pb(codec.capability_to_pb(original))
     assert restored["engine"] == original["engine"]
     assert restored["resident"] is True
     assert restored["installed"] is True
     assert restored["display_name"] == "IndexTTS 2"
+    assert restored["backend"] == "vulkan"
+    assert restored["free_memory_bytes"] == 4 * 1024**3
 
 
 def test_legacy_capability_without_display_name_still_decodes():
@@ -331,6 +347,51 @@ def test_legacy_capability_without_display_name_still_decodes():
     )
     assert restored["engine"] == ENGINE
     assert restored["display_name"] == ""
+
+
+def test_protocol_v2_capability_without_backend_inherits_worker_backend():
+    """Pre-backend protocol-v2 peers must retain their GPU routing."""
+    restored = codec.capability_from_pb(
+        pb.ModelCapability(
+            engine=ENGINE,
+            model_id=MODEL,
+            operations=[OP],
+            supported=True,
+            installed=True,
+        ),
+        fallback_backend="vulkan",
+    )
+    pool = WorkerPool()
+    record = registry.RemoteWorker(
+        id="legacy-v2",
+        name="legacy-v2",
+        key_id="legacy-key",
+        public_key=b"0" * 32,
+        capabilities=[restored],
+    )
+    session = identity.Session(
+        token="legacy-token",
+        worker_id=record.id,
+        key_id=record.key_id,
+        epoch=1,
+        issued_at=1.0,
+        expires_at=10_000.0,
+    )
+    worker = pool.connect(
+        record, session=session, epoch=1, backend="vulkan", now=1.0
+    )
+
+    assert restored["backend"] == "vulkan"
+    assert worker.execution_device(ENGINE, MODEL, OP) == "vulkan"
+
+
+def test_protocol_v2_cpu_fallback_does_not_inherit_worker_gpu():
+    restored = codec.capability_from_pb(
+        pb.ModelCapability(engine=ENGINE, model_id=MODEL, cpu_fallback=True),
+        fallback_backend="cuda",
+    )
+
+    assert restored["backend"] == "cpu"
 
 
 @pytest.mark.asyncio

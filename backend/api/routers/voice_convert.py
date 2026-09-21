@@ -217,7 +217,7 @@ async def convert_speech(
         # clone-less engine with the actionable switch-engine message (→ 400),
         # and a backend mid-shutdown raises ModelLoadInterruptedByShutdown out
         # of the model load → the global 503 [shutting_down] handler.
-        from services.tts_backend import resolve_generation_backend
+        from services.tts_backend import active_backend_id, resolve_generation_backend
         try:
             backend = await resolve_generation_backend(
                 require_cloning=True, cloning_purpose="voice conversion",
@@ -307,24 +307,43 @@ async def convert_speech(
             GpuPoolBusyError,
             run_on_gpu_pool_guarded,
         )
+        from core.device_caps import detect_host_caps
+        from services.engine_routing import runtime_compute_profile_async
+        compute_profile = await runtime_compute_profile_async(
+            backend, detect_host_caps()
+        )
+        if compute_profile["routing_status"] == "unavailable":
+            raise HTTPException(
+                status_code=400,
+                detail=compute_profile["routing_reason"],
+            )
 
         start_time = time.time()
+        from services.performance_profiles import tts_defaults
+        _profile_defaults = tts_defaults(active_backend_id())
         _render = functools.partial(
             _run_backend_inference,
             backend, text, language, cond["ref_audio_path"], cond["ref_text"],
             cond["instruct"],
             None,        # duration — the model picks; match_duration owns pacing
-            16, 2.0,     # num_step / guidance_scale (the /generate defaults)
+            _profile_defaults.get("num_step", 16), 2.0,
             1.0,         # speed
-            True, True,  # denoise / postprocess_output
+            True, _profile_defaults.get("postprocess_output", True),
             used_seed,
         )
         try:
             audio_tensor = await run_on_gpu_pool_guarded(
                 _render,
                 what="Voice convert",
-                timeout=_generate_timeout_s(text),
-                min_vram_gb=getattr(type(backend), "min_vram_gb", 0.0),
+                timeout=_generate_timeout_s(
+                    text,
+                    engine=backend,
+                    execution_device=compute_profile["effective_device"],
+                    min_vram_gb=compute_profile["min_vram_gb"],
+                    hardware_family=compute_profile.get("runtime_hardware_family"),
+                    vram_gb=compute_profile.get("runtime_vram_gb"),
+                ),
+                min_vram_gb=compute_profile["min_vram_gb"],
             )
         except GpuPoolBusyError as e:
             raise HTTPException(

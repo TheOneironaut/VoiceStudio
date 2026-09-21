@@ -15,6 +15,7 @@ import DubLeftColumn from '../components/dub/DubLeftColumn';
 import DubRightColumn from '../components/dub/DubRightColumn';
 import DubResizableColumns from '../components/dub/DubResizableColumns';
 import DubFooter from '../components/dub/DubFooter';
+import DubTrackSummary from '../components/dub/DubTrackSummary';
 import {
   hasCompleteTranslation,
   multiLangTargets,
@@ -551,7 +552,7 @@ export default function DubTab(props) {
   // previewMode is 'original' or a dubbed language code (multi-language switcher).
   const previewIsDub = previewMode !== 'original' && hasDubbedTrack;
   const videoSrc = previewIsDub
-    ? `${API}/dub/preview-video/${dubJobId}?lang=${encodeURIComponent(previewMode)}&preserve_bg=${preserveBg ? 1 : 0}&v=${dubGenNonce}`
+    ? `${API}/dub/preview-video/${dubJobId}?mix=surgical2&lang=${encodeURIComponent(previewMode)}&preserve_bg=${preserveBg ? 1 : 0}&v=${dubGenNonce}`
     : `${API}/dub/media/${dubJobId}`;
   // The video is the normal transport, but WaveSurfer can fall back to a
   // companion audio element when a WebView decodes the picture without its
@@ -705,6 +706,7 @@ export default function DubTab(props) {
           setLandingAdvOpen={setLandingAdvOpen}
           dubInstruct={dubInstruct}
           setDubInstruct={setDubInstruct}
+          onOpenQueue={() => useAppStore.getState().setMode?.('batch')}
         />
       )}
 
@@ -736,6 +738,17 @@ export default function DubTab(props) {
           />
           <DubResizableColumns resizeLabel={t('logs.drag_resize')}>
             <DubLeftColumn
+              trackControls={
+                <DubTrackSummary
+                  t={t}
+                  dubStep={dubStep}
+                  dubTracks={dubTracks}
+                  incrementalPlan={incrementalPlan}
+                  exportTracks={exportTracks}
+                  setExportTracks={setExportTracks}
+                  dubLangCode={dubLangCode}
+                />
+              }
               hasDubbedTrack={hasDubbedTrack}
               t={t}
               previewMode={previewMode}
@@ -856,6 +869,7 @@ export default function DubTab(props) {
             />
           </DubResizableColumns>
           <DubFooter
+            hideTracks
             t={t}
             dubStep={dubStep}
             dubTracks={dubTracks}

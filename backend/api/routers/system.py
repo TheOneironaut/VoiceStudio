@@ -15,6 +15,8 @@ from api.dependencies import is_loopback, require_admin, require_admin_action
 from fastapi.responses import FileResponse, StreamingResponse
 import torch
 import shutil
+import subprocess
+import shlex
 
 from core.config import OUTPUTS_DIR, DATA_DIR, CRASH_LOG_PATH, LOG_PATH, IDLE_TIMEOUT_SECONDS
 from core.version import APP_VERSION
@@ -38,6 +40,10 @@ logger = logging.getLogger("omnivoice.api")
 # Cache device checks at module load — they don't change at runtime
 _is_mac = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
 _is_cuda = torch.cuda.is_available()
+try:
+    _is_xpu = hasattr(torch, "xpu") and torch.xpu.is_available()
+except Exception:
+    _is_xpu = False
 # Prime psutil's internal CPU counter so the first non-blocking call returns useful data
 psutil.cpu_percent(interval=None)
 
@@ -51,6 +57,14 @@ def _detect_cpu_model() -> str:
                 for line in f:
                     if line.lower().startswith("model name"):
                         return line.split(":", 1)[1].strip()
+        if sys.platform == "win32":
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+            ) as key:
+                return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
         if sys.platform == "darwin":
             import subprocess
             return subprocess.check_output(
@@ -59,6 +73,77 @@ def _detect_cpu_model() -> str:
         return platform.processor() or ""
     except Exception:
         return platform.processor() or ""
+
+
+def _gpu_name_priority(name: str) -> tuple[int, int]:
+    lowered = name.lower()
+    if any(token in lowered for token in ("remote", "virtual", "basic display")):
+        return (-1, len(name))
+    if any(token in lowered for token in ("nvidia", "radeon", "amd", "intel arc")):
+        return (2, len(name))
+    return (1, len(name))
+
+
+def _detect_os_gpu_name() -> str:
+    """Best-effort display-adapter identity when the active torch build is CPU-only."""
+    try:
+        if sys.platform == "win32":
+            executable = shutil.which("powershell.exe") or shutil.which("powershell")
+            if not executable:
+                return ""
+            result = subprocess.run(
+                [
+                    executable,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            return max(names, key=_gpu_name_priority, default="")
+        if sys.platform.startswith("linux"):
+            executable = shutil.which("lspci")
+            if not executable:
+                return ""
+            result = subprocess.run(
+                [executable, "-mm"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+            names = []
+            for line in result.stdout.splitlines():
+                parts = shlex.split(line)
+                if len(parts) >= 4 and parts[1] in {"VGA compatible controller", "3D controller"}:
+                    names.append(" ".join(parts[2:4]))
+            return max(names, key=_gpu_name_priority, default="")
+        if sys.platform == "darwin":
+            executable = shutil.which("system_profiler")
+            if not executable:
+                return ""
+            result = subprocess.run(
+                [executable, "SPDisplaysDataType"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            names = [
+                line.split(":", 1)[1].strip()
+                for line in result.stdout.splitlines()
+                if "Chipset Model:" in line
+            ]
+            return max(names, key=_gpu_name_priority, default="")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    return ""
 
 
 def _detect_gpu() -> tuple[str, float]:
@@ -71,11 +156,15 @@ def _detect_gpu() -> tuple[str, float]:
         if _is_cuda:
             props = torch.cuda.get_device_properties(0)
             return torch.cuda.get_device_name(0), round(props.total_memory / (1024 ** 3), 1)
+        if _is_xpu:
+            props = torch.xpu.get_device_properties(0)
+            total_memory = float(getattr(props, "total_memory", 0.0))
+            return torch.xpu.get_device_name(0), round(total_memory / (1024 ** 3), 1)
         if _is_mac:
             return "Apple Silicon (MPS)", 0.0
     except Exception:
         pass
-    return "", 0.0
+    return _detect_os_gpu_name(), 0.0
 
 
 # Static hardware facts, captured once — /system/info is hit on every
@@ -91,6 +180,37 @@ def _disk_free_gb() -> float:
         return round(shutil.disk_usage(DATA_DIR).free / (1024 ** 3), 1)
     except Exception:
         return 0.0
+
+
+def _nvidia_live_stats() -> tuple[float, float, float] | None:
+    """Return GPU%, used VRAM GiB, total VRAM GiB without an optional Python dependency."""
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        return None
+    try:
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        result = subprocess.run(
+            [
+                executable,
+                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+                "--id=0",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+            creationflags=creationflags,
+        )
+        if result.returncode != 0:
+            return None
+        values = [float(value.strip()) for value in result.stdout.splitlines()[0].split(",")]
+        if len(values) != 3:
+            return None
+        utilization, used_mib, total_mib = values
+        return utilization, used_mib / 1024, total_mib / 1024
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
 
 
 def _ui_port() -> int:
@@ -185,8 +305,8 @@ def loaded_models():
 @router.post("/model/unload/{model_id}")
 async def unload_model(model_id: str):
     """Unload a specific model by id (MM2-04). Delegates to model_lifecycle;
-    an unknown id maps to HTTP 400. ``tts`` | ``diarization`` |
-    ``sidecar:<id>`` | ``sidecars``."""
+    an unknown id maps to HTTP 400. Supports every id returned by
+    ``GET /model/loaded`` plus the aggregate ``sidecars`` id."""
     from services import model_lifecycle
     try:
         return await model_lifecycle.unload(model_id)
@@ -203,15 +323,40 @@ def system_info():
     """
     try:
         _ffmpeg = find_ffmpeg()
+        from services import model_manager as _mm
+        from services import asr_backend as _asr_backend
+        from core import prefs as _prefs_mod
+        _asr_engine = _asr_backend.active_backend_id()
+        _asr_model = (
+            _asr_backend._offline_asr_repo(_asr_engine)
+            or os.environ.get("ASR_MODEL")
+            or _asr_engine
+        )
+        _translation_provider = (
+            os.environ.get("TRANSLATE_PROVIDER")
+            or _prefs_mod.get("translation_backend", "argos")
+        )
         return {
             "app_version": APP_VERSION,
+            "generate_timeout_s": _mm.GPU_JOB_TIMEOUT_S,
+            "cpu_generate_timeout_s": _mm.CPU_JOB_TIMEOUT_S,
+            # #1787 review fix: a saved prefs.json value for either key can be
+            # silently shadowed by an external env var (os.environ.setdefault
+            # in core.prefs.restore_env is a no-op when one is already
+            # present) — the Settings panel must say so rather than promise a
+            # restart will apply a value that never will.
+            "generate_timeout_shadowed": _prefs_mod.is_env_shadowed(
+                "OMNIVOICE_GENERATE_TIMEOUT_S"),
+            "cpu_generate_timeout_shadowed": _prefs_mod.is_env_shadowed(
+                "OMNIVOICE_CPU_GENERATE_TIMEOUT_S"),
+            "code_fingerprint": os.environ.get("OMNIVOICE_BUILD_FINGERPRINT", ""),
             "data_dir": DATA_DIR,
             "outputs_dir": OUTPUTS_DIR,
             "crash_log_path": CRASH_LOG_PATH,
             "idle_timeout_seconds": IDLE_TIMEOUT_SECONDS,
             "model_checkpoint": resolve_omnivoice_checkpoint(),  # #693: show the effective checkpoint, not a leaked raw value
-            "asr_model": os.environ.get("ASR_MODEL", "Systran/faster-whisper-large-v3"),
-            "translate_provider": os.environ.get("TRANSLATE_PROVIDER", "google"),
+            "asr_model": _asr_model,
+            "translate_provider": _translation_provider,
             "has_hf_token": _has_hf_token(),
             "fast_download": _fast_download_status(),
             "device": get_best_device(),
@@ -240,6 +385,11 @@ def system_info():
         logger.exception("system_info failed — returning safe defaults")
         return {
             "app_version": APP_VERSION,
+            "generate_timeout_s": 300.0,
+            "cpu_generate_timeout_s": 600.0,
+            "generate_timeout_shadowed": False,
+            "cpu_generate_timeout_shadowed": False,
+            "code_fingerprint": os.environ.get("OMNIVOICE_BUILD_FINGERPRINT", ""),
             "data_dir": DATA_DIR,
             "outputs_dir": OUTPUTS_DIR,
             "crash_log_path": str(CRASH_LOG_PATH),
@@ -278,6 +428,142 @@ def _tail_file(path: str, tail: int):
     return all_lines[-tail:], len(all_lines)
 
 
+# Must track main.py's _WindowsSafeRotatingFileHandler(backupCount=3). The
+# handler rolls omnivoice.log at 2 MB into .1/.2/.3, so up to 6 MB of history
+# lives in files this module used to ignore entirely.
+_LOG_BACKUP_COUNT = 3
+
+
+def _rotated_log_paths(base: str) -> list[str]:
+    """Existing `<base>.1 … .N`, newest first."""
+    return [p for p in (f"{base}.{i}" for i in range(1, _LOG_BACKUP_COUNT + 1)) if os.path.exists(p)]
+
+
+def _tail_rolling(base: str, tail: int):
+    """Tail `base`, reaching into its rotated siblings when it runs short.
+
+    A rollover leaves omnivoice.log nearly empty, and the Backend tab then
+    showed a handful of lines — or none — while the failure the user was asked
+    to copy sat in omnivoice.log.1. Reading the current file first keeps the
+    common case at one file read; the backups are only touched when they are
+    the only place the requested lines can come from.
+
+    Returns (lines oldest-first, total lines across the files read, paths read
+    oldest-first). The total counts only the files it had to open — it stops as
+    soon as `tail` is satisfied, so it is "how much is behind these lines",
+    not the size of the whole rotation set.
+    """
+    chunks: list[list[str]] = []
+    paths: list[str] = []
+    total = 0
+    remaining = tail
+    candidates = [p for p in [base, *_rotated_log_paths(base)] if os.path.exists(p)]
+    for path in candidates:
+        if remaining <= 0:
+            break
+        try:
+            lines, count = _tail_file(path, remaining)
+        except FileNotFoundError:
+            # A rollover can rename a candidate between the existence check
+            # above and this open, and the handler holds no lock we can take
+            # from a route. Skip the vanished file rather than 500 the whole
+            # panel over one member of the set — the previous single-file
+            # version failed the request outright in the same situation.
+            #
+            # A roll landing mid-walk can also shift which chunk a file holds,
+            # so a tail taken at that instant may repeat or miss a block. The
+            # panel re-polls every 5s and the next read is clean; buying strict
+            # consistency here would mean reaching into logging's internals.
+            continue
+        except PermissionError as exc:
+            # Windows only, and only the sharing violation: the handler still
+            # holds the file it is rolling. Any other permission failure is a
+            # real misconfiguration and must not be hidden.
+            if os.name == "nt" and getattr(exc, "winerror", None) == 32:
+                continue
+            raise
+        if count == 0:
+            continue
+        chunks.append(lines)
+        paths.append(path)
+        total += count
+        remaining -= len(lines)
+    # Files were visited newest-first; the reader wants oldest-first.
+    out: list[str] = []
+    for chunk in reversed(chunks):
+        out.extend(chunk)
+    return out, total, list(reversed(paths))
+
+def _tauri_plugin_log_candidates():
+    """The `tauri-plugin-log` files — the shell's own log, and the only thing
+    the Tauri tab actually displays.
+
+    Split out from :func:`_tauri_log_candidates` so Clear can touch these and
+    leave the backend stdout/stderr redirect alone. See
+    :func:`clear_tauri_logs`.
+    """
+    home = os.path.expanduser("~")
+    bid = "com.debpalash.omnivoice-studio"
+    if sys.platform == "darwin":
+        return [
+            os.path.join(home, "Library/Logs", bid, "tauri.log"),
+            os.path.join(home, "Library/Logs", bid, "VoiceStudio.log"),
+        ]
+    if sys.platform.startswith("linux"):
+        data_dir = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local/share")
+        return [
+            os.path.join(data_dir, bid, "logs", "tauri.log"),
+            os.path.join(home, ".config", bid, "logs", "tauri.log"),
+        ]
+    if sys.platform.startswith("win"):
+        appdata = os.environ.get("APPDATA", home)
+        localappdata = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return [
+            os.path.join(localappdata, bid, "logs", "tauri.log"),
+            os.path.join(appdata, bid, "logs", "tauri.log"),
+        ]
+    return []
+
+
+def _backend_redirect_log_candidates():
+    """`backend.log` / `backend_err.log` — the spawned backend's stdout and
+    stderr, written by `src-tauri/src/backend.rs::backend_log_path()`.
+
+    Deliberately NOT cleared by the Tauri tab's Clear button.
+    `open_err_log_for_run()` opens `backend_err.log` **append-only** so "a
+    respawn must not destroy the previous run's evidence" (#1510), rotates it
+    to `.1` rather than truncating, and its spawn diagnostics are described
+    there as "retained in backend_err.log across runs and lands verbatim in bug
+    reports". A native death (a Windows access violation, a SIGSEGV) writes
+    nothing to the Python log by construction, so this file is the only record
+    of it.
+
+    `OMNIVOICE_LOG_DIR` is honoured first, in the same precedence
+    `backend_log_path()` uses. The backend is a child of the shell, so an
+    ambient override reaches both — and a resolver that ignored it would look
+    in the per-OS default while the writer wrote somewhere else, which is the
+    divergence class this file already has one of (see #1782).
+    """
+    override = (os.environ.get("OMNIVOICE_LOG_DIR") or "").strip()
+    if override:
+        return [
+            os.path.join(override, "backend.log"),
+            os.path.join(override, "backend_err.log"),
+        ]
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        base = os.path.join(home, "Library/Logs/OmniVoice")
+    elif sys.platform.startswith("linux"):
+        state_dir = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local/state")
+        base = os.path.join(state_dir, "OmniVoice")
+    elif sys.platform.startswith("win"):
+        localappdata = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        base = os.path.join(localappdata, "OmniVoice", "Logs")
+    else:
+        return []
+    return [os.path.join(base, "backend.log"), os.path.join(base, "backend_err.log")]
+
+
 def _tauri_log_candidates():
     """Likely paths for Tauri-side logs, most useful first.
 
@@ -289,40 +575,15 @@ def _tauri_log_candidates():
       `com.debpalash.omnivoice-studio` (frontend/src-tauri/tauri.conf.json).
     - backend.rs::backend_log_path() redirects the spawned backend's
       stdout/stderr to `backend.log` / `backend_err.log` under
-      `~/Library/Logs/OmniVoice` (macOS), `$XDG_STATE_HOME/VoiceStudio` falling
+      `~/Library/Logs/OmniVoice` (macOS), `$XDG_STATE_HOME/OmniVoice` falling
       back to `~/.local/state/OmniVoice` (Linux), and
       `%LOCALAPPDATA%\\OmniVoice\\Logs` (Windows). This is where uvicorn
       startup banners and hard-crash tracebacks land — keep all three OS
       shapes listed or sidecar crashes become invisible off-macOS.
     """
-    home = os.path.expanduser("~")
-    bid = "com.debpalash.omnivoice-studio"
-    if sys.platform == "darwin":
-        return [
-            os.path.join(home, "Library/Logs", bid, "tauri.log"),
-            os.path.join(home, "Library/Logs", bid, "VoiceStudio.log"),
-            os.path.join(home, "Library/Logs/OmniVoice/backend.log"),
-            os.path.join(home, "Library/Logs/OmniVoice/backend_err.log"),
-        ]
-    if sys.platform.startswith("linux"):
-        data_dir = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local/share")
-        state_dir = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local/state")
-        return [
-            os.path.join(data_dir, bid, "logs", "tauri.log"),
-            os.path.join(home, ".config", bid, "logs", "tauri.log"),
-            os.path.join(state_dir, "OmniVoice", "backend.log"),
-            os.path.join(state_dir, "OmniVoice", "backend_err.log"),
-        ]
-    if sys.platform.startswith("win"):
-        appdata = os.environ.get("APPDATA", home)
-        localappdata = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
-        return [
-            os.path.join(localappdata, bid, "logs", "tauri.log"),
-            os.path.join(appdata, bid, "logs", "tauri.log"),
-            os.path.join(localappdata, "OmniVoice", "Logs", "backend.log"),
-            os.path.join(localappdata, "OmniVoice", "Logs", "backend_err.log"),
-        ]
-    return []
+    # Composed from the two halves so the read path keeps seeing every file
+    # while Clear can be narrowed to the shell's own log.
+    return _tauri_plugin_log_candidates() + _backend_redirect_log_candidates()
 
 
 @router.get("/system/logs")
@@ -337,12 +598,24 @@ async def system_logs(tail: int = 200):
     except Exception:
         tail = 200
 
-    path = LOG_PATH if os.path.exists(LOG_PATH) else CRASH_LOG_PATH
-    if not os.path.exists(path):
+    if os.path.exists(LOG_PATH) or _rotated_log_paths(LOG_PATH):
+        base = LOG_PATH
+    else:
+        base = CRASH_LOG_PATH
+    if not os.path.exists(base) and not _rotated_log_paths(base):
         return {"lines": [], "path": LOG_PATH, "exists": False}
+    path = base
     try:
-        lines, total = await asyncio.to_thread(_tail_file, path, tail)
-        return {"lines": lines, "path": path, "exists": True, "total_lines": total}
+        lines, total, paths = await asyncio.to_thread(_tail_rolling, base, tail)
+        return {
+            "lines": lines,
+            "path": path,
+            "exists": True,
+            "total_lines": total,
+            # Which files the tail actually came from, oldest first. A bug
+            # report can then say whether it crossed a rollover.
+            "paths": paths,
+        }
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -448,9 +721,23 @@ def _read_from_pos(path: str, pos: int) -> list[str]:
 
 @router.post("/system/logs/clear")
 async def clear_system_logs():
-    """Truncate the rolling runtime log and the crash log (what the Backend tab reads)."""
+    """Truncate the rolling runtime log and the crash log (what the Backend tab reads).
+
+    Includes the rotated siblings. Truncating only omnivoice.log left up to
+    6 MB in .1/.2/.3, so Clear freed almost nothing and — now that the tail
+    reaches into those files — would have looked like it did nothing at all.
+    """
     cleared_any = False
-    for p in (LOG_PATH, CRASH_LOG_PATH):
+    # The full fixed name set rather than a snapshot of what exists: enumerating
+    # first leaves a window where a rollover creates a backup after the scan and
+    # its history survives a Clear that reported success. Names the handler can
+    # ever write are known up front, so there is nothing to enumerate.
+    targets = [
+        LOG_PATH,
+        *(f"{LOG_PATH}.{i}" for i in range(1, _LOG_BACKUP_COUNT + 1)),
+        CRASH_LOG_PATH,
+    ]
+    for p in targets:
         if os.path.exists(p):
             try:
                 await asyncio.to_thread(_truncate_file, p)
@@ -483,10 +770,20 @@ def _truncate_file(path: str):
 
 @router.post("/system/logs/tauri/clear")
 async def clear_tauri_logs():
-    """Truncate whichever Tauri-side log files we know about. OS-level rotation may recreate them."""
+    """Truncate the shell's own log files. OS-level rotation may recreate them.
+
+    The backend stdout/stderr redirect is deliberately excluded. This button
+    lives on a tab that shows `tauri.log`, and truncating `backend_err.log`
+    from it destroyed evidence the user was never shown — the one record of a
+    native death, which writes nothing to the Python log. `backend.rs`'s
+    `open_err_log_for_run()` opens that file append-only precisely so "a
+    respawn must not destroy the previous run's evidence" (#1510) and rotates
+    it to `.1` instead of truncating, so it manages its own size and does not
+    need clearing from here.
+    """
     cleared = []
     failed = 0
-    for p in _tauri_log_candidates():
+    for p in _tauri_plugin_log_candidates():
         if os.path.exists(p):
             try:
                 await asyncio.to_thread(_truncate_file, p)
@@ -503,6 +800,7 @@ async def clear_tauri_logs():
 @router.get("/sysinfo", response_model=SysinfoResponse)
 def get_sys_info():
     vram = 0.0
+    total_vram = 0.0
     gpu_active = False
 
     try:
@@ -515,18 +813,38 @@ def get_sys_info():
                 vram = alloc() / (1024**3)
         elif _is_cuda:
             vram = torch.cuda.memory_allocated() / (1024**3)
+            total_vram = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory / (1024**3)
+        elif _is_xpu:
+            vram = torch.xpu.memory_allocated() / (1024**3)
+            total_vram = float(
+                getattr(torch.xpu.get_device_properties(0), "total_memory", 0.0)
+            ) / (1024**3)
     except Exception:
         pass
         
     if vram > 0.01:
         gpu_active = True
 
+    gpu_utilization = None
+    nvidia_stats = _nvidia_live_stats() if _is_cuda else None
+    if nvidia_stats:
+        gpu_utilization, vram, total_vram = nvidia_stats
+        gpu_active = gpu_active or gpu_utilization > 0 or vram > 0.01
+
     vm = psutil.virtual_memory()
+    cpu_frequency = psutil.cpu_freq()
     return {
         "cpu": psutil.cpu_percent(interval=None),
+        "cpu_model": _CPU_MODEL,
+        "cpu_physical_cores": psutil.cpu_count(logical=False) or 0,
+        "cpu_logical_cores": psutil.cpu_count(logical=True) or 0,
+        "cpu_frequency_ghz": round((cpu_frequency.current if cpu_frequency else 0.0) / 1000, 2),
         "ram": vm.used / (1024**3),
         "total_ram": vm.total / (1024**3),
+        "gpu_name": _GPU_NAME,
+        "gpu_utilization": gpu_utilization,
         "vram": round(vram, 2),
+        "total_vram": round(total_vram, 2),
         "gpu_active": gpu_active
     }
 
@@ -542,12 +860,18 @@ async def flush_memory(unload_model: bool = False):
 
     freed_model = False
     if unload_model:
-        import services.model_manager as mm
-        async with mm._model_lock:
-            # Also drops the clone-prompt side cache, which this path used to
-            # leave resident — an "unload" that kept the encoded reference
-            # tensors belonging to the model it just released (#1495).
-            freed_model = mm.unload_shared_model()
+        from services import model_lifecycle
+
+        # The user-facing action has always promised "Unload all". Route it
+        # through the lifecycle facade so alternate TTS engines, dictation,
+        # diarisation, translation and sidecars are released as well as the
+        # shared OmniVoice model. Individual runtimes still decline while
+        # leased by active work.
+        released = await model_lifecycle.unload_all()
+        freed_model = any(
+            bool(result.get("success"))
+            for result in released.get("results", {}).values()
+        )
 
     # Multi-pass GC to break reference cycles
     gc.collect(generation=2)
@@ -717,7 +1041,7 @@ def system_notifications():
         from core import run_sentinel
 
         rec = run_sentinel.newest_record()
-        if rec is not None and not rec[1]:
+        if rec is not None and not rec[1] and run_sentinel.warrants_user_notice(rec[0]):
             record = rec[0]
             last = record.get("last_activity") or {}
             doing = f" Last activity: {last.get('kind')}." if last.get("kind") else ""
@@ -848,6 +1172,14 @@ PERSISTENT_KEYS = {
     # the Rust sidecar reads OMNIVOICE_PORT at startup and the backend derives
     # the LAN-share/UI ports from the others.
     "OMNIVOICE_PORT", "OMNIVOICE_SHARE_PORT", "OMNIVOICE_UI_PORT",
+    # Per-job compute-time budgets (#1787). Both are captured at import time
+    # by services/model_manager.py (GPU_JOB_TIMEOUT_S / CPU_JOB_TIMEOUT_S), so
+    # a value saved here takes effect on the NEXT backend restart — same
+    # contract as OMNIVOICE_PORT above. Restored into os.environ during the
+    # "env_prefs" startup step (main.py), which runs before model_manager is
+    # first imported ("ml_imports"), so the restored value is what the module
+    # captures. The Settings UI must say so (RestartBadge).
+    "OMNIVOICE_GENERATE_TIMEOUT_S", "OMNIVOICE_CPU_GENERATE_TIMEOUT_S",
 }
 
 # Sidecar-engine install dirs (OMNIVOICE_INDEXTTS_DIR, …). The one-click
@@ -865,6 +1197,16 @@ except Exception:  # pragma: no cover — defensive: env panel > installer wirin
 # being set so a bad value never reaches uvicorn / the share listener.
 _PORT_KEYS = {"OMNIVOICE_PORT", "OMNIVOICE_SHARE_PORT", "OMNIVOICE_UI_PORT"}
 
+# Keys whose value is a wall-clock compute-time budget in seconds (#1787).
+# Validated the same way as _PORT_KEYS: reject anything that isn't a
+# positive number before it reaches services/model_manager.py. Upper bound is
+# generous — long enough that a legitimate multi-hour, audiobook-length CPU
+# render is never blocked — but still bounded, so a fat-fingered extra digit
+# (300 -> 3000000) can't turn a wedged job into one that silently occupies a
+# worker for days before the guard ever fires.
+_TIMEOUT_KEYS = {"OMNIVOICE_GENERATE_TIMEOUT_S", "OMNIVOICE_CPU_GENERATE_TIMEOUT_S"}
+_MAX_GENERATE_TIMEOUT_S = 21600.0  # 6 hours
+
 
 @router.post("/system/set-env")
 async def set_env_var(body: dict):
@@ -873,7 +1215,7 @@ async def set_env_var(body: dict):
     Persistent keys (proxy, FFMPEG_PATH, translation provider keys, …) are
     saved to ``prefs.json`` so they survive backend restarts (restored at
     startup in ``main.py``). HF_TOKEN is persisted via
-    ``huggingface_hub.login()`` (and cleared via ``logout()``). Other keys
+    ``huggingface_hub.login()`` (and cleared with the shared token-file helper). Other keys
     are set on ``os.environ`` for the running process.
 
     The loopback-origin gate that previously lived inline here is now applied
@@ -908,6 +1250,22 @@ async def set_env_var(body: dict):
                     status_code=400,
                     detail=f"Invalid port for {key}: must be between 1024 and 65535.",
                 )
+        if key in _TIMEOUT_KEYS:
+            try:
+                timeout_n = float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid timeout for {key}: '{value}' is not a number.",
+                )
+            if not (0 < timeout_n <= _MAX_GENERATE_TIMEOUT_S):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Invalid timeout for {key}: must be greater than 0 "
+                        f"and at most {_MAX_GENERATE_TIMEOUT_S:.0f} seconds."
+                    ),
+                )
         os.environ[key] = value
         logger.info("Environment variable set (length=%d)", len(value))
 
@@ -932,14 +1290,14 @@ async def set_env_var(body: dict):
         # Mirror the persistence on clear — wipe the saved token file too.
         if key == "HF_TOKEN":
             try:
-                from huggingface_hub import logout as _hf_logout
-                _hf_logout()
-                logger.info("HF token cleared from $HF_HOME/token via logout()")
-            except Exception as e:
-                logger.warning("Could not clear HF token file: %s", e)
+                from services.token_resolver import clear_hf_cli_tokens
+                clear_hf_cli_tokens()
+                logger.info("Local Hugging Face token files cleared")
+            except Exception:
+                raise HTTPException(status_code=500, detail="Could not clear local Hugging Face token files") from None
 
     # HF_TOKEN persistence is handled above via huggingface_hub.login()/
-    # logout() — it never touches prefs.json. Everything else in
+    # clear_hf_cli_tokens() — it never touches prefs.json. Everything else in
     # PERSISTENT_KEYS (proxy, FFMPEG_PATH, translation provider keys, …) is
     # saved to prefs.json so it survives backend restarts (restored at
     # startup in main.py). Non-persistent keys stay process-local.
@@ -950,7 +1308,13 @@ async def set_env_var(body: dict):
         else:
             prefs_delete(prefs_key)
 
-    return {"key": key, "set": bool(value)}
+    # #1787 review fix: tell the caller up front when the value just saved is
+    # being shadowed by an external env var — set at THIS process's startup,
+    # before our own prefs restore ran, so it predicts the next restart too.
+    # A response that just said {"set": True} let the Settings panel promise
+    # a restart would apply a value that never will.
+    from core.prefs import is_env_shadowed
+    return {"key": key, "set": bool(value), "shadowed": is_env_shadowed(key)}
 
 
 @router.post("/clean-audio")
@@ -1041,7 +1405,7 @@ def asr_backends():
 def hf_token_state():
     """Return the 3-source HF token cascade state for the Settings UI
     (Wave 2 React panel consumes this). Never returns the raw token —
-    only a masked preview, whoami username, and per-source validity.
+    only a masked preview and local presence; no outbound validation.
     """
     from dataclasses import asdict
     from services import token_resolver

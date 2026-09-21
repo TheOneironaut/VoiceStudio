@@ -191,6 +191,141 @@ def test_discovery_reports_the_four_states(monkeypatch):
     assert "clone" in entry["operations"]
 
 
+def test_gpu_description_reports_live_cuda_telemetry(monkeypatch):
+    from types import SimpleNamespace
+
+    caps = SimpleNamespace(
+        family="cuda",
+        device_name="NVIDIA RTX 4090",
+        vram_gb=24,
+        driver=None,
+    )
+    monkeypatch.setattr("core.device_caps.detect_host_caps", lambda: caps)
+    monkeypatch.setattr(
+        capabilities,
+        "_accelerator_memory_bytes",
+        lambda _caps: (18 * 1024**3, 24 * 1024**3),
+    )
+    monkeypatch.setattr(
+        capabilities,
+        "_accelerator_details",
+        lambda _caps: ("591.86", "8.9"),
+    )
+
+    assert capabilities.describe_gpus() == [
+        {
+            "vendor": "nvidia",
+            "model": "NVIDIA RTX 4090",
+            "backend": "cuda",
+            "memory_bytes": 24 * 1024**3,
+            "free_memory_bytes": 18 * 1024**3,
+            "driver_version": "591.86",
+            "compute_capability": "8.9",
+        }
+    ]
+
+
+def test_nvidia_driver_probe_finds_wsl_system_binary(monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    monkeypatch.setattr(capabilities.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(capabilities.os.path, "isfile", lambda path: path == "/usr/lib/wsl/lib/nvidia-smi")
+    monkeypatch.setattr(
+        capabilities.subprocess,
+        "run",
+        lambda args, **_kwargs: calls.append(args)
+        or SimpleNamespace(returncode=0, stdout="591.86\n"),
+    )
+
+    assert capabilities._nvidia_driver_version() == "591.86"
+    assert calls[0][0] == "/usr/lib/wsl/lib/nvidia-smi"
+
+
+def test_unknown_native_gpu_memory_keeps_one_serial_worker_slot(monkeypatch):
+    monkeypatch.setattr(
+        "services.tts_backend.list_backends",
+        lambda: [{
+            "id": "audiocpp",
+            "available": True,
+            "routing_status": "accelerated",
+            "gpu_compat": ["vulkan", "cpu"],
+            "effective_device": "vulkan",
+            "min_vram_gb": 6.0,
+            "execution_evidence": {"runtime_vram_gb": 0.0},
+        }],
+    )
+
+    entry = capabilities.discover()[0]
+
+    assert entry["free_memory_bytes"] == 0
+    assert entry["derived_concurrency"] == 1
+
+
+def test_unknown_native_memory_keeps_mixed_worker_serial(monkeypatch):
+    monkeypatch.setattr(
+        "services.tts_backend.list_backends",
+        lambda: [{
+            "id": "unknown-memory",
+            "available": True,
+            "routing_status": "accelerated",
+            "gpu_compat": ["cuda"],
+            "effective_device": "cuda",
+            "execution_evidence": {"runtime_vram_gb": 0.0},
+        }],
+    )
+
+    unknown_memory = capabilities.discover()[0]
+    high_capacity = {"derived_concurrency": 4}
+
+    assert unknown_memory["derived_concurrency"] == 1
+    assert capabilities.max_concurrent_tasks(
+        [unknown_memory, high_capacity]
+    ) == 1
+
+
+def test_static_gpu_profile_derives_known_memory_before_aggregation(
+    monkeypatch,
+):
+    free_bytes = 24 * 1024**3
+    derive_calls = []
+
+    def derive_for_static_gpu(**kwargs):
+        derive_calls.append(kwargs)
+        return 3
+
+    monkeypatch.setattr(capabilities, "_free_memory_bytes", lambda _caps: free_bytes)
+    monkeypatch.setattr(capabilities, "derive_concurrency", derive_for_static_gpu)
+    monkeypatch.setattr(
+        "services.tts_backend.list_backends",
+        lambda: [{
+            "id": "static-cuda",
+            "available": True,
+            "routing_status": "accelerated",
+            "gpu_compat": ["cuda"],
+            "effective_device": "cuda",
+            "min_vram_gb": 5.0,
+            "execution_evidence": {"runtime_vram_gb": None},
+        }],
+    )
+
+    static_gpu = capabilities.discover()[0]
+
+    assert static_gpu["derived_concurrency"] == 0
+    assert static_gpu["free_memory_bytes"] == free_bytes
+    assert capabilities.max_concurrent_tasks(
+        [static_gpu, {"derived_concurrency": 4}]
+    ) == 3
+    assert derive_calls == [
+        {
+            "backend": "cuda",
+            "free_memory_bytes": free_bytes,
+            "min_model_bytes": 5 * 1024**3,
+            "compiled": False,
+        }
+    ]
+
+
 def test_cpu_fallback_is_reported_because_capability_is_not_acceleration(monkeypatch):
     monkeypatch.setattr(
         "services.tts_backend.list_backends",
@@ -223,7 +358,32 @@ def test_engines_that_cannot_clone_do_not_advertise_it(monkeypatch):
         "services.tts_backend.list_backends",
         lambda: [{"id": "e", "available": True, "supports_cloning": None, "gpu_compat": ["cuda"]}],
     )
-    assert capabilities.discover()[0]["operations"] == ["audiobook", "dub_segments", "tts"]
+    assert capabilities.discover()[0]["operations"] == [
+        "audiobook",
+        "batch_segments",
+        "tts",
+    ]
+
+
+def test_cloning_engines_advertise_clone_and_dubbing(monkeypatch):
+    monkeypatch.setattr(
+        "services.tts_backend.list_backends",
+        lambda: [
+            {
+                "id": "e",
+                "available": True,
+                "supports_cloning": True,
+                "gpu_compat": ["cuda"],
+            }
+        ],
+    )
+    assert capabilities.discover()[0]["operations"] == [
+        "audiobook",
+        "batch_segments",
+        "tts",
+        "clone",
+        "dub_segments",
+    ]
 
 
 def test_default_concurrency_is_one():
@@ -577,6 +737,25 @@ def test_target_defaults_to_local(client, monkeypatch):
     assert body["targets"][0]["id"] == "local"
 
 
+def test_runtime_status_routes_through_the_selected_compute_target(client, monkeypatch):
+    seen = {}
+
+    async def fake_status(engine=None, *, op="tts", control_plane=None):
+        seen.update(engine=engine, op=op, control_plane=control_plane)
+        return {"target": "worker-1", "remote": True, "models": []}
+
+    monkeypatch.setattr("services.gpu_gateway.status", fake_status)
+    response = client.get("/workers/runtime?op=tts&engine=omnivoice")
+
+    assert response.status_code == 200
+    assert response.json()["target"] == "worker-1"
+    assert seen == {
+        "engine": "omnivoice",
+        "op": "tts",
+        "control_plane": service.control_plane,
+    }
+
+
 def test_choosing_an_unknown_worker_is_refused(client):
     """Otherwise a typo silently parks generation on a target that will never
     resolve, and every job quietly runs locally with no explanation."""
@@ -869,7 +1048,10 @@ def test_the_target_endpoint_answers_per_operation(client, monkeypatch, db):
 
     whole = client.get("/workers/target").json()
     assert whole["op"] == ""
-    assert whole["remote_operations"] == ["audiobook", "dub", "dub_segments", "tts"]
+    assert whole["remote_operations"] == [
+        "audiobook", "batch", "batch_segments", "clone", "dub", "dub_segments",
+        "longform", "tts",
+    ]
 
 
 # ── Config is read from the database, not from the pool's stale copy ───────

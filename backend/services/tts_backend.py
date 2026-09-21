@@ -195,8 +195,8 @@ def _float_env(name: str, default: float) -> float:
 
 
 class TTSInputError(ValueError):
-    """The caller-supplied text can't be synthesized by the selected engine
-    (empty / nothing speakable after cleanup). Subclasses ValueError so the
+    """The caller input cannot be synthesized by the selected engine
+    (empty text, nothing speakable after cleanup, or missing reference audio). Subclasses ValueError so the
     native /generate route's existing ValueError→400 mapping applies;
     /v1/audio/speech maps it to 400 explicitly (#1173 class — these used to
     surface as opaque 500s like "need at least one array to concatenate")."""
@@ -262,6 +262,126 @@ class TTSBackend(ABC):
         if callable(loader):
             loader()
 
+    # ── Language enforcement (#2104) ──────────────────────────────────────
+    #
+    # An engine that declares a finite language set used to receive any
+    # caller-supplied language and synthesize anyway — a 30-second Polish
+    # sample on an English-only engine came back as 55 s of English phonemes
+    # over Polish text, with no error. The picker offers every language the
+    # app supports, so the failure mode was "user picks Polish on KittentTTS,
+    # gets a wrong-accent wav, has no way to know the engine can't do it".
+    #
+    # ``supported_languages`` is the engine's own contract. The base class
+    # enforces it in one place, so engines only have to declare their set
+    # honestly — no per-adapter check, no risk of drift. Engines that
+    # genuinely cover every language declare ``["multi"]`` and the helper
+    # is a no-op for them; engines with a strict set get the same model
+    # mlx-audio / PocketTTS already use ("doesn't support language X;
+    # supported: ..."), enforced centrally.
+
+    #: Class-level allowlist of display names that name the language to the
+    #: user. Keeps the user-facing error free of a brittle per-engine table
+    #: and matches what the Settings picker surfaces. Set on each subclass
+    #: (e.g. ``{"en": "English"}``); an empty dict means the engine falls back
+    #: to the raw ISO / display token as the language picker renders it.
+    language_display_names: dict[str, str] = {}
+
+    def _normalize_language_code(self, language: object) -> Optional[str]:
+        """Resolve picker names and region tags without treating unknown names as Auto."""
+        if language is None:
+            return None
+        if not isinstance(language, str):
+            raise ValueError("Language must be a string or None")
+        value = language.strip().lower()
+        if not value or value == "auto":
+            return None
+        from omnivoice.utils.lang_map import LANG_NAME_TO_ID
+
+        # Reuse the same complete, bundled mapping as the language picker.
+        aliases = {"mandarin": "zh", "arabic": "ar", "tagalog": "tl"}
+        if value in aliases:
+            return aliases[value]
+        if value in LANG_NAME_TO_ID:
+            return LANG_NAME_TO_ID[value]
+        head = value.replace("_", "-").split("-", 1)[0]
+        if head.isascii() and head.isalpha() and len(head) in (2, 3):
+            return head
+        # A supplied but unrecognized language remains explicit, so a finite
+        # engine rejects it instead of silently using its default language.
+        return value
+
+    def _check_language(self, language: object) -> Optional[str]:
+        """Reject caller-supplied languages outside this engine's declared
+        ``supported_languages`` set (#2104).
+
+        Skipped when:
+          - ``language`` is None, empty, or "auto" — the user has no
+            preference and the engine picks its own default.
+          - ``supported_languages`` is ``["multi"]`` — the engine
+            documents itself as open-ended and routes any extra check
+            through its own per-engine logic (mlx-audio's per-model table,
+            PocketTTS' own strict set, OmniVoice's 600-language zero-shot).
+
+        Raises ``ValueError`` with the engine display name, the requested
+        language, and the supported set so the rewrite in
+        ``_language_rejection_or`` (api/routers/generation.py:1055) turns
+        it into the standard "Engine X can't speak 'Y' …" message.
+
+        3-letter ISO 639 codes (``cmn``, ``zho``, …) are intentionally
+        NOT mapped to their 2-letter equivalent here: the convention
+        varies per engine (``cmn`` is Mandarin to one, undefined to
+        another) and a wrong fold silently mis-routes. Engines that
+        advertise a 3-letter set must override ``_check_language`` (or
+        accept the 3-letter token as-is and validate themselves); the
+        base class only enforces exact 2-letter matches against the
+        declared set, which covers the common case.
+        """
+        supported = self.supported_languages
+        # open-ended: the engine handles its own checks.
+        if not supported or supported == ["multi"]:
+            return
+        code = self._normalize_language_code(language)
+        if code is None:
+            return  # no preference → caller leaves it to the engine
+        # Region tags resolve to their base language; three-letter codes
+        # remain exact rather than guessing from their first two letters.
+        if code in supported:
+            return code
+        # Build the user-facing list. ``multi`` is not in here because
+        # ``supported`` already short-circuited above; entries are rendered
+        # in declared order so the message matches ``list_backends()``.
+        # Look up ``display_name`` on the instance, not the class — the
+        # base class declares it as a class attribute (str), but subclasses
+        # override with a ``@property`` that returns the instance value.
+        # ``getattr(type(self), "display_name", ...)`` returns the property
+        # descriptor object itself, not the string.
+        engine_name = (
+            getattr(self, "display_name", None)
+            or getattr(type(self), "id", type(self).__name__)
+        )
+        if not isinstance(engine_name, str):
+            # Property with no instance state — fall back to the class attr.
+            engine_name = getattr(type(self), "id", type(self).__name__)
+        quoted = ", ".join(f"'{c}'" for c in supported)
+        raise ValueError(
+            f"The {engine_name} engine doesn't support language={language!r}. "
+            f"Supported: {quoted}. Pick one of those, leave language as 'Auto', "
+            f"or switch engine in Model Catalogue."
+        )
+
+    def _supported_languages_display(self) -> list[str]:
+        """``supported_languages`` rendered for the UI: ISO codes annotated
+        with their display name when the engine declared one, else bare.
+
+        Used by ``list_backends()`` and any picker that wants to show
+        humans-readable labels instead of raw ISO tokens.
+        """
+        out: list[str] = []
+        for code in self.supported_languages:
+            label = self.language_display_names.get(code)
+            out.append(f"{code} ({label})" if label else code)
+        return out
+
     #: Whether this engine already emits mastered, studio-grade audio and should
     #: therefore skip the shared apply_mastering() chain (highpass + Compressor,
     #: tuned for OmniVoice's 24 kHz output). Studio engines like VoxCPM2 (native
@@ -275,6 +395,18 @@ class TTSBackend(ABC):
     #: (issue #312 class) before committing to a job that needs it, instead
     #: of silently falling back to OmniVoice or mis-cloning per segment.
     supports_cloning: bool = True
+
+    #: Curated model keys that DO accept a reference clip, for an adapter
+    #: whose ``supports_cloning`` is model-dependent (a property rather than
+    #: a plain bool). Empty when cloning is a fixed fact about the engine.
+    #: Lets the cloning gate name the one-setting fix — pick this model —
+    #: instead of telling the user their engine can't clone at all (#2201).
+    cloning_model_keys: tuple[str, ...] = ()
+
+    @classmethod
+    def cloning_model_labels(cls) -> tuple[str, ...]:
+        """:attr:`cloning_model_keys` as the model picker labels them."""
+        return cls.cloning_model_keys
 
     #: GPU/accelerator targets the engine can run on. Surfaced via the
     #: Engine Compatibility Matrix (Plan 02-04 / ENGINE-06) so users can
@@ -299,6 +431,31 @@ class TTSBackend(ABC):
     #:
     #: 0 means "no meaningful floor" (CPU-class engines) and never warns.
     min_vram_gb: float = 0.0
+
+    @classmethod
+    def runtime_compute_profile(cls, caps) -> dict:
+        """Resolved compute metadata for this engine on the current host.
+
+        Most engines have one implementation whose static declarations are
+        sufficient. Native adapters may override this single hook when the
+        installed executable determines both the available runtimes and the
+        device actually selected.
+        """
+        from services.engine_routing import resolve_routing
+
+        gpu_compat = tuple(getattr(cls, "gpu_compat", ("cpu",)))
+        min_vram_gb = float(getattr(cls, "min_vram_gb", 0.0) or 0.0)
+        return {
+            "gpu_compat": gpu_compat,
+            "min_vram_gb": min_vram_gb,
+            **resolve_routing(gpu_compat, caps, min_vram_gb),
+            "runtime_backend": None,
+            "runtime_device_index": None,
+            "runtime_device_name": None,
+            "runtime_hardware_family": None,
+            "runtime_vram_gb": None,
+            "runtime_device_verified": None,
+        }
 
     #: True when generation allocates in ANOTHER process — a dedicated-venv
     #: sidecar (SubprocessBackend) or a spawned binary (omnivoice-gguf).
@@ -364,6 +521,10 @@ class TTSBackend(ABC):
 
         def _item(value, index):
             return value[index] if isinstance(value, list) else value
+
+        # Validate the whole request before producing any partial output.
+        for index in range(len(texts)):
+            self._check_language(_item(language, index))
 
         return [
             self.generate(
@@ -517,6 +678,26 @@ def _prompt_disk_load(key: tuple):
         return None
 
 
+def _prompt_cache_evict(key: tuple) -> None:
+    """Discard one prompt from both cache layers. Never raises.
+
+    Transcript-free prompts use a different identity from fully conditioned
+    prompts. Once ASR resolves the transcript, the former must not remain as a
+    viable stale fallback for the same reference clip.
+    """
+    with _prompt_cache_lock:
+        _prompt_cache.pop(key, None)
+    cache_dir = _prompt_disk_dir()
+    if cache_dir is None:
+        return
+    try:
+        os.remove(_prompt_disk_path(cache_dir, key))
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.debug("could not evict stale voice prompt: %s", exc)
+
+
 def _prompt_disk_save(key: tuple, prompt) -> None:
     """Persist ``prompt`` under ``key`` and prune old entries. Never raises."""
     cache_dir = _prompt_disk_dir()
@@ -566,7 +747,12 @@ def _get_clone_prompt(
 ):
     """Return a cached/precomputed ``VoiceClonePrompt`` for
     (ref_audio, ref_text, preprocess_prompt), or ``None`` to fall back to the
-    inline ref path. Never raises.
+    inline ref path.
+
+    Raises only on a device OOM that survives a cache-drop retry (#1790): the
+    inline path is the same allocation on the same device, so falling back to
+    it after an OOM cannot succeed and has been observed taking the whole
+    process down instead. Every other failure still falls back silently.
 
     ``store=False`` still *reads* the cache (a hit is free) but never inserts:
     it exists for single-use references — a dub's per-segment ref clips are each
@@ -575,6 +761,29 @@ def _get_clone_prompt(
     Every short segment falling back to its speaker ref then re-encodes it
     (~0.4 s each, measured). Scan-resistance, not a second cache policy.
     """
+    # Resolve transcript-free references through an already-installed ASR
+    # before deriving the cache key. This protects every native OmniVoice
+    # caller (generate, streaming, batch, dub, audiobook and OpenAI-compatible
+    # speech), including routes that do not have a profile row on which to
+    # persist the transcript. Incomplete reference conditioning can destabilize
+    # the reference/target boundary and introduce words in the generated prefix.
+    unresolved_key = None
+    if ref_audio and not ref_text:
+        try:
+            unresolved_key = _clone_prompt_key(
+                ref_audio, None, preprocess_prompt
+            )
+        except Exception:
+            pass
+        try:
+            from services.asr_backend import transcribe_reference
+
+            ref_text = transcribe_reference(ref_audio)
+        except Exception as e:  # noqa: BLE001 — model fallback remains available
+            logger.warning("reference transcript resolution failed: %s", e)
+        if ref_text and unresolved_key is not None:
+            _prompt_cache_evict(unresolved_key)
+
     try:
         key = _clone_prompt_key(ref_audio, ref_text, preprocess_prompt)
     except Exception:
@@ -596,10 +805,43 @@ def _get_clone_prompt(
                 ref_audio, ref_text=ref_text, preprocess_prompt=preprocess_prompt
             )
         except Exception as e:  # noqa: BLE001 — fall back, never break synthesis
-            logger.warning(
-                "voice-clone prompt precompute failed; using inline ref: %s", e
-            )
-            return None
+            # #1790/#1777: a GPU OOM is the one failure this fallback cannot
+            # absorb. `generate()`'s inline ref path runs the SAME encode on the
+            # SAME device — the docstring above says so, because producing
+            # identical output is the point — so returning None after an OOM
+            # guarantees a second OOM moments later, on a device with even less
+            # headroom than the first attempt found. Both reporters' backends
+            # then died with a Windows access violation (exit code
+            # -1073741819) seconds after this exact log line, mid-generation on
+            # a GPU that had just refused an 86 MiB allocation.
+            #
+            # An OOM here is also the most recoverable kind: the allocator is
+            # typically holding reserved-but-unallocated blocks (#1790's own
+            # log reports 90 MiB reserved against an 86 MiB request). Drop them
+            # and try once more. If it still will not fit, raise — the failure
+            # layer turns a device OOM into the actionable GPU_OOM message
+            # ("close other GPU-heavy apps or unload models…"), which is a far
+            # better answer than walking into a native fault.
+            from core.failure import is_gpu_oom
+
+            if is_gpu_oom(e):
+                logger.warning(
+                    "voice-clone prompt precompute hit a device OOM (%s) — "
+                    "releasing allocator caches and retrying once", e,
+                )
+                try:
+                    from services.model_manager import free_vram
+                    free_vram()
+                except Exception:  # noqa: BLE001 — reclaim is best-effort
+                    logger.debug("VRAM reclaim before OOM retry failed", exc_info=True)
+                prompt = model.create_voice_clone_prompt(
+                    ref_audio, ref_text=ref_text, preprocess_prompt=preprocess_prompt
+                )
+            else:
+                logger.warning(
+                    "voice-clone prompt precompute failed; using inline ref: %s", e
+                )
+                return None
         if store:
             _prompt_disk_save(key, prompt)
     if not store:
@@ -691,6 +933,27 @@ class OmniVoiceBackend(TTSBackend):
         # The live OmniVoice instance. Reuses the singleton owned by
         # model_manager so memory isn't doubled.
         self._model = model
+
+    @property
+    def execution_device(self) -> str | None:
+        """Actual device of the shared model, for live engine diagnostics."""
+        if self._model is None:
+            return None
+        try:
+            return str(next(self._model.parameters()).device)
+        except Exception:  # noqa: BLE001 - third-party model wrappers vary
+            device = getattr(self._model, "device", None)
+            return str(device) if device is not None else None
+
+    @property
+    def dtype(self) -> str | None:
+        """Actual parameter precision of the shared model when resident."""
+        if self._model is None:
+            return None
+        try:
+            return str(next(self._model.parameters()).dtype)
+        except Exception:  # noqa: BLE001 - diagnostics must remain best effort
+            return None
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
@@ -1009,11 +1272,6 @@ def _prepare_voxcpm_ref(path: str) -> str:
 class VoxCPM2Backend(TTSBackend):
     """OpenBMB VoxCPM2 wrapper — `pip install "voxcpm>=2.0.3"` required.
 
-    Ships as a scaffold: the class loads and reports unavailability cleanly
-    when the dep isn't installed, so Settings UI can gate the engine selector
-    without a hard crash. When `voxcpm` is present, `generate()` delegates to
-    the real model.
-
     Voice Design: VoxCPM2 uniquely supports creating voices from a text
     description (e.g. "young female, warm tone, British accent") without
     any reference audio. Pass `description=` without `ref_audio=` to use
@@ -1081,50 +1339,15 @@ class VoxCPM2Backend(TTSBackend):
         )
 
     def generate(self, text, **kw) -> torch.Tensor:
+        self._check_language(kw.get("language"))
         self._ensure_loaded()
         import numpy as np
 
-        ref_audio = kw.get("ref_audio")
-        ref_text = kw.get("ref_text")
-        description = kw.get("description")
-        instruct = kw.get("instruct")
+        from engines.voxcpm2_subprocess.main import generation_kwargs
 
-        # ── Voice Design mode: description-only, no reference audio ─────
-        # VoxCPM2's `generate_from_description()` creates a synthetic voice
-        # matching a natural-language description. This is the P0 feature
-        # from the roadmap — text → voice without any audio sample.
-        if description and not ref_audio:
-            logger.info(
-                "VoxCPM2: voice design mode — generating from description: %r",
-                description[:80],
-            )
-            wav = self._model.generate(
-                text=text,
-                voice_description=description,
-                cfg_value=kw.get("guidance_scale", 2.0),
-                inference_timesteps=kw.get("num_step", 10),
-            )
-            return self._finalize(wav)
-
-        # ── Standard clone / instruct mode ──────────────────────────────
-        # Map our instruct prop onto VoxCPM2's inline "(instruct)prompt" prefix.
-        # The reference clip is prepared first (edge-silence trim + length
-        # cap) — the model no longer trims it internally, so a raw user clip
-        # would condition generation on dead air. Fail-open: on any prep
-        # problem the raw path is used, exactly as before.
-        if ref_audio:
-            ref_audio = _prepare_voxcpm_ref(ref_audio)
-        prompt = text
-        if instruct:
-            prompt = f"({instruct}){text}"
-        wav = self._model.generate(
-            text=prompt,
-            cfg_value=kw.get("guidance_scale", 2.0),
-            inference_timesteps=kw.get("num_step", 10),
-            reference_wav_path=ref_audio,
-            prompt_wav_path=ref_audio if ref_text else None,
-            prompt_text=ref_text,
-        )
+        if kw.get("ref_audio"):
+            kw["ref_audio"] = _prepare_voxcpm_ref(kw["ref_audio"])
+        wav = self._model.generate(**generation_kwargs(text, **kw))
         return self._finalize(wav)
 
     def _finalize(self, wav) -> torch.Tensor:
@@ -1255,7 +1478,7 @@ class MossTTSNanoBackend(TTSBackend):
         model_cls = _moss_model_class(moss_tts_nano)
         if model_cls is None:  # pragma: no cover - is_available() gates this
             raise RuntimeError(
-                "moss_tts_nano exposes no usable model class; see Model Catalogue → Engines"
+                "moss_tts_nano exposes no usable model class; see Model Catalogue"
             )
         checkpoint = os.environ.get(
             "OMNIVOICE_MOSS_TTS_MODEL", "OpenMOSS-Team/MOSS-TTS-Nano"
@@ -1267,6 +1490,7 @@ class MossTTSNanoBackend(TTSBackend):
         )
 
     def generate(self, text, **kw) -> torch.Tensor:
+        self._check_language(kw.get("language"))
         self._ensure_loaded()
         import numpy as np
         ref_audio = kw.get("ref_audio")
@@ -1370,16 +1594,9 @@ class KittenTTSBackend(TTSBackend):
     _MAX_ONNX_TOKENS = 512
 
     def generate(self, text: str, **kw) -> torch.Tensor:
+        self._check_language(kw.get("language"))
         import numpy as np
         self._ensure_loaded()
-
-        language = kw.get("language")
-        if language and language.lower() not in {"en", "english", "auto"}:
-            logger.info(
-                "KittenTTS is English-only; ignoring language=%r — "
-                "use OmniVoice for multilingual synthesis.",
-                language,
-            )
 
         voice = kw.get("voice") or self.DEFAULT_VOICE
         if voice not in self.PRESET_VOICES:
@@ -1497,6 +1714,7 @@ class KittenTTSBackend(TTSBackend):
 # resolved unchanged by `resolve_kokoro_lang_code()` below.
 _KOKORO_ISO_BY_FULL_NAME = {
     "english": "en",
+    "british english": "en-gb",
     "spanish": "es",
     "french": "fr",
     "hindi": "hi",
@@ -1505,6 +1723,31 @@ _KOKORO_ISO_BY_FULL_NAME = {
     "japanese": "ja",
     "chinese": "zh",
 }
+
+
+def _kokoro_supported_labels(aliases: dict, lang_codes: dict) -> list[str]:
+    """Human labels for every language Kokoro accepts, read from its own tables.
+
+    Derived from the installed package, never from
+    ``_KOKORO_ISO_BY_FULL_NAME``: that map exists to translate full names
+    *into* Kokoro's codes, and reusing it to describe what Kokoro supports
+    understates the model when a newly supported code has no full-name alias.
+    Read every installed code so new languages remain visible without changing
+    the input-name map.
+    """
+    labels: dict[str, str] = {}
+    # Prefer the full name a caller can actually pass.
+    for name, iso in _KOKORO_ISO_BY_FULL_NAME.items():
+        code = aliases.get(iso, iso)
+        if code in lang_codes:
+            labels.setdefault(code, name.title())
+    # Then whatever the installed table supports that no full name reaches. Its
+    # own description is a display name for some codes ("British English") and
+    # an ISO tag for others ("pt-br"); either names the language better than
+    # dropping it.
+    for code, described in lang_codes.items():
+        labels.setdefault(code, str(described))
+    return sorted(labels.values())
 
 
 def resolve_kokoro_lang_code(language: str) -> str:
@@ -1524,7 +1767,12 @@ def resolve_kokoro_lang_code(language: str) -> str:
     iso = _KOKORO_ISO_BY_FULL_NAME.get(key, key)
     code = ALIASES.get(iso, iso)
     if code not in LANG_CODES:
-        supported = ", ".join(sorted(name.title() for name in _KOKORO_ISO_BY_FULL_NAME))
+        # Labels from newer installed tables must remain selectable even when
+        # they have no entry in our compatibility map of full names.
+        code = next((candidate for candidate, label in LANG_CODES.items()
+                     if str(label).strip().lower() == key), code)
+    if code not in LANG_CODES:
+        supported = ", ".join(_kokoro_supported_labels(ALIASES, LANG_CODES))
         raise ValueError(
             f"mlx-audio's Kokoro model (mlx-community/Kokoro-82M-bf16) doesn't "
             f"support language={language!r}. Kokoro supports: {supported}. "
@@ -1572,7 +1820,7 @@ class MLXAudioBackend(TTSBackend):
     def __init__(self):
         self._model = None
         self._sr = 24000  # most mlx-audio engines emit 24 kHz mono
-        # Env var > persisted UI choice (#981 — Model Catalogue → Engines curated-
+        # Env var > persisted UI choice (#981 — Model Catalogue curated-
         # model picker) > default. Mirrors active_backend_id()'s resolution
         # order exactly so power-users can still pin a model without the UI
         # silently undoing it.
@@ -1632,7 +1880,23 @@ class MLXAudioBackend(TTSBackend):
         curated set, only CSM (`mlx-community/csm-1b-8bit`) is confirmed to
         accept a reference prompt — default False for every other model,
         curated or user-supplied, until positively confirmed."""
-        return self._model_id == self.CURATED_MODELS.get("csm")
+        return self._model_id in {
+            self.CURATED_MODELS.get(key) for key in self.cloning_model_keys
+        }
+
+    #: The curated picks that take a reference prompt. Kept beside
+    #: ``supports_cloning`` above so the two cannot drift — the property reads
+    #: this list, and ``test_cloning_model_keys_match_supports_cloning``
+    #: instantiates the engine on each key to prove the claim.
+    cloning_model_keys = ("csm",)
+
+    @classmethod
+    def cloning_model_labels(cls) -> tuple[str, ...]:
+        # The picker calls it "CSM (voice cloning)"; quote it verbatim so the
+        # error names what the user is actually looking at.
+        return tuple(
+            _MLX_AUDIO_MODEL_LABELS.get(key, key) for key in cls.cloning_model_keys
+        )
 
     def _ensure_loaded(self):
         if self._model is not None:
@@ -1713,22 +1977,40 @@ class MLXAudioBackend(TTSBackend):
                 # model is actually active.
                 kwargs["lang_code"] = language[:2].lower()
 
-        pieces = []
+        def collect(results):
+            groups = []
+            rate = None
+            pending = []
+
+            def flush():
+                if not pending:
+                    return
+                audio = np.concatenate(pending, axis=-1)
+                if rate != self.sample_rate:
+                    import torchaudio
+                    audio = torchaudio.functional.resample(
+                        torch.from_numpy(audio), rate, self.sample_rate,
+                    ).numpy()
+                groups.append(audio)
+                pending.clear()
+
+            for result in results:
+                audio = getattr(result, "audio", result)
+                if hasattr(audio, "numpy"):
+                    audio = audio.numpy()
+                sr = getattr(result, "sample_rate", self.sample_rate)
+                if sr != rate:
+                    flush()
+                    rate = sr
+                pending.append(np.asarray(audio, dtype=np.float32))
+            flush()
+            return groups
+
         try:
-            for result in self._model.generate(**kwargs):
-                audio = getattr(result, "audio", result)
-                if hasattr(audio, "numpy"):
-                    audio = audio.numpy()
-                pieces.append(np.asarray(audio, dtype=np.float32))
+            pieces = collect(self._model.generate(**kwargs))
         except TypeError:
-            # Some engines don't accept lang_code / ref_audio. Retry with
-            # only the universal kwargs.
-            pieces = []
-            for result in self._model.generate(text=text, speed=speed):
-                audio = getattr(result, "audio", result)
-                if hasattr(audio, "numpy"):
-                    audio = audio.numpy()
-                pieces.append(np.asarray(audio, dtype=np.float32))
+            # Retry engines that accept only the universal arguments.
+            pieces = collect(self._model.generate(text=text, speed=speed))
 
         if not pieces:
             raise RuntimeError(f"mlx-audio ({self._model_id}) produced no audio")
@@ -1826,13 +2108,13 @@ class CosyVoiceBackend(TTSBackend):
         self._model = AutoModel(model_dir=model_dir)
 
     def generate(self, text: str, **kw) -> torch.Tensor:
+        language = self._check_language(kw.get("language"))
         import numpy as np
         self._ensure_loaded()
 
         ref_audio = kw.get("ref_audio")
         ref_text = kw.get("ref_text")
         instruct = kw.get("instruct")
-        language = kw.get("language")
 
         # Pick the right inference method based on what the caller provides:
         # 1. instruct + ref_audio → inference_instruct2 (emotion/dialect/speed)
@@ -1947,13 +2229,36 @@ class GPTSoVITSBackend(TTSBackend):
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
         # GPT-SoVITS runs as an external API server — check if it's reachable.
-        from services.outbound_http import open_trusted_endpoint
+        # api_v2 exposes POST /tts; api.py (v1) did not. Probing /tts with GET
+        # lets the server's own FastAPI stack answer — a healthy api_v2
+        # responds with 200/400/405 (the route exists, just for a different
+        # verb or with different inputs), while api.py answers 404 because
+        # the path is unmapped. The two are now distinguishable instead of
+        # both reading as "server not reachable".
+        from services.outbound_http import EndpointHTTPError, open_trusted_endpoint
         url = os.environ.get("OMNIVOICE_GPTSOVITS_URL", "http://127.0.0.1:9880")
         try:
-            with open_trusted_endpoint(url, method="GET", timeout=2):
+            with open_trusted_endpoint(
+                url, method="GET", path="tts", timeout=2, allowed_statuses={400, 405},
+                # api_v2 lowercases these before validating missing inputs.
+                query="text=&text_lang=en&prompt_lang=en",
+            ):
                 pass
-            return True, "ready (server reachable)"
+            return True, "ready (api_v2 server reachable)"
+        except EndpointHTTPError as exc:
+            if exc.status == 404:
+                return False, (
+                    f"GPT-SoVITS server at {url} is reachable but does not "
+                    "expose api_v2's /tts route. Start it with: "
+                    "python api_v2.py -a 127.0.0.1 -p 9880 -c "
+                    "GPT_SoVITS/configs/tts_infer.yaml"
+                )
+            return False, (
+                f"GPT-SoVITS server at {url} returned HTTP {exc.status}. "
+                "Check the server logs and access configuration."
+            )
         except Exception:
+            # Connection refused / DNS failure / unsafe endpoint / etc.
             return False, (
                 f"GPT-SoVITS server not reachable at {url}. "
                 "Start it with: python api_v2.py -a 127.0.0.1 -p 9880 "
@@ -1969,12 +2274,12 @@ class GPTSoVITSBackend(TTSBackend):
         return ["zh", "en", "ja", "yue", "ko"]
 
     def generate(self, text: str, **kw) -> torch.Tensor:
-        import urllib.parse
+        language = self._check_language(kw.get("language"))
+        import json
         from services.outbound_http import open_trusted_endpoint
 
         ref_audio = kw.get("ref_audio")
         ref_text = kw.get("ref_text", "")
-        language = kw.get("language", "en")
 
         # Map language codes to GPT-SoVITS format
         lang_map = {
@@ -1983,24 +2288,54 @@ class GPTSoVITSBackend(TTSBackend):
         }
         text_lang = lang_map.get(language.lower() if language else "en", "en")
 
-        # Build request params
-        params = {
+        # api_v2 takes a JSON body to /tts (api.py v1 took a query string
+        # at the root URL with different field names). The two protocols do
+        # not share a schema, so sending v1-shaped params to an api_v2
+        # server produces a 404 and a silent failure.
+        body: dict[str, object] = {
             "text": text,
-            "text_language": text_lang,
+            "text_lang": text_lang,
+            "text_split_method": "cut0",
+            "media_type": "wav",
+            "streaming_mode": False,
         }
-        if ref_audio:
-            params["refer_wav_path"] = ref_audio
-            params["prompt_text"] = ref_text or ""
-            params["prompt_language"] = text_lang
+        # api_v2 has no server-side default reference (api.py's -dr/-dt/-dl
+        # flags are v1 only) and answers 400 without one, so a plain TTS
+        # request — no voice profile — needs the clip from the environment.
+        # Profiles store the desired output language, not the reference's
+        # spoken language. Let api_v2 detect the reference transcript language
+        # independently, including mixed-language clips, instead of forcing
+        # it through the target language's phonemizer.
+        prompt_lang = "auto"
+        if not ref_audio:
+            ref_audio = os.environ.get("OMNIVOICE_GPTSOVITS_REF_AUDIO") or None
+            ref_text = os.environ.get("OMNIVOICE_GPTSOVITS_REF_TEXT", "") if ref_audio else ""
+            prompt_lang = lang_map.get(
+                os.environ.get("OMNIVOICE_GPTSOVITS_REF_LANG", "").lower(), "auto"
+            )
+        if not ref_audio:
+            raise TTSInputError(
+                "GPT-SoVITS (api_v2) needs a reference clip for every request: "
+                "pick a voice profile, or set OMNIVOICE_GPTSOVITS_REF_AUDIO (path "
+                "readable by the server) and OMNIVOICE_GPTSOVITS_REF_TEXT (its "
+                "transcript) as the default voice."
+            )
+        body["ref_audio_path"] = ref_audio
+        body["prompt_text"] = ref_text or ""
+        body["prompt_lang"] = prompt_lang
 
         speed = kw.get("speed", 1.0)
         if speed != 1.0:
-            params["speed_factor"] = str(speed)
+            body["speed_factor"] = float(speed)
 
-        query = urllib.parse.urlencode(params)
         try:
             with open_trusted_endpoint(
-                self._url, method="POST", query=query, timeout=120
+                self._url,
+                method="POST",
+                path="tts",
+                body=json.dumps(body).encode("utf-8"),
+                content_type="application/json",
+                timeout=120,
             ) as resp:
                 audio_bytes = resp.read()
         except Exception as e:
@@ -2198,6 +2533,13 @@ _LAZY_REGISTRY: dict[str, tuple[str, str]] = {
     # 2026-07-02 (CPU, Apple Silicon; 22.05 kHz output). Gated behind
     # OMNIVOICE_CONFUCIUS4_TTS_DIR so it's inert until enabled.
     "confucius4-tts": ("engines.confucius4", "Confucius4Backend"),
+    # audio.cpp (0xShug0/audio.cpp) — pure-C++ ggml runtime, no Python venv.
+    # v1 serves Breeze-TTS-2 (en+zh, clone+design) through a parent-managed
+    # audiocpp_server over loopback HTTP. Gated behind a server binary
+    # (OMNIVOICE_AUDIOCPP_BIN) so it's inert until enabled. Lazy for the
+    # same import-cycle reason as the entries above (engines.audiocpp
+    # imports services.tts_backend for TTSBackend).
+    "audiocpp": ("engines.audiocpp", "AudioCPPBackend"),
 }
 
 
@@ -2283,7 +2625,7 @@ _LAST_ERRORS: dict[str, str] = {}
 
 
 
-# Short install hints surfaced as tooltips on the Model Catalogue → Engines UI.
+# Short install hints surfaced as tooltips on the Model Catalogue UI.
 # Helps users understand what pip package to install and where.
 _INSTALL_HINTS: dict[str, str] = {
     "gemini-3.1-flash-tts": "Set GEMINI_API_KEY (or GOOGLE_API_KEY), then select this engine. Uses the cloud Gemini API; no voice cloning.",
@@ -2300,9 +2642,10 @@ _INSTALL_HINTS: dict[str, str] = {
     "omnivoice-gguf":"Bundled — runs the C++ omnivoice-tts binary in bin/. Quants download lazily from Serveurperso/OmniVoice-GGUF on first generate.",
     "supertonic3":   "uv sync --extra supertonic  (CPU-only ONNX, 31 langs, ~400 MB model on first use; OpenRAIL-M model license)",
     "pockettts":     "uv sync --extra pockettts  (Kyutai, CPU-only, ~100 MB model on first use; MIT code + CC-BY-4.0 weights; HF-gated, review terms and set HF_TOKEN)",
-    "moss-tts-v15":  "git clone OpenMOSS/MOSS-TTS + set OMNIVOICE_MOSS_TTS_V15_DIR  (own venv, transformers==5.0; 8B, ~16 GB weights; CUDA/CPU, no MPS; Apache-2.0)",
+    "moss-tts-v15":  "git clone OpenMOSS/MOSS-TTS + set OMNIVOICE_MOSS_TTS_V15_DIR  (own venv, transformers==5.0; 8B, ~16 GB weights; CUDA/ROCm/XPU/NPU/CPU, no MPS; Apache-2.0)",
     "dots-tts":      "git clone rednote-hilab/dots.tts + set OMNIVOICE_DOTS_TTS_DIR  (own venv, transformers==4.57; 2B, ~9 GB weights; CUDA/CPU, Linux/macOS only — no Windows; Apache-2.0)",
-    "confucius4-tts":"git clone netease-youdao/Confucius4-TTS + set OMNIVOICE_CONFUCIUS4_TTS_DIR  (own Python 3.10 venv; 14-lang cross-lingual zero-shot clone; ~5 GB weights auto-download; CUDA/CPU, no MPS; Apache-2.0)",
+    "confucius4-tts":"git clone netease-youdao/Confucius4-TTS + set OMNIVOICE_CONFUCIUS4_TTS_DIR  (own Python 3.10 venv; 14-lang cross-lingual zero-shot clone; ~5 GB weights auto-download; CUDA/ROCm/XPU/NPU/CPU, no MPS; Apache-2.0)",
+    "audiocpp":     "download the matching audio.cpp v0.7.4 prebuilt + set OMNIVOICE_AUDIOCPP_BIN, then explicitly install Breeze-TTS-2 in Model Catalogue → Models  (native CPU/Vulkan/CUDA/Metal GGUF server, no Python; en+zh clone+design; ~4.73 GiB; weights research/non-commercial only)",
 }
 
 
@@ -2323,8 +2666,54 @@ _SETUP_SNIPPETS: dict[str, str] = {
 }
 
 
+# Per-engine documentation page, as a repo-relative path (#1866). Every one of
+# these docs already exists and several are CI-guarded against the code they
+# describe (e.g. tests/test_cosyvoice_install_docs.py), but nothing in the app
+# linked to them, so the point of failure — an unavailable engine row — was a
+# dead end. Paths rather than URLs so tests/test_engine_docs.py can assert the
+# file is really there; the URL is built once, at read time, from core.links.
+#
+# Keyed on the engine id, so it stays correct when the doc filename does not
+# match the id (indextts2 → indextts.md).
+_ENGINE_DOCS: dict[str, str] = {
+    "omnivoice":            "docs/engines/omnivoice.md",
+    "omnivoice-subprocess": "docs/engines/omnivoice-subprocess.md",
+    "omnivoice-gguf":       "docs/engines/omnivoice-gguf.md",
+    "cosyvoice":            "docs/engines/cosyvoice.md",
+    "kittentts":            "docs/engines/kittentts.md",
+    "mlx-audio":            "docs/engines/mlx-audio.md",
+    "voxcpm2":              "docs/engines/voxcpm2.md",
+    "moss-tts-nano":        "docs/engines/moss-tts-nano.md",
+    "moss-tts-v15":         "docs/engines/moss-tts-v15.md",
+    "dots-tts":             "docs/engines/dots-tts.md",
+    "confucius4-tts":       "docs/engines/confucius4-tts.md",
+    "indextts2":            "docs/engines/indextts.md",
+    "gpt-sovits":           "docs/engines/gpt-sovits.md",
+    "sherpa-onnx":          "docs/engines/sherpa-onnx.md",
+    "supertonic3":          "docs/engines/supertonic3.md",
+    "pockettts":            "docs/engines/pockettts.md",
+    "audiocpp":             "docs/engines/audio-cpp.md",
+    "gemini-3.1-flash-tts": "docs/engines/gemini-tts.md",
+}
+
+
+def _engine_docs_url(bid: str) -> str | None:
+    """Public URL of this engine's doc page, or None when it has none.
+
+    VoiceStudio-owned constant either way: the path comes from the registry
+    above and the base from :mod:`core.links`, so no part of it is derived
+    from an engine probe. That is what lets it cross the public boundary
+    intact (see api.public_engine_metadata).
+    """
+    path = _ENGINE_DOCS.get(bid)
+    if not path:
+        return None
+    from core import links
+    return f"{links.PROJECT_REPO_BLOB_MAIN}/{path}"
+
+
 # Short, readable labels for mlx-audio's curated models (#981) — surfaced in
-# the Model Catalogue → Engines model picker so users see more than a bare key.
+# the Model Catalogue model picker so users see more than a bare key.
 # Single-sourced here rather than on MLXAudioBackend.CURATED_MODELS itself so
 # the class dict stays a plain key → repo-id map (what __init__ needs).
 _MLX_AUDIO_MODEL_LABELS: dict[str, str] = {
@@ -2349,14 +2738,24 @@ def _sidecar_installable_ids() -> frozenset[str]:
     button into their matrix rows.
     """
     try:
-        from services.sidecar_install import SPECS
-        return frozenset(SPECS)
+        # Host-aware: an engine whose installer cannot work on THIS machine
+        # (dots.tts on Windows, a CUDA-only install on a CPU host) must not get
+        # an Install button that can only fail.
+        from services.sidecar_install import installable_engine_ids
+        return installable_engine_ids()
     except Exception:  # pragma: no cover — defensive only
         return frozenset()
 
 
-def list_backends() -> list[dict]:
-    """Enumerate every registered backend with its availability state.
+def list_backends(*, include_hidden: bool = False) -> list[dict]:
+    """Enumerate the engine catalogue with each backend's availability state.
+
+    On MPS, the canonical ``omnivoice`` id already resolves to the killable
+    OmniVoice sidecar. The explicit ``omnivoice-subprocess`` compatibility id
+    is therefore omitted from the normal catalogue so the picker does not
+    advertise two choices with the same runtime behavior. Internal callers
+    that must validate or preserve a stored compatibility id can pass
+    ``include_hidden=True``.
 
     Per-entry shape (ENGINE-05 + ENGINE-06):
 
@@ -2370,10 +2769,11 @@ def list_backends() -> list[dict]:
                                                     #   e.g. VoxCPM2's >=2.0.3 upgrade hint)
           "install_hint":   Optional[str],
           "setup_snippet":  Optional[str],          # exact `export VAR=...` for path-gated opt-in engines
+          "docs_url":       Optional[str],          # this engine's doc page (registry-authored constant)
           "one_click_install": bool,                # services.sidecar_install can provision it in-app
           "last_error":     Optional[str],          # cached most-recent failure
           "isolation_mode": "in-process" | "subprocess",
-          "gpu_compat":     list[str],              # subset of {cuda, rocm, mps, xpu, cpu}
+          "gpu_compat":     list[str],              # subset of {cuda, rocm, mps, vulkan, xpu, npu, cpu}
           "supports_cloning": Optional[bool],       # True/False from the class attr; None when
                                                     #   model-dependent (property, e.g. mlx-audio)
           "effective_device": str,                  # device this engine uses on THIS host
@@ -2403,12 +2803,17 @@ def list_backends() -> list[dict]:
     from core.device_caps import detect_host_caps
     from services.engine_disk_usage import disk_summary_for
     from services.engine_evidence import snapshot as execution_snapshot
-    from services.engine_routing import routing_fields
     caps = detect_host_caps()
     installable = _sidecar_installable_ids()
 
     out: list[dict] = []
     for bid, cls in _REGISTRY.items():
+        if (
+            not include_hidden
+            and caps.family == "mps"
+            and bid == "omnivoice-subprocess"
+        ):
+            continue
         cls = _effective_backend_class(bid, cls, caps.family)
         try:
             ok, msg = cls.is_available()
@@ -2429,19 +2834,57 @@ def list_backends() -> list[dict]:
             isolation = "subprocess"
         else:
             isolation = "in-process"
-        gpu_compat = getattr(cls, "gpu_compat", ("cpu",))
+        from services.engine_routing import resolve_routing, runtime_compute_profile
+        try:
+            profile = runtime_compute_profile(cls, caps)
+        except Exception:
+            # Runtime-aware native probes remain optional metadata. A broken
+            # provider probe must not take down the engine picker, especially
+            # when availability already explains a missing binary or model.
+            compat = tuple(getattr(cls, "gpu_compat", ("cpu",)))
+            floor = float(getattr(cls, "min_vram_gb", 0.0) or 0.0)
+            profile = {
+                "gpu_compat": compat,
+                "min_vram_gb": floor,
+                **resolve_routing(compat, caps, floor),
+                "runtime_backend": None,
+                "runtime_device_index": None,
+                "runtime_device_name": None,
+                "runtime_hardware_family": None,
+                "runtime_vram_gb": None,
+                "runtime_device_verified": None,
+            }
+        gpu_compat = profile["gpu_compat"]
         # Cloning capability: same descriptor guard as
         # cloning_capable_engine_ids() — a class-level getattr on a *property*
         # (mlx-audio: capability depends on the picked model) returns the
         # descriptor, not a bool, so report None (= model-dependent) there
         # instead of an always-truthy false positive.
         _clone = getattr(cls, "supports_cloning", True)
-        routing = routing_fields(gpu_compat, caps, getattr(cls, "min_vram_gb", 0.0))
+        from core.scrub import scrub_text
+        routing = {
+            "effective_device": profile["effective_device"],
+            "routing_status": profile["routing_status"],
+            "routing_reason": scrub_text(profile["routing_reason"])
+            if profile["routing_reason"] else None,
+        }
         loaded_instance = None
         if _active_instance_id == bid:
             loaded_instance = _active_instance
         if loaded_instance is None:
             loaded_instance = _ENGINE_INSTANCES.get(cls)
+        if loaded_instance is None and bid == "omnivoice":
+            # Startup preloads OmniVoice through model_manager directly, before
+            # any generation route needs an adapter instance. Reflect that
+            # shared resident model here instead of contradicting
+            # /model/loaded with a stale `not_loaded` engine state.
+            try:
+                from services import model_manager
+
+                if model_manager.model is not None:
+                    loaded_instance = OmniVoiceBackend(model=model_manager.model)
+            except Exception:  # noqa: BLE001 - catalogue reads never fail on diagnostics
+                pass
         out.append({
             "id": bid,
             "display_name": cls.display_name,
@@ -2457,6 +2900,10 @@ def list_backends() -> list[dict]:
             "install_hint": _INSTALL_HINTS.get(bid),
             # Exact `export VAR=...` line for path-gated opt-in engines, or None.
             "setup_snippet": _SETUP_SNIPPETS.get(bid),
+            # This engine's doc page (#1866). Registry-authored constant, so it
+            # survives api.public_engine_metadata and gives an unavailable row
+            # somewhere to send the user.
+            "docs_url": _engine_docs_url(bid),
             # True when services.sidecar_install can provision this engine
             # in-app (Settings renders an Install button instead of leading
             # with the manual setup snippet).
@@ -2466,7 +2913,7 @@ def list_backends() -> list[dict]:
             "isolation_mode": isolation,
             "gpu_compat": list(gpu_compat),
             # effective_device / routing_status / routing_reason (scrubbed):
-            "min_vram_gb": getattr(cls, "min_vram_gb", 0.0) or None,
+            "min_vram_gb": profile["min_vram_gb"] or None,
             # effective_device / routing_status / routing_reason (scrubbed);
             # the reason now also carries the under-provisioned-GPU caveat.
             **routing,
@@ -2474,7 +2921,7 @@ def list_backends() -> list[dict]:
                 engine_id=bid,
                 engine_cls=cls,
                 instance=loaded_instance,
-                routing=routing,
+                routing={**profile, **routing},
                 caps=caps,
             ),
         })
@@ -2517,12 +2964,29 @@ def list_backends() -> list[dict]:
     return out
 
 
+# In-process engines that also run from a venv of their own once the
+# one-click installer has made one: engine id -> (sidecar module, class). Each
+# module exposes own_venv_python(); an install made into the app's environment
+# keeps running in-process.
+_OWN_VENV_SIDECARS: dict[str, tuple[str, str]] = {
+    "voxcpm2": ("engines.voxcpm2_subprocess", "VoxCPM2SubprocessBackend"),
+    "moss-tts-nano": ("engines.moss_tts_nano_subprocess", "MossTTSNanoSubprocessBackend"),
+    "cosyvoice": ("engines.cosyvoice_subprocess", "CosyVoiceSubprocessBackend"),
+}
+
+
 def _effective_backend_class(
     backend_id: str,
     backend_cls: type[TTSBackend],
     host_family: str | None = None,
 ) -> type[TTSBackend]:
     """Resolve host-specific containment without changing the configured id."""
+    sidecar = _OWN_VENV_SIDECARS.get(backend_id)
+    if sidecar is not None:
+        import importlib
+
+        module = importlib.import_module(sidecar[0])
+        return getattr(module, sidecar[1]) if module.own_venv_python() is not None else backend_cls
     if backend_id != "omnivoice":
         return backend_cls
     if host_family is None:
@@ -2540,6 +3004,83 @@ def get_backend_class(backend_id: str) -> type[TTSBackend]:
     if backend_id not in _REGISTRY:
         raise ValueError(f"Unknown TTS backend: {backend_id!r}. Known: {list(_REGISTRY)}")
     return _effective_backend_class(backend_id, _REGISTRY[backend_id])
+
+
+def language_options(backend_id: str) -> Optional[list[str]]:
+    """Picker names for a finite engine; None leaves unknown/model-specific sets open.
+
+    Adapter constructors configure references only. Never load weights or call
+    get_active_tts_backend here: discovery must not switch or unload an engine.
+    """
+    from omnivoice.utils.lang_map import LANG_NAME_TO_ID
+
+    backend = None
+    try:
+        backend = get_backend_class(backend_id)()
+        declared = backend.supported_languages
+        if not declared or "multi" in declared:
+            return None
+        codes = {backend._normalize_language_code(code) for code in declared}
+        return sorted(name for name in LANG_NAME_TO_ID
+                      if backend._normalize_language_code(name) in codes)
+    except Exception:  # Optional metadata must not take down discovery.
+        logger.debug("Could not resolve language options for %s", backend_id, exc_info=True)
+        return None
+    finally:
+        # Sidecar constructors register a bound exit handler, which otherwise
+        # retains every temporary metadata instance for the process lifetime.
+        shutdown = getattr(backend, "shutdown", None)
+        if callable(shutdown) and getattr(backend, "_is_subprocess_isolated", False):
+            import atexit
+            try:
+                shutdown()
+            except Exception:
+                logger.debug("Could not clean up language metadata instance", exc_info=True)
+            finally:
+                atexit.unregister(shutdown)
+
+
+
+def cloning_unavailable_detail(engine_id: str, backend, cloning_purpose: str) -> str:
+    """Why the active engine can't clone, and the smallest change that fixes it.
+
+    ``supports_cloning`` is an engine-level flag for every backend except the
+    adapters that multiplex models, where it is a property computed from the
+    *model* currently selected. For those, "this engine doesn't support voice
+    cloning" is simply untrue — the engine clones fine, just not with the pick
+    it is running. #2201 told an mlx-audio user to abandon the engine for one
+    of thirteen others while their own model picker was offering
+    "CSM (voice cloning)" one setting away.
+
+    So: name the model in the way, name the model that works, and keep the
+    engine list as the fallback it should always have been.
+    """
+    cls = type(backend)
+    declared = getattr(cls, "supports_cloning", True)
+    labels = tuple(cls.cloning_model_labels()) if hasattr(cls, "cloning_model_labels") else ()
+    alternatives = ", ".join(cloning_capable_engine_ids())
+    # A plain bool is a fact about the engine; a property is a fact about the
+    # model, and only the second case has a model to switch to.
+    if not isinstance(declared, bool) and labels:
+        current = ""
+        try:
+            current = backend.model_identity() or ""
+        except Exception:  # noqa: BLE001 — naming the model is best-effort
+            current = ""
+        running = f" ({current})" if current else ""
+        return (
+            f"The '{engine_id}' engine can clone voices, but not with the model "
+            f"it is running{running}, so {cloning_purpose} can't preserve speaker "
+            f"voices. Set this engine's model to {' or '.join(labels)} in Model "
+            f"Catalogue — nothing else has to change — or switch engine to one "
+            f"of: {alternatives}."
+        )
+    return (
+        f"The active TTS engine '{engine_id}' doesn't support voice cloning, "
+        f"so {cloning_purpose} can't preserve speaker voices. Switch to one "
+        f"of: {alternatives} in "
+        "Model Catalogue, or use OmniVoice for this job."
+    )
 
 
 def cloning_capable_engine_ids() -> list[str]:
@@ -2576,7 +3117,9 @@ def active_routing() -> dict | None:
     """
     try:
         active = active_backend_id()
-        for b in list_backends():
+        # The MPS picker intentionally hides the redundant compatibility id,
+        # but routing must still describe a saved or environment-pinned id.
+        for b in list_backends(include_hidden=True):
             if b.get("id") == active:
                 return {
                     "engine": active,
@@ -2881,7 +3424,7 @@ def release_idle_engines(
 #
 # dub_generate.py and batch.py used to call services.model_manager.get_model()
 # directly, hardcoding OmniVoice regardless of the engine selected in
-# Model Catalogue → Engines — a SILENT fallback: pick VoxCPM2, dub anyway with
+# Model Catalogue — a SILENT fallback: pick VoxCPM2, dub anyway with
 # OmniVoice, no error. This is the single resolution path both routers now
 # call instead, mirroring generation.py's /generate resolution (engine id →
 # is_available() → routing gate) plus a voice-cloning capability gate that
@@ -2912,7 +3455,7 @@ async def resolve_generation_backend(
     except ValueError as e:
         raise ValueError(
             f"Active TTS engine '{engine_id}' is not a recognized backend ({e}). "
-            "Check Model Catalogue → Engines or the OMNIVOICE_TTS_BACKEND env var."
+            "Check Model Catalogue or the OMNIVOICE_TTS_BACKEND env var."
         ) from e
 
     try:
@@ -2923,10 +3466,9 @@ async def resolve_generation_backend(
         raise ValueError(f"TTS engine '{engine_id}' is not available: {_mask_hf_tokens(msg)}")
 
     from core.device_caps import detect_host_caps
-    from services.engine_routing import resolve_routing
-    routing = resolve_routing(
-        getattr(backend_cls, "gpu_compat", ("cpu",)), detect_host_caps(),
-        getattr(backend_cls, "min_vram_gb", 0.0),
+    from services.engine_routing import runtime_compute_profile_async
+    routing = await runtime_compute_profile_async(
+        backend_cls, detect_host_caps()
     )
     if routing["routing_status"] == "unavailable":
         raise ValueError(routing["routing_reason"])
@@ -2942,12 +3484,7 @@ async def resolve_generation_backend(
     backend = get_active_tts_backend(model=_model)
 
     if require_cloning and not getattr(backend, "supports_cloning", True):
-        raise ValueError(
-            f"The active TTS engine '{engine_id}' doesn't support voice cloning, "
-            f"so {cloning_purpose} can't preserve speaker voices. Switch to one "
-            f"of: {', '.join(cloning_capable_engine_ids())} in "
-            "Model Catalogue → Engines, or use OmniVoice for this job."
-        )
+        raise ValueError(cloning_unavailable_detail(engine_id, backend, cloning_purpose))
 
     return backend
 
@@ -2964,4 +3501,6 @@ def __getattr__(name: str):  # pragma: no cover - exercised via tests
         return _REGISTRY[name if name in _REGISTRY else None]
     if name == "IndexTTS2Backend":
         return _REGISTRY["indextts2"]
+    if name == "AudioCPPBackend":
+        return _REGISTRY["audiocpp"]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

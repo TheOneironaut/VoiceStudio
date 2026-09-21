@@ -86,6 +86,9 @@ function normalizeLongformOverrides(value: unknown): LongformOverrides {
       typeof value.varyRepeats === 'boolean' ? value.varyRepeats : DEFAULT_OVERRIDES.varyRepeats,
     emoText: typeof value.emoText === 'string' ? value.emoText : DEFAULT_OVERRIDES.emoText,
     emoAlpha: nullableFiniteNumber(value.emoAlpha),
+    lineGapMs: nullableFiniteNumber(value.lineGapMs),
+    paragraphGapMs: nullableFiniteNumber(value.paragraphGapMs),
+    trimEdges: typeof value.trimEdges === 'boolean' ? value.trimEdges : DEFAULT_OVERRIDES.trimEdges,
   };
 }
 
@@ -164,6 +167,7 @@ export const useAppStore = create<AppStore>()(
         timingStrategy: s.timingStrategy,
         fitOptions: s.fitOptions,
         voiceMatch: s.voiceMatch,
+        dubLivePreview: s.dubLivePreview,
         // "What's new" affordance (feat/safe-updates) — remembering which
         // version's notes were seen only works if it survives restarts.
         whatsNewSeenVersion: s.whatsNewSeenVersion,

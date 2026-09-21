@@ -89,6 +89,7 @@ def bed_mix_filter(
     duration: str = "longest",
     tail: str = "",
     uniq: str = "",
+    bed_gain: float = BED_GAIN,
 ) -> str:
     """One ffmpeg filter chain mixing `voice_in` over `bed_in` at original level.
 
@@ -110,22 +111,22 @@ def bed_mix_filter(
         # Gains applied per input, amix reduced to a plain sum: levels are
         # exact for the whole timeline, including after either stream ends.
         return (
-            f"[{bed_in}]aresample={BED_MIX_SAMPLE_RATE},{stereo},volume={BED_GAIN:g}[{b}];"
+            f"[{bed_in}]aresample={BED_MIX_SAMPLE_RATE},{stereo},volume={bed_gain:g}[{b}];"
             f"[{voice_in}]aresample={BED_MIX_SAMPLE_RATE},{stereo},volume={VOICE_GAIN:g}[{v}];"
             f"[{b}][{v}]amix=inputs=2:duration={duration}:dropout_transition=2:"
-            f"normalize=0,alimiter=level=false:limit=0.98{tail}[{out}]"
+            f"normalize=0,alimiter=level=false:limit=0.98:latency=1{tail}[{out}]"
         )
     # Legacy ffmpeg (<5, no `normalize`): cancel amix's normalization with a
     # compensating multiply. Exact while both streams run; if one ends early
     # the tail is over-boosted into the limiter until the graph ends — a known
     # quirk accepted only on old ffmpeg, where the alternative is no export.
-    total = BED_GAIN + VOICE_GAIN
+    total = bed_gain + VOICE_GAIN
     return (
         f"[{bed_in}]aresample={BED_MIX_SAMPLE_RATE},{stereo}[{b}];"
         f"[{voice_in}]aresample={BED_MIX_SAMPLE_RATE},{stereo}[{v}];"
         f"[{b}][{v}]amix=inputs=2:duration={duration}:dropout_transition=2:"
-        f"weights={BED_GAIN:g} {VOICE_GAIN:g},volume={total:g},"
-        f"alimiter=level=false:limit=0.98{tail}[{out}]"
+        f"weights={bed_gain:g} {VOICE_GAIN:g},volume={total:g},"
+        f"alimiter=level=false:limit=0.98:latency=1{tail}[{out}]"
     )
 
 
@@ -173,12 +174,12 @@ def _binary_runs(path: str) -> bool:
     if cached is not None:
         return cached
     try:
-        subprocess.run(
+        result = subprocess.run(
             [path, "-version"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             timeout=10, check=False,
         )
-        ok = True
+        ok = result.returncode == 0
     except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
         logger.warning(
             "Rejecting non-runnable ffmpeg/ffprobe candidate %s: %s",
@@ -308,8 +309,11 @@ def find_ffprobe():
     try:
         ffmpeg_path = find_ffmpeg()
         if ffmpeg_path:
-            candidate = ffmpeg_path.replace("ffmpeg", "ffprobe")
-            if os.path.isfile(candidate):
+            candidate = os.path.join(
+                os.path.dirname(ffmpeg_path),
+                os.path.basename(ffmpeg_path).replace("ffmpeg", "ffprobe"),
+            )
+            if os.path.isfile(candidate) and _binary_runs(candidate):
                 return candidate
     except Exception:
         pass
@@ -712,46 +716,61 @@ async def run_ffmpeg(cmd, timeout: float = 1800.0, capture: bool = True,
         cmd, script_path = externalize_long_filter_complex(cmd)
     try:
         async with _get_semaphore():
-            proc = await _spawn_with_retry(cmd, stdout=stdout, stderr=stderr)
-            if job_id:
-                try:
-                    register_proc(job_id, proc)
-                except Exception as e:
-                    # Newline-strip the id inline — it can originate from a path
-                    # param, and the log stream must stay one-event-per-line.
-                    logger.debug("register_proc failed for %s: %s",
-                                 job_id.replace("\n", " ").replace("\r", " "), e)
-            try:
-                try:
-                    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=5.0)
-                    except asyncio.TimeoutError:
-                        pass
-                    raise
-                return proc.returncode, out, err
-            finally:
+            for attempt in range(2):
+                proc = await _spawn_with_retry(cmd, stdout=stdout, stderr=stderr)
                 if job_id:
                     try:
-                        unregister_proc(job_id, proc)
+                        register_proc(job_id, proc)
                     except Exception as e:
-                        logger.debug("unregister_proc failed for %s: %s",
+                        # Newline-strip the id inline — it can originate from a path
+                        # param, and the log stream must stay one-event-per-line.
+                        logger.debug("register_proc failed for %s: %s",
                                      job_id.replace("\n", " ").replace("\r", " "), e)
-                # Guarantee reaping — prevents zombie pileup under timeouts or errors.
-                if proc.returncode is None:
+                try:
                     try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                     except asyncio.TimeoutError:
-                        pass
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            # It exited between the timeout check and kill.
+                            pass
+                        try:
+                            await asyncio.wait_for(proc.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            # Reaping is bounded; preserve the original error.
+                            pass
+                        raise
+                    if (
+                        attempt == 0 and proc.returncode
+                        and "-filter_complex_script" in cmd
+                        and b"Unrecognized option 'filter_complex_script'" in (err or b"")
+                    ):
+                        # New FFmpeg builds removed the legacy spelling. Parsing
+                        # failed before any processing; retry once with the modern
+                        # file-argument syntax, retaining the short Windows argv.
+                        cmd = ["-/filter_complex" if arg == "-filter_complex_script" else arg for arg in cmd]
+                        continue
+                    return proc.returncode, out, err
+                finally:
+                    if job_id:
+                        try:
+                            unregister_proc(job_id, proc)
+                        except Exception as e:
+                            logger.debug("unregister_proc failed for %s: %s",
+                                         job_id.replace("\n", " ").replace("\r", " "), e)
+                    # Guarantee reaping — prevents zombie pileup under timeouts or errors.
+                    if proc.returncode is None:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            # It exited between the timeout check and kill.
+                            pass
+                        try:
+                            await asyncio.wait_for(proc.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            # Reaping is bounded; preserve the original error.
+                            pass
     finally:
         if script_path:
             try:

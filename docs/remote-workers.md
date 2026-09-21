@@ -245,6 +245,10 @@ grace window to come back, and if it returns carrying a finished result, that
 result is used — the task is never run twice just because a network blip
 happened. Only when the window expires is the task retried elsewhere.
 
+Each attempt retains the deadline budget granted at dispatch, including after a
+worker disconnect or control-plane restart; changed worker availability cannot
+shorten an in-flight attempt’s execution allowance.
+
 **A worker fails repeatedly.** After three consecutive failures that are
 actually its fault, it is paused for a minute, then automatically given one
 task to prove itself. Repeated trips back off further, up to thirty minutes.
@@ -392,3 +396,9 @@ would disrupt the machine or network, including airplane mode, simultaneous
 downloads, and stopping a worker during an audiobook, are printed as exact
 `MANUAL` steps and are never reported as passed automatically. A failed
 precondition or automated check exits non-zero.
+
+Remote compute targets show available CPU/GPU usage and free VRAM. Unavailable
+metrics are omitted; a transient sampling failure retains the last successful
+reading. Telemetry runs off the control loop with at most one probe per worker
+client, retained across reconnects. Read-only probes never block task draining or
+shutdown; a stuck driver probe cannot accumulate more threads.

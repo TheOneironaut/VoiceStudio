@@ -32,7 +32,9 @@ from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from services.audiobook import (
     ExpressiveOptions,
@@ -100,10 +102,22 @@ class ExpressiveMixin(BaseModel):
       takes instead of replaying one recording (default off = today).
     """
 
+    model_config = ConfigDict(allow_inf_nan=False)
+
     # Bounds so a loopback POST (reachable by a browser-tab CSRF) can't pin a
     # GPU-pool worker with an absurd step count or otherwise feed the sampler
     # nonsense. Ranges are generous supersets of the Voice-page controls; unset
     # (None) still means "use the longform default", unchanged. (#1208)
+    # Seamless joins: trim each render's own lead-in/tail, then add deliberate
+    # silence between lines (unless a [pause] says otherwise) and at blank
+    # lines inside a line. Bounded so a request cannot pad a book with hours
+    # of silence. Send 0 / false for the pre-existing hard joins.
+    line_gap_ms: int = Field(default=0, ge=0, le=5000)
+    # 350, not more: the trim keeps each paragraph's natural decay (~0.3-0.4 s of
+    # near-silence), so the HEARD break is gap + decay. Measured on a full chapter
+    # against a professional read, 600 put 26 breaks over a second; 300-400 matched.
+    paragraph_gap_ms: int = Field(default=0, ge=0, le=5000)
+    trim_edges: bool = False
     num_step: int | None = Field(default=None, ge=1, le=512)
     guidance_scale: float | None = Field(default=None, ge=0.0, le=20.0)
     position_temperature: float | None = Field(default=None, ge=0.0, le=100.0)
@@ -129,6 +143,9 @@ def _expressive_opts(req: "ExpressiveMixin") -> ExpressiveOptions:
         emo_text=(req.emo_text or None),
         emo_alpha=req.emo_alpha,
         vary_repeats=bool(req.vary_repeats),
+        line_gap_ms=int(req.line_gap_ms),
+        paragraph_gap_ms=int(req.paragraph_gap_ms),
+        trim_edges=bool(req.trim_edges),
     )
 
 
@@ -186,7 +203,8 @@ async def audiobook_import(file: UploadFile = File(...)) -> dict:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"couldn't parse PDF: {e}")
     else:
-        script = chapterize_plaintext(data.decode("utf-8", "ignore"))
+        from services.text_upload import decode_text_upload
+        script = chapterize_plaintext(decode_text_upload(data))
     if not script.strip():
         raise HTTPException(status_code=400, detail="no text found in the file")
     plan = parse_audiobook_script(script)
@@ -288,6 +306,42 @@ def _voice_profile_exists(profile_id: str | None) -> bool:
             "SELECT 1 FROM voice_profiles WHERE id=? LIMIT 1", (profile_id,)
         ).fetchone()
     return row is not None
+
+
+def _render_summary(chapters, default_voice, voice_map, language, fmt, opts) -> dict:
+    """The finished render's summary: resolve the voices it used to profile names."""
+    from core.db import db_conn
+    from services.longform_render import render_summary
+    from services.tts_backend import OmniVoiceBackend, active_backend_id, get_backend_class
+
+    ids: list[str] = []
+    for chapter in chapters:
+        for span in chapter.spans:
+            pid = _map_span_voice(span.voice_id, default_voice, voice_map)
+            if pid and pid not in ids:
+                ids.append(pid)
+    names: dict[str, str] = {}
+    if ids:
+        marks = ",".join("?" * len(ids))
+        with db_conn() as conn:
+            rows = conn.execute(f"SELECT id, name FROM voice_profiles WHERE id IN ({marks})", ids).fetchall()  # nosec B608 — placeholders only
+        names = {row["id"]: row["name"] for row in rows}
+    # Options that differ from the defaults — by VALUE, so an explicit seed=0 or
+    # postprocess_output=False is recorded, and an untouched default is not.
+    defaults = ExpressiveOptions().to_manifest()
+    chosen = (opts or ExpressiveOptions()).to_manifest()
+    engine_id = active_backend_id()
+    cls = get_backend_class(engine_id)
+    if cls is OmniVoiceBackend or getattr(cls, "supports_native_omnivoice_controls", False):
+        # Record effective tier values as well as explicit overrides: two
+        # requests with identical synthesis settings must have identical details.
+        chosen.update(_omnivoice_sampling_kwargs(opts or ExpressiveOptions()))
+    return render_summary(
+        chapters,
+        voices=[{"id": pid, "name": names.get(pid, "")} for pid in ids],
+        engine_id=engine_id, language=language, fmt=fmt,
+        options={k: v for k, v in chosen.items() if v != defaults.get(k)},
+    )
 
 
 def _map_span_voice(
@@ -420,8 +474,11 @@ def _omnivoice_sampling_kwargs(opts: ExpressiveOptions) -> dict:
     today exactly: num_step 32, guidance 2.0, and NO temperature/postprocess
     kwargs (the model keeps its own defaults). Emotion is never forwarded —
     the VoiceStudio config rejects unknown kwargs."""
+    from services.performance_profiles import tts_defaults
+
+    defaults = tts_defaults()
     kw = {
-        "num_step": opts.num_step if opts.num_step is not None else LONGFORM_NUM_STEP,
+        "num_step": opts.num_step if opts.num_step is not None else defaults.get("num_step", LONGFORM_NUM_STEP),
         "guidance_scale": (
             opts.guidance_scale if opts.guidance_scale is not None else LONGFORM_GUIDANCE_SCALE
         ),
@@ -432,6 +489,8 @@ def _omnivoice_sampling_kwargs(opts: ExpressiveOptions) -> dict:
         kw["class_temperature"] = opts.class_temperature
     if opts.postprocess_output is not None:
         kw["postprocess_output"] = opts.postprocess_output
+    elif "postprocess_output" in defaults:
+        kw["postprocess_output"] = defaults["postprocess_output"]
     return kw
 
 
@@ -612,9 +671,13 @@ def _render_chapter_cached(chapter, synth, sr, engine_id, resolve, cache_dir, le
     opts = opts or ExpressiveOptions()
 
     spans = [Span(voice_id=s.voice_id, text=normalize_for_tts(s.text, language),
-                  pause_ms_after=s.pause_ms_after, speed=getattr(s, "speed", None))
+                  pause_ms_after=s.pause_ms_after, speed=getattr(s, "speed", None),
+                  join=getattr(s, "join", None))
              for s in chapter.spans]
+    # `join` enters the tuple only when set, so a plan without inline-markup
+    # splits keeps its pre-existing chapter cache key.
     spans_tuples = [(s.voice_id, s.text, s.pause_ms_after, getattr(s, "speed", None))
+                    + ((s.join,) if s.join else ())
                     for s in spans]
     voice_sigs: dict = {}
     for s in spans:
@@ -673,7 +736,7 @@ def _render_chapter_cached(chapter, synth, sr, engine_id, resolve, cache_dir, le
                              voice_sig=voice_sigs, extra_sig=seg_extra_sig,
                              vary_repeats=opts.vary_repeats)
     audio, dur = synthesize_chapter(spans, synth, sr, lexicon=lexicon,
-                                    segment_cache=seg_cache)
+                                    segment_cache=seg_cache, **opts.join_kwargs())
     # Invisible provenance mark on the assembled chapter (#1169), tensor stage,
     # before the WAV lands in the cache — this single site covers every
     # longform front door (/audiobook, /longform/render [Stories],
@@ -706,6 +769,7 @@ def _remote_chapter_call(chapter, *, engine_id, default_voice, voice_map,
             "text": normalize_for_tts(span.text, language),
             "pause_ms_after": span.pause_ms_after,
             "speed": getattr(span, "speed", None),
+            "join": getattr(span, "join", None),
         })
         refs.append(voice.get("ref_audio"))
         voices.append({
@@ -718,6 +782,10 @@ def _remote_chapter_call(chapter, *, engine_id, default_voice, voice_map,
         "expressive": opts.to_manifest(), "watermark": bool(watermark_enabled()),
     }
     signature = hashlib.sha256(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()
+    # The worker synthesizes from ``spans``, but the gateway and scheduler read
+    # top-level ``text`` to scale the remote execution deadline. Add this after
+    # the signature so existing content-addressed remote cache keys still hit.
+    params["text"] = "\n".join(row["text"] for row in rows)
     wav_path = os.path.join(cache_dir, f"remote-{signature}.wav")
 
     def decode(result):
@@ -739,7 +807,7 @@ async def _run_chapter(chapter, *, operation="audiobook", decision, job, default
                        voice_map, lexicon, cache_dir):
     """Run one chapter through the gateway; local preparation stays lazy."""
     from services import gpu_gateway
-    from services.tts_backend import active_backend_id
+    from services.tts_backend import active_backend_id, get_backend_class
 
     engine_id = active_backend_id()
     remote, remote_cache = _remote_chapter_call(
@@ -753,15 +821,27 @@ async def _run_chapter(chapter, *, operation="audiobook", decision, job, default
         return remote_cache, float(info.duration), True, None
 
     async def prepare_local():
+        from services.model_manager import generate_timeout_s
+
         synth, sr, resolve, local_engine = await _prepare_synth(
             default_voice, language=language, opts=opts, voice_map=voice_map
         )
+        try:
+            timeout_engine = get_backend_class(local_engine)
+        except ValueError:
+            # Tests and third-party integrations may inject a synth under a
+            # non-catalogue id. Keep the canonical host/text policy available;
+            # registered production engines still add their routing metadata.
+            timeout_engine = None
         return gpu_gateway.LocalCall(
             fn=lambda: _render_chapter_cached(
                 chapter, synth, sr, local_engine, resolve, cache_dir, lexicon,
                 language, opts, voice_map,
             ),
             what="Audiobook chapter",
+            timeout=generate_timeout_s(
+                remote.params["text"], engine=timeout_engine
+            ),
         )
 
     return await gpu_gateway.run(
@@ -867,8 +947,8 @@ async def _render_longform_sse(
 
     # Persist a durable resume manifest (plan + params) so an interrupted render
     # can be resumed later even without the original script. Best-effort.
+    title = (metadata or {}).get("title") or (plan.chapters[0].title if plan.chapters else "")
     try:
-        title = (metadata or {}).get("title") or (plan.chapters[0].title if plan.chapters else "")
         longform_resume.write_manifest(longform_resume.build_manifest(
             job_id=job_id, job_type=job_type, title=title,
             plan_chapters=[
@@ -1100,6 +1180,18 @@ async def _render_longform_sse(
         done = {"type": "done", "output": out_name,
                 "chapters": len(chapter_files), "duration_s": round(total_s, 2),
                 "cached_chapters": cached_n, "failed_chapters": failed}
+        # Say what this render IS, so the library can show more than a filename
+        # (#2233). Additive keys; best-effort — a summary never fails a render.
+        if title:
+            done["title"] = str(title)[:200]
+        try:
+            # Only what is IN the file: chapters that failed are not summarised,
+            # and the language is the one synthesis actually used.
+            rendered = [c for i, c in enumerate(plan.chapters) if i not in set(failed)]
+            done["summary"] = _render_summary(
+                rendered, default_voice, voice_map, resolved_lang, fmt, opts)
+        except Exception:
+            logger.warning("longform: could not build the render summary", exc_info=True)
         # Loudness verdict only when a preset was requested — off/None paths keep
         # the exact legacy `done` shape (additive, old clients unaffected).
         if norm in LOUDNESS_PRESETS:
@@ -1163,10 +1255,13 @@ async def audiobook_synthesize(req: AudiobookRequest, request: Request = None):
 # ── Shared longform render: Stories (and any future front door) post a plan ──
 
 class LongformSpan(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     voice_id: str | None = None
     text: str
     pause_ms_after: int = 0
     speed: float | None = None
+    # Set by the parser only where inline markup split one run of text.
+    join: Literal["continue", "paragraph"] | None = None
 
 
 class LongformChapter(BaseModel):
@@ -1203,7 +1298,8 @@ async def longform_render(req: LongformRenderRequest, request: Request = None):
         # Keep a span if it has text to speak OR a pause to render (pause-only
         # spans carry inter-line silence with empty text).
         spans = [Span(voice_id=s.voice_id, text=(s.text or "").strip(),
-                      pause_ms_after=max(0, int(s.pause_ms_after)), speed=s.speed)
+                      pause_ms_after=max(0, int(s.pause_ms_after)), speed=s.speed,
+                      join=s.join)
                  for s in c.spans if ((s.text and s.text.strip()) or s.pause_ms_after > 0)]
         if spans:
             chapters.append(Chapter(title=c.title or f"Chapter {i + 1}", spans=spans))

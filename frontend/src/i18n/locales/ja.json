@@ -6,7 +6,7 @@
     "clear_confirm": "VoiceStudio を再び開けるように、保存済みのストーリーとオーディオブックのプロジェクト、および未保存の下書きをすべて完全に削除します。この操作は元に戻せません。続行しますか？"
   },
   "backendUnreachable": {
-    "contact_recent": "{{ago}}前までは応答していましたが、応答が止まりました — リクエストの途中でクラッシュしたか、強制終了された可能性が高いです。",
+    "contact_recent": "{{ago}}前までは応答していましたが、その後応答しなくなりました。クラッシュは記録されていないため、まだ動作していて、エンジンを占有する重い処理で止まっているだけかもしれません。",
     "contact_never": "このセッションでは一度も応答していません — そもそも起動していない可能性があります。",
     "dev": "ローカルの VoiceStudio バックエンドに接続できません。{{contact}} `bun run dev` ではバックエンドが自動リロードで動作するため、ファイルの変更（リクエスト中の保存も含む）で再起動し、接続が切れます。まず操作をやり直してください。リロードが原因ならそれで動きます。それでも失敗する場合は、`bun run dev` を実行しているターミナルの Python トレースバックや終了メッセージ、および VoiceStudio データフォルダーの omnivoice.log を確認してください。",
     "server": "VoiceStudio バックエンドサーバーに接続できません。{{contact}} サーバーログで原因を確認してください（例: `docker logs <container>` や `journalctl`）。なお、このページを Docker が配信している場合、バックエンドと一緒にページ自体も落ちることがあります。",
@@ -33,13 +33,16 @@
   },
   "catalogue": {
     "title": "モデルカタログ",
-    "tab_engines": "エンジン",
-    "tab_models": "モデル",
-    "moved_title": "モデルカタログに移動しました",
-    "moved_engines_body": "音声・文字起こし・LLM の既定エンジンの選択は「モデルカタログ」ワークスペースに移動しました。",
-    "moved_models_body": "モデルの閲覧・インストール・削除は「モデルカタログ」ワークスペースに移動しました。",
-    "open_engines": "エンジンを開く",
-    "open_models": "モデルを開く"
+    "summary_title": "現在の設定",
+    "other_weights": "その他の重み",
+    "change": "変更",
+    "status_setup": "設定が必要",
+    "status_cpu": "CPUフォールバック",
+    "status_off": "オフ",
+    "storage_link": "ストレージ設定",
+    "reco_line": "{{device}} 向けの推奨モデル {{total}} 件中 {{installed}} 件をインストール済み · 残り {{remaining}} GB",
+    "install_rest": "残りをインストール",
+    "device_remote": "リモート"
   },
   "settings": {
     "remote_backend_test": "接続をテスト",
@@ -159,7 +162,7 @@
     "shortcut_reset_failed": "リセットに失敗しました: {{message}}",
     "reset_longform_failed": "VoiceStudio は保存済みプロジェクトを安全に消去できませんでした。プロジェクトデータは変更されていません。ストレージの空き容量を増やすかアプリを再起動して、もう一度お試しください。",
     "cancel": "キャンセル",
-    "hf_token_also_clear": "あわせてクリア",
+    "hf_token_also_clear": "保存済みの HuggingFace CLI トークンファイルも削除する",
     "hf_token_clear_btn": "トークンをクリア",
     "hf_token_clear_confirm": "アプリに保存された HuggingFace トークンをクリアしますか?",
     "hf_token_clear_dialog": "トークンをクリア",
@@ -334,10 +337,34 @@
     "device_family_cuda": "NVIDIA GPU (CUDA)",
     "device_family_rocm": "AMD GPU (ROCm)",
     "device_family_xpu": "Intel GPU (XPU)",
+    "device_family_npu": "NPU",
     "device_family_mps": "Apple GPU (MPS)",
     "device_family_cpu": "CPU",
+    "device_family_gpu": "GPU",
     "device_load_failed": "デバイス設定を読み込めませんでした",
-    "perf_save_failed": "設定を保存できませんでした"
+    "perf_save_failed": "設定を保存できませんでした",
+    "generate_budget_title": "計算時間の予算",
+    "generate_budget_desc": "1回の生成が、このハードウェアには重すぎると判断されて中断されるまでに許容される時間。CPUでのレンダリングはアクセラレーテッドなものより本質的に遅いため、CPU側には独自の高い下限が設定されています。",
+    "generate_timeout_gpu": "アクセラレーテッド（GPU）予算",
+    "generate_timeout_gpu_note": "生成が CUDA、ROCm、MPS などのアクセラレータ上で実行される場合に使用されます。下の CPU 予算が設定されていない場合、CPU での生成にも使用されます。",
+    "generate_timeout_cpu": "CPU予算",
+    "generate_timeout_cpu_note": "生成が CPU 上で実行される場合に使用されます。ここで保存すると、この値は上のアクセラレーテッド予算とは関係なく、常に CPU での生成を管理します。",
+    "generate_timeout_invalid": "0 より大きく、{{max}} 以下の秒数を入力してください。",
+    "generate_timeout_saved": "保存しました。新しい予算を適用するには VoiceStudio を再起動してください。",
+    "generate_timeout_shadowed_badge": "外部から上書きされています",
+    "generate_timeout_shadowed_note": "VoiceStudio の外部にある環境変数（シェル、.env ファイル、またはコンテナ）が現在この値を設定しています — その変数が削除されるまで、ここで保存した値は無視されます。",
+    "generate_timeout_shadowed_toast": "保存しましたが、VoiceStudio の外部にある環境変数が現在この値を設定しています — その変数が削除されるまで、その値が使われ続けます。",
+    "hf_token_not_checked": "未テスト",
+    "hf_source_app_label": "VoiceStudio（暗号化済み、推奨）",
+    "hf_source_cli_label": "HuggingFace CLI",
+    "hf_source_env_label": "環境変数",
+    "theme_auto": "システム自動",
+    "theme_light": "ライト",
+    "reduce_motion": "視差効果を減らす",
+    "reduce_motion_desc": "背景アニメーションとトランジションを停止します。システム設定は単独で有効なままで、これはそれに加わります。",
+    "perf_torch_compile": "torch.compile を無効にする",
+    "perf_torch_compile_note": "直接実行を使用して Triton のメモリエラーを回避します。",
+    "perf_torch_compile_hint": "直接実行を使用して Triton のメモリエラーを回避します。 <issueLink>#65</issueLink> · <crashLink>#2135</crashLink>"
   },
   "bootstrap": {
     "title": "VoiceStudio",
@@ -402,6 +429,10 @@
     "importFailed": "そのファイルを読み取れませんでした。",
     "addLine": "行を追加",
     "addChapter": "章を追加",
+    "clearScript": "台本をクリア",
+    "clearScriptHint": "台本からすべての行と章を削除します（キャストは残ります）",
+    "clearConfirm": "台本の全{{count}}項目と未処理のインポート済みテキストを削除しますか？この操作は取り消せません。",
+    "cleared": "台本をクリアしました",
     "chapterN": "第 {{n}} 章",
     "stems": "茎",
     "stemsDone": "エクスポートされた {{count}} 文字ステム",
@@ -422,6 +453,11 @@
     "pasteAbove": "上にテキストを貼り付けます",
     "cancel": "キャンセル",
     "splitIntoTracks": "行に分割",
+    "splitMode": "分割単位",
+    "split_sentences": "文",
+    "split_paragraphs": "段落",
+    "split_chapters": "章",
+    "splitModeHint": "各行は独立したテイクとして読み上げられます。語り手が一人なら、文より段落や章全体のほうが自然につながります。",
     "emptyText": "会話やナレーションを追加してストーリーを開始します。各キャラクターにキャストの声を割り当てます。",
     "addFirst": "最初の行を追加",
     "linePlaceholder": "ダイアログまたはナレーションを入力します...無音の休憩には [一時停止 0.5 秒] を使用してください",
@@ -456,6 +492,9 @@
     "deleteProjectConfirm": "このプロジェクトを完全に削除しますか？"
   },
   "common": {
+    "stop": "停止",
+    "resume": "再開",
+    "paused": "一時停止中",
     "open": "開く",
     "cancel": "キャンセル",
     "save": "保存",
@@ -528,10 +567,19 @@
     "convert_desc": "一度話すだけで、別の声に。音声から音声へ、すべてローカルで。"
   },
   "clone": {
+    "text_label": "テキスト",
+    "paste": "貼り付け",
+    "paste_failed": "クリップボードへのアクセスが拒否されました。キーボードでテキスト欄に直接貼り付けてください。",
     "prompt": "プロンプト",
     "language": "言語",
     "steps": "ステップ",
     "voice_source": "音声ソース",
+    "reference_audio": "参照音声",
+    "reference_hint": "5～15秒のクリアな音声を使用してください。",
+    "upload_audio": "音声をアップロード",
+    "optional_details": "オプションの詳細",
+    "starting_recording": "開始しています…",
+    "unsupported_audio": "対応する音声ファイルを選択してください：WAV、MP3、M4A、FLAC、OGG、AAC、WebM。",
     "saved_profiles": "保存されたプロファイル",
     "transcript": "成績証明書",
     "style": "スタイル",
@@ -543,7 +591,7 @@
     "synthesizing": "合成中… ({{seconds}}s)",
     "drop_audio": "ここに音声をドロップするか、クリックします。 WAV、MP3、M4A… 🎤",
     "record": "記録",
-    "cleaning": "掃除中…",
+    "cleaning": "ノイズ除去中…",
     "using_profile": "使用プロファイル: {{name}}",
     "clear": "クリア",
     "production_overrides": "プロダクションオーバーライド",
@@ -580,6 +628,7 @@
     "cat_Style": "スタイル",
     "cat_EnglishAccent": "英語のアクセント",
     "cat_ChineseDialect": "中国の方言",
+    "vd_exclusive_cleared": "{{cleared}} をクリアしました — 中国語の方言と英語のアクセントは同時に使用できません。",
     "opt_Auto": "✨オート",
     "opt_male": "男性",
     "opt_female": "女性",
@@ -598,7 +647,7 @@
     "stop_playback": "再生を停止",
     "describe_label": "声を言葉で説明",
     "describe_placeholder": "例: a warm elderly British storyteller, slightly raspy",
-    "describe_hint": "説明（英語）が下のコントロールを設定します。後から微調整もできます。",
+    "describe_hint": "声を説明するか、起点を選んでください。どちらでも下の詳細が自動入力されます。",
     "describe_unmatched": "対応付けできません: {{items}}",
     "describe_no_match": "まだ声の特徴を認識できていません。deep、elderly、British などの単語を試してください。",
     "define_by_design": "デザインで",
@@ -619,7 +668,14 @@
     "seed_keep": "この種を保管しておいてください",
     "seed_reroll": "新しい種",
     "seed_reroll_hint": "新しいランダムシードをロールして保持します",
-    "define_convert": "変換"
+    "define_convert": "変換",
+    "details": "詳細",
+    "edit": "編集",
+    "cat_AccentDialect": "アクセントまたは方言",
+    "accent_dialect_hint": "どちらか一方のみ、両方は不可",
+    "reset_to_description": "説明に基づいてリセット",
+    "chips_more": "他{{count}}件…",
+    "cfg": "CFG"
   },
   "about": {
     "app": "アプリ",
@@ -684,6 +740,7 @@
   },
   "consent": {
     "title": "VoiceStudio の改善に協力しますか？",
+    "desc": "バグをより早く修正するのに役立つ、匿名でコンテンツを含まない利用統計 — 完全に任意で、デフォルトではオフです。",
     "step_label": "VoiceStudio の改善",
     "body": "匿名でコンテンツを含まない使用統計です。使用したエンジン、生成にかかった時間、エラーの種類のみを送信します。あなたのテキスト、音声、ファイル、あなたを特定できる情報は決して送信されません。同意しない限り何も送信されず、設定 → プライバシーでいつでも変更できます。",
     "learn_more": "実際に送信される内容は？",
@@ -738,12 +795,27 @@
     "configureProviders": "プロバイダーを設定",
     "loading": "エンジンをロード中…",
     "refresh": "リフレッシュ",
-    "matrixTitle": "エンジン互換性マトリックス",
+    "matrixTitle": "エンジン",
+    "ariaTest": "{{engine}} をテスト",
+    "ariaRecheck": "{{engine}} を再確認",
+    "ariaSelfTest": "{{engine}} のセルフテスト",
+    "ariaUnload": "{{engine}} をアンロード",
+    "ariaUse": "{{engine}} を使用",
+    "ariaAcceptLicense": "{{engine}} のライセンスを確認して同意",
+    "weights": "重み",
+    "noWeights": "カタログの重みはありません — このエンジンは初回使用時に必要なものを取得します。",
+    "colRunsOn": "実行環境",
+    "detailsFor": "{{engine}} の詳細",
+    "runsIsolated": "分離プロセスで実行",
+    "selectHint": "エンジンを選択すると、必要条件の確認、テスト、インストールができます。",
     "loadFailed": "エンジンのロードに失敗しました: {{message}}",
     "couldNotLoad": "エンジンをロードできませんでした: {{message}}",
     "retry": "再試行",
     "activeEngine": "アクティブ {{family}}: {{engine}}",
     "engineCompatLabel": "{{family}} エンジンの互換性",
+    "dictation_model": "ディクテーションモデル",
+    "dictation_model_hint": "ライブディクテーションと、このエンジンでの文字起こしに使用されます。",
+    "dictation_not_installed": "未インストール — 選択してダウンロード",
     "active": "アクティブな",
     "whyUnavailable": "必要なもの",
     "diskDetails": "ディスクの詳細",
@@ -789,6 +861,7 @@
     "routingRemote": "リモート",
     "routingUnknown": "不明",
     "routingEffectiveChip": "このマシンの {{device}} で実行されます",
+    "gpuVulkan": "Vulkan",
     "routingCaveatTitle": "GPU が選択されましたが: {{reason}}",
     "selectCpuFallback": "{{engine}}: CPU で実行中 — {{reason}}",
     "selectWithCaveat": "{{engine}} に切り替えました — {{reason}}",
@@ -798,7 +871,11 @@
     "familyMatrixTitle": "{{family}} エンジン",
     "familyDesc_tts": "スクリプトを音声に変換します。有効と表示されたエンジンがスタジオ、ダビング、バッチで使用されます。",
     "familyDesc_asr": "音声をテキストに変換し、ダビング、字幕、音声入力の文字起こしに使用します。",
-    "familyDesc_llm": "翻訳や書き換え用の任意のテキスト補助です。「オフ」にするとこれらの手順を省略します。"
+    "familyDesc_llm": "翻訳や書き換え用の任意のテキスト補助です。「オフ」にするとこれらの手順を省略します。",
+    "mpsLongText": "ここでは {{engine}} が Apple Silicon（MPS）で実行され、このテキストは長いため、生成が時間制限を超える可能性があります。テキストを短くするか、数回に分けたほうが大幅に高速です。",
+    "inMemory": "メモリに読み込み済み",
+    "localInstallRequired": "バックエンドのコンピューターで localhost またはセットアップガイドを使ってこのエンジンをインストールしてください。リモートインストールは無効です。",
+    "argosRuntimeUnavailable": "Argos ランタイムを利用できません。バックエンドを再インストールするか、NLLB を選択してください。"
   },
   "capture": {
     "desc": "グローバル ホットキーはデスクトップ アプリでのみ機能します。 Web UI は、ウィンドウにフォーカスがある間、ページ内 <1>Ctrl+Shift+Space</1> ショートカットを使用します。",
@@ -936,6 +1013,9 @@
     "consent_revoked": "検証が取り消されました"
   },
   "dub": {
+    "timing_label": "タイミング",
+    "timing_concise": "簡潔",
+    "timing_stretch_video": "動画を引き伸ばす",
     "install_engine_pkg": "{{pkg}} をインストール",
     "needs_install_short": "インストールが必要",
     "install_popover_title": "このエンジンをインストール",
@@ -956,6 +1036,7 @@
     "paste_url": "…または YouTube / ビデオの URL を貼り付けます",
     "ingest": "摂取する",
     "pull_captions": "YouTube のキャプションと自動翻訳を取得します",
+    "batch_queue_link": "多くの動画を吹き替えますか？バッチキューを開く",
     "youtube_auth": "YouTube ログイン（任意）",
     "youtube_cookie_file": "cookies.txt のエクスポートを選択",
     "remove_cookie_file": "Cookie ファイルを削除",
@@ -1142,7 +1223,11 @@
     "multi_lang_skipped": "{{langs}} の翻訳に失敗したため、誤った言語のトラックが生成されないよう該当する吹き替えをスキップしました。",
     "manage_languages": "言語を管理",
     "languages_done": "完了",
-    "languages_pending": "保留中"
+    "languages_pending": "保留中",
+    "live_preview": "ライブプレビュー",
+    "live_preview_title": "編集中のセリフをそのまま試聴 — 編集したセグメントは少し置いてから CAST ボイスで TTS をストリーミングします。再生のみ: 何も保存されず、書き出しは引き続きフル品質でレンダリングされます。",
+    "live_preview_pick_voice": "ライブプレビューを聴くには、この行または話者に CAST ボイスを割り当ててください。",
+    "autofit_quality": "自動フィット"
   },
   "glossary": {
     "title": "用語集",
@@ -1239,7 +1324,15 @@
     "fit_audio_title": "オーディオはスロット内に収まります。",
     "fit_ratio_title": "TTS オーディオはスロットの {{pct}}% です。",
     "qc_verify": "検証する",
-    "qc_verify_title": "2 パス目の ASR は次のように聞きました: 「{{heard}}」 — この行をもう一度聞くか、再ダビングします。"
+    "qc_verify_title": "2 パス目の ASR は次のように聞きました: 「{{heard}}」 — この行をもう一度聞くか、再ダビングします。",
+    "live_play_title": "この行を今すぐストリーミング(ライブプレビュー)",
+    "live_stop_title": "ライブプレビューを停止",
+    "plan_apply": "短い書き換えを使う",
+    "plan_apply_title": "この行を提案された短い文に置き換えます：「{{text}}」",
+    "plan_impossible": "収まりません +{{seconds}}秒",
+    "plan_impossible_title": "予測音声は約{{est}}秒、使用可能時間は{{avail}}秒です。調整できる範囲を約{{seconds}}秒超えており、音声が切り詰められます。生成前に文章を短くしてください。",
+    "plan_tight": "余裕が少ない",
+    "plan_tight_title": "予測音声は約{{est}}秒、使用可能時間は{{avail}}秒です。スマートフィットで調整できますが、音声の速度上昇や動画の減速が目立ちます。より自然な結果にするには文章を短くしてください。"
   },
   "timeline": {
     "track_label": "セグメントタイムライン",
@@ -1372,7 +1465,18 @@
     "preserve_bg": "バックグラウンドオーディオの保存 (音楽/FX)",
     "estimate": "{{videos}} ビデオ × {{langs}} 言語 = {{jobs}} ジョブ",
     "select_files_langs": "ファイルと言語を選択してください",
-    "add_to_queue": "キューに追加"
+    "add_to_queue": "キューに追加",
+    "watch_folder": "フォルダーを監視",
+    "watching": "{{folder}} を監視中",
+    "watch_paused": "一時停止中 — {{folder}}",
+    "watch_added": "{{count}} 件を自動追加",
+    "watch_pause": "一時停止",
+    "watch_resume": "再開",
+    "watch_stop": "停止",
+    "watch_started": "{{folder}} を監視中 — 新しい動画は自動的にキューへ追加されます",
+    "watch_unsupported": "フォルダー監視にはデスクトップアプリまたはChromiumベースのブラウザーが必要です。代わりに「動画を追加」をご利用ください。",
+    "watch_failed": "フォルダー監視を停止しました — フォルダーを読み取れません（移動・削除・権限変更の可能性）。再開するにはフォルダーを選び直してください。",
+    "watch_start_failed": "そのフォルダーの監視を開始できませんでした。フォルダーを選び直して再試行してください。"
   },
   "gallery": {
     "title": "VoiceStudio ギャラリー",
@@ -1463,6 +1567,7 @@
     "h_ago": "{{count}}時間前"
   },
   "setup": {
+    "ready_desc": "最初の音声を作成する準備ができました。音声入力は今すぐ、または後から設定で有効にできます。",
     "welcome": "ようこそ",
     "system_check": "システムチェック",
     "install_models": "モデルのインストール",
@@ -1491,6 +1596,8 @@
     "open": "開く",
     "install_required_models": "続行するには、上記の必要なモデルをインストールしてください。",
     "try_dictation": "ディクテーションを試してみる",
+    "try_dictation_desc": "セットアップを完了する前に、ショートカットを一度押してディクテーションが機能することを確認してください。",
+    "dictation_step_label": "ディクテーション",
     "next_try_dictation": "次へ: ディクテーションを試してみる",
     "step_aria": "ステップ {{num}}: {{label}}",
     "step_completed": "完了",
@@ -1515,7 +1622,7 @@
     "choose_method": "与え方を選ぶ",
     "choose_method_amount": "${{amount}} に進む",
     "goal": {
-      "title": "クロード・マックス基金",
+      "title": "VoiceStudio の開発を支援",
       "of": "の",
       "per_month": "/月",
       "aria": "月間目標 {{raised}}/{{goal}}",
@@ -1524,7 +1631,7 @@
       "social_proof": "{{count}} サポーターに参加してローカル AI に資金を提供しましょう"
     },
     "postcard": {
-      "title": "クロード・マックス基金",
+      "title": "VoiceStudio の開発を支援",
       "lead_default": "うまくいってよかったです！ VoiceStudio は無料で完全にローカルです。時間を節約できるのであれば、毎月少額のチップインがその背後にいるクロード・マックスに資金を提供します。",
       "lead_first_clone": "最初の音声クローンが完成しました。いいですね! VoiceStudio は完全にマシン上で実行され、サポートがその状態を維持します。",
       "lead_tenth_dub": "10 個のダブが入っています。明らかに効果を発揮しています。これらの機能を提供する Claude Max には、毎月少額のチップインが資金として提供されます。",
@@ -1650,6 +1757,7 @@
     "dictation_lede": "ホットキーを押した後、これらのいずれかを声に出して読み上げます。または、再生を押して、バンドルされたサンプルをトランスクライバー経由で送信し、話さずにエンドツーエンドのディクテーション作業を確認できます。",
     "dictation_status_ok": "確認済み — このマシンではホットキーが機能します",
     "dictation_status_pending": "テストするには任意の場所のショートカットを押してください",
+    "dictation_status_taken": "このショートカットは他のアプリが使用中です。設定で別のものを選んでください。",
     "dictation_status_warn": "ホットキーが登録されていません — 以下のホットキーを設定してください",
     "dictation_hear": "聞く",
     "dictation_stop": "停止",
@@ -1705,7 +1813,8 @@
     "backend_shutting_down": "VoiceStudio を終了しています。アプリを開き直してからもう一度お試しください。",
     "crash_broken_env": "自身の Python 依存関係を読み込んでいる最中に停止しました。メモリや GPU の問題ではなく、環境が不完全か、更新が中途半端なまま残っています。設定 → ログ → バックエンド の「クリーンアップして再試行」を実行してください。環境をゼロから作り直してその場で修復し、音声やプロジェクトには手を触れません。それでも失敗する場合は、クラッシュ詳細に読み込めなかったパッケージ名が出ています。",
     "crash_vram_default": "小さめの GPU では、TTS モデルを読み込んだまま ASR モデルを読み込む際に VRAM が不足するのがよくある原因です。先に TTS モデルをアンロードするか、モデルカタログ → モデル でより小さい ASR モデルを選んでください。",
-    "stream_cut_backend_alive": "ストリームは途中で終了しましたが、バックエンドはまだ動作しています。つまりクラッシュではありません。サーバー経由やコンテナ環境では、リバースプロキシやロードバランサーが接続をバッファリングまたはタイムアウトさせているのがよくある原因です。このルートのレスポンスバッファリングを無効にし（nginx: proxy_buffering off; X-Accel-Buffering: no）、読み取りタイムアウトを延ばしてください。デスクトップアプリを直接実行するか、プロキシなしの localhost で実行すれば確認できます。"
+    "stream_cut_backend_alive": "ストリームは途中で終了しましたが、バックエンドはまだ動作しています。つまりクラッシュではありません。サーバー経由やコンテナ環境では、リバースプロキシやロードバランサーが接続をバッファリングまたはタイムアウトさせているのがよくある原因です。このルートのレスポンスバッファリングを無効にし（nginx: proxy_buffering off; X-Accel-Buffering: no）、読み取りタイムアウトを延ばしてください。デスクトップアプリを直接実行するか、プロキシなしの localhost で実行すれば確認できます。",
+    "stream_cut_backend_alive_local": "ストリームは途中で終了しましたが、バックエンドはまだ動作しています。つまりクラッシュではありません。処理の途中でアプリとバックエンドの接続が切れました。時間のかかる工程が数分間無応答になると起こることがあり、多くの場合バックエンドは処理を最後まで続けています。数分待ってから履歴からジョブを開き直すか、バックエンドのログ（設定 → ログ → バックエンド）で直前の処理内容を確認してください。"
   },
   "keyboard": {
     "title": "キーボードショートカット",
@@ -1819,6 +1928,7 @@
     "hint": "8ステップ・高速プレビュー"
   },
   "header": {
+    "speech": "音声",
     "kicker_studio": "スタジオ",
     "kicker_library": "図書館",
     "kicker_preferences": "設定",
@@ -1925,6 +2035,7 @@
     "preview_voice": "プレビュー音声"
   },
   "checkpoint": {
+    "timing_review": "{{count}} 個のセグメントでタイミングの確認が必要です",
     "asr_title": "トランスクリプトの準備完了",
     "asr_cta": "翻訳する",
     "asr_hint": "ASR エラーを今すぐ修正します。厳密なディクショニングにより、後で TTS の試行を節約できます。",
@@ -1935,7 +2046,13 @@
     "done_hint": "タイミングと同期率を確認します。任意の行を微調整し、「Regen Changed」を押すと、部分的に素早くやり直すことができます。",
     "segment_one": "{{count}} セグメント",
     "segment_other": "{{count}} セグメント",
-    "dismiss_title": "閉じる — リロードするまでこのステージでは再表示されません"
+    "dismiss_title": "閉じる — リロードするまでこのステージでは再表示されません",
+    "timing_review_one": "{{count}} 個のセグメントのタイミングを確認してください",
+    "timing_review_other": "{{count}} 個のセグメントでタイミングの確認が必要です",
+    "timing_review_zero": "{{count}} 個のセグメントでタイミングの確認が必要です",
+    "timing_review_two": "{{count}} 個のセグメントでタイミングの確認が必要です",
+    "timing_review_few": "{{count}} 個のセグメントでタイミングの確認が必要です",
+    "timing_review_many": "{{count}} 個のセグメントでタイミングの確認が必要です"
   },
   "compare": {
     "title": "A/B音声比較",
@@ -2035,7 +2152,10 @@
     "voice_previews_checked": "{{when}}に確認",
     "voice_previews_never": "未確認",
     "voice_previews_check": "今すぐ確認",
-    "voice_previews_rejected": "ボイスギャラリーの更新を拒否しました: {{message}}"
+    "voice_previews_rejected": "ボイスギャラリーの更新を拒否しました: {{message}}",
+    "role_llm": "LLM",
+    "role_tts": "TTS",
+    "role_asr": "ASR"
   },
   "enterprise_faq": {
     "q_internal_tools": "内部ツールにはライセンスが必要ですか?",
@@ -2066,6 +2186,7 @@
     "ingest_cancelled": "取り込みがキャンセルされました",
     "ingest_failed": "URL の取り込みに失敗しました: {{message}}",
     "retry_cancelled": "再試行がキャンセルされました",
+    "transcribe_stream_dropped": "セグメントが届く前に文字起こしストリームが終了し、原因を確認するためにバックエンドへ接続することもできませんでした。バックエンドのログを確認し、ASR モデルがまだダウンロード中だった場合は モデルカタログ でその重みを確認してください。",
     "transcription_failed": "転写に失敗しました: {{message}}",
     "import_srt_no_job": "まずビデオをアップロードまたは取り込みます。字幕を付ける作業はありません。",
     "import_srt_after_speakers": "SRTをキューに追加しました。クローン音声を保持するため、先に話者分析を完了します。",
@@ -2107,6 +2228,7 @@
     "session_expired": "このダビング セッションは期限切れかクリーンアップされました。新しいビデオを開始するにはビデオを再アップロードしてください。"
   },
   "tts_errors": {
+    "profile_language_rejected": "自動では音声プロファイルの言語（{{language}}）が使われますが、このエンジンは対応していません。プロファイルの言語を変更するか、対応言語または別のエンジンを選択してください。",
     "enter_text": "テキストを入力してください",
     "upload_or_select": "音声をアップロードするか、音声プロファイルを選択してください",
     "trim_hint": "オーディオは {{duration}}s — 最適なクローン作成のために ≤{{max}}s にトリミングします",
@@ -2115,9 +2237,15 @@
     "error_prefix": "エラー: {{message}}",
     "ignored_unsupported": "サポートされていない命令は無視されました: {{items}}",
     "ignored_duplicate": "無視 (カテゴリはすでに設定されています): {{items}}",
+    "ignored_conflict": "{{items}} を無視しました — 中国語の方言と英語のアクセントは同時に使用できません。",
+    "dialect_accent_conflict": "中国語の方言と英語のアクセントは同時に使用できません。再生成する前にどちらか一方を解除してください。",
+    "instruct_category_conflict": "同じカテゴリ内で矛盾する音声デザインのオプションが選択されました(例: 性別が2つ)。再生成する前にどちらか一方を解除してください。",
     "ref_audio_unusable": "リファレンス音声から声を検出できませんでした。クリップが無音またはほぼ無音のため、クローンする声がありません。マイクに近づいて録音し直すか（正しい入力デバイスが選択されているか確認してください）、別のクリップを選んでください。",
     "ref_audio_too_long": "参照音声は文字起こし付きなら最長20秒、なしなら最長75秒です。明瞭な発話を含む3〜10秒に切り詰め、テキストを指定する場合は文字起こしも同じ区間に合わせてください。",
-    "ref_audio_no_speech": "自動音声検出で参照音声から発話が見つかりませんでした。明瞭な発話を含む3〜10秒に切り詰めるか、一致する文字起こしを指定してください。"
+    "ref_audio_no_speech": "自動音声検出で参照音声から発話が見つかりませんでした。明瞭な発話を含む3〜10秒に切り詰めるか、一致する文字起こしを指定してください。",
+    "gpu_arch_unsupported": "このPyTorchビルドはお使いのGPUに対応していません。設定 → パフォーマンスとデバイスでCPUを選択するか、互換性のあるPyTorchビルドをインストールしてください。",
+    "windows_app_control_blocked": "Windowsのアプリケーション制御が必要なファイルをブロックしました。信頼できるVoiceStudioランタイムを許可するよう管理者に依頼し、アプリを再起動してください。",
+    "audio_io_failed": "音声を読み込むか保存することができませんでした。ファイル形式、ディスクの空き容量、ファイルのアクセス権を確認してください。設定 → ストレージでフォルダーを確認してください。"
   },
   "sharing": {
     "title": "共有とリモートアクセス",
@@ -2324,7 +2452,10 @@
     "hf_token_saved_fast": "ハグフェイストークンが保存されました — ダウンロードが速くなりました",
     "hf_token_inline_prompt": "無料の Hugging Face トークンでダウンロードを高速化",
     "hf_token_inline_ph": "hf_… トークンを貼り付けます (オプション)",
-    "hf_token_get_short": "1 つ無料で入手 →"
+    "hf_token_get_short": "1 つ無料で入手 →",
+    "hf_token_active_using": "{{source}} に Hugging Face トークンがあります — {{masked}}",
+    "hf_token_replace": "トークンを置き換える…",
+    "hf_token_replace_warning": "このアプリに保存されたトークンを置き換えます。古いトークンは失効しません。"
   },
   "history": {
     "dub_meta": "{{segments}} セグメント · {{duration}} 秒",
@@ -2401,6 +2532,8 @@
     "test_placeholder": "文を入力して置換をプレビューします…",
     "test_result": "次のように話されます。",
     "test_nochange": "一致するエントリはありません - 書かれたとおりに話されています。",
+    "test_inert": "保存済みですが、このエンジンではまだ適用されません: {{terms}}。IPA と CMU の項目は保存・検証されますが、現在は読み替えのみが読み上げテキストを変更します。",
+    "not_applied_badge": "まだ未適用",
     "load_error": "発音辞書を読み込めませんでした。",
     "save_error": "そのエントリを保存できませんでした。",
     "lang_label": "言語コード (en、de など)、またはグローバルの場合は空白のままにします",
@@ -2436,10 +2569,13 @@
     "warn_unknown_voice": "不明な声 ‘{{name}}’ — デフォルトを使用します",
     "warn_empty_chapter": "章「{{title}}」に読み上げるテキストがありません",
     "warn_unknown_tag": "不明なタグ {{tag}} — そのまま読み上げられます",
-    "untitled": "無題",
+    "untitled": "無題のオーディオブック",
     "dismiss": "閉じる",
     "output": "出力",
     "title": "オーディオブック",
+    "tab_script": "台本",
+    "tab_voices": "音声",
+    "tab_book": "ブック",
     "subtitle": "物語を書いたり読み込んだり、声を配役して、本格的な章付きオーディオブックを書き出せます。",
     "script": "スクリプト",
     "script_placeholder": "# 第一章\nむかしむかし… [500 ミリ秒停止] 終了。\n\n# 第二章\n[音声:ナレーター] そして、それは続きました。",
@@ -2448,6 +2584,14 @@
     "preview_plan": "プレビュープラン",
     "stop": "停止",
     "stopped_note": "停止しました — 完了した章はキャッシュ済みです。再度「作成」で再開できます。",
+    "recovery_title": "中断されたオーディオブック",
+    "recovery_progress": "{{total}}章中{{done}}章がキャッシュされています",
+    "recovery_hint": "再開すると完了済みの章を再利用し、残りだけを合成します。",
+    "resume": "再開",
+    "open_chapter_cache": "章のキャッシュを開く",
+    "cache_location_hint": "章の音声キャッシュ: {{cachePath}} · 再開マニフェスト: {{manifestPath}}",
+    "resume_failed": "オーディオブックを再開できませんでした: {{message}}",
+    "open_cache_failed": "章のキャッシュを開けませんでした",
     "progress_summary": "{{total}} 章中 {{current}} 章を合成中",
     "eta": "残り約 {{time}}",
     "chapter_n": "第 {{n}} 章",
@@ -2501,6 +2645,11 @@
     "seed_ph": "自動",
     "vary_repeats": "繰り返される行を変更",
     "vary_repeats_help": "1つの録音を再利用する代わりに、同一の行に異なるテイクを与えます。",
+    "line_gap": "行間の間",
+    "joins_help": "行間の間は独自の [pause] を持たない行の間に、段落間の間は空行に入ります。切り詰めがオンのときは、先に各行の冒頭と末尾の無音が除去されるため、設定した間がそのまま聞こえる間になります。",
+    "paragraph_gap": "段落間の間",
+    "trim_edges": "エンジンの無音を切り詰める",
+    "trim_edges_help": "結合前に、エンジンが各行に付加する無音を除去します。生の出力を残すにはオフにします。",
     "emotion_help": "段階的な感情 — IndexTTS2 エンジンによってのみ適用されます。",
     "emotion_text": "感情の説明",
     "emotion_text_ph": "例 疲れているように聞こえ、悲しい",
@@ -2559,7 +2708,13 @@
   },
   "waveform": {
     "source_missing": "ソース メディアが見つかりません - このファイルは移動または削除された可能性があります。続行するにはビデオを再アップロードしてください。",
-    "load_failed": "このファイルからオーディオをロードできませんでした"
+    "load_failed": "このファイルからオーディオをロードできませんでした",
+    "controls": "再生コントロール",
+    "restart": "最初から再生",
+    "shortcuts": "J/K/L：巻き戻し、再生/一時停止、早送り",
+    "zoom": "ズームレベル",
+    "timeline": "音声波形タイムライン",
+    "loading": "波形を読み込み中…"
   },
   "tts": {
     "routingFallback": "CPU 上で実行 — このエンジンにはマシン上に GPU パスがないため、生成は遅くなります。 {{reason}}",
@@ -2625,7 +2780,12 @@
     "message": "音声認識モデルがインストールされていません — この機能で文字起こしを行うにはモデルが必要です。",
     "download": "{{label}} をダウンロード（{{size}} GB）",
     "started": "{{label}} をダウンロード中 — 設定 → モデルで進行状況を確認し、完了後にもう一度お試しください。",
-    "install_failed": "ダウンロードを開始できませんでした: {{message}}"
+    "install_failed": "ダウンロードを開始できませんでした: {{message}}",
+    "choose": "用途に合ったモデルを選んでください — 精度、対応言語、ダウンロードサイズが異なります。ダウンロードはクリックしたときにのみ開始します。",
+    "group_offline": "最高精度 — 話し終えてから文字起こし",
+    "group_streaming": "最低遅延 — 話しながらリアルタイムでテキスト表示",
+    "use": "{{label}} を使用",
+    "installed": "インストール済み"
   },
   "model_missing": {
     "message": "このモデルは {{target}} にダウンロードされていません。",
@@ -2682,6 +2842,7 @@
     "none_selected": "声が選択されていません — 説明するか、音声をドロップするか、下から選んでください。"
   },
   "convert": {
+    "cloning_required": "音声クローンに対応した、使用可能な音声合成モデルを選択してください。",
     "source_kicker": "ソースクリップ",
     "drop_audio": "変換するクリップをドロップ — またはクリック。WAV、MP3、M4A…",
     "target_voice": "変換先の声",
@@ -2693,5 +2854,60 @@
     "transcript": "聞き取った内容",
     "result_kicker": "変換されたテイク",
     "need_source_and_voice": "先にソースクリップを追加し、変換先の声を選んでください。"
+  },
+  "player": {
+    "pause": "一時停止",
+    "play": "再生"
+  },
+  "dubIntegrity": {
+    "missingSpeech": "音声がないか読み取れません。書き出す前に該当セグメントを再生成してください。",
+    "timingOverflow": "音声が割り当て時間を超えています。翻訳を短くするか、厳密な時間枠または動画の引き伸ばしを選んでください。",
+    "backgroundUnavailable": "元の音声を保持できませんでした。背景音の分離と台詞のタイミングを確認して再試行するか、音声のみの書き出しを選択してください。"
+  },
+  "dubStyle": {
+    "label": "翻訳スタイルの指示",
+    "help": "口調、対象者、翻案方針を指定します。例：冗談を残し、慣用句を自然に訳す。プロジェクトに保存され、翻訳と尺調整の書き直しに使われます。空欄なら既定のスタイルを使います。"
+  },
+  "dubActivity": {
+    "output": "翻訳結果",
+    "waiting": "まだ出力を受信していません。",
+    "progress": "{{done}} / {{total}} セグメントを検証済み",
+    "cancelled": "キャンセル済み",
+    "fitting": "タイミングを調整中"
+  },
+  "sponsorSlot": {
+    "book": "掲載枠を申し込む",
+    "preview": "スポンサーの表示例",
+    "message": "ブランド名・ウェブサイト・メッセージ",
+    "email_app": "メールアプリを開く",
+    "copy_email": "メールアドレスをコピー",
+    "preview_detail": "ここにロゴ、リンク、紹介文を掲載できます。"
+  },
+  "supportPlans": {
+    "remove": "スポンサー欄を非表示にする",
+    "title": "無料版とProの比較",
+    "free": "無料",
+    "pro": "Pro",
+    "sponsor_bar": "スポンサー欄",
+    "visible": "表示",
+    "hideable": "非表示にできます",
+    "unavailable": "Proの有効化はまだ設定されていません。",
+    "telemetry": "テレメトリ",
+    "opt_in": "任意・同意が必要",
+    "disabled": "無効",
+    "badge": "Proバッジ",
+    "advanced": "高度なツール",
+    "standard": "標準",
+    "included": "利用可能"
+  },
+  "integrationCatalog": {
+    "title": "連携",
+    "featured": "注目",
+    "description": "連携機能と注目のパートナーを見つけましょう。",
+    "n8nHint": "このワークフローをn8nにインポートし、リクエストを編集して実行します。VoiceStudioは起動したままにしてください。Dockerやリモートのn8nには、接続可能なバックエンドのアドレスと必要な認証情報を設定してください。"
+  },
+  "directoryExamples": {
+    "example": "掲載例",
+    "notice": "ディレクトリの掲載例です。スポンサーや接続済みの連携ではありません。"
   }
 }

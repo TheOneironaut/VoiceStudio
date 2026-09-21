@@ -7,6 +7,8 @@ while the desktop app is closed. Recovery, not burial.
 """
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 
 import pytest
@@ -80,6 +82,65 @@ def test_persisted_input_params_do_not_contain_user_home_paths(db, tmp_path, mon
     assert str(voice) not in stored
     assert str(tmp_path) not in stored
     assert "inputs/" in stored
+
+
+def test_a_staged_input_id_is_posix_on_every_host(tmp_path, monkeypatch):
+    """The artifact id crosses machines, so it cannot carry an OS separator.
+
+    It is persisted in params_json, shipped to remote workers over gRPC, and
+    matched against a later disk sweep. os.path.join made it host-specific: a
+    Windows control plane produced ``inputs\<sha>.wav``, which a Linux worker
+    cannot resolve and which stops matching the moment the same data directory
+    is opened on another OS.
+    """
+    root = tmp_path / "artifacts"
+    (root / task_store.INPUTS_DIRNAME).mkdir(parents=True)
+    monkeypatch.setattr(task_store, "artifact_root", lambda **_kw: str(root))
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"voice")
+
+    record = task_store.stage_input(str(source), root=str(root))
+
+    assert "\\" not in record["artifact_id"], record["artifact_id"]
+    assert record["artifact_id"].startswith(f"{task_store.INPUTS_DIRNAME}/")
+    # And it still resolves to the file that was actually written.
+    assert (root / record["artifact_id"]).is_file()
+
+
+def test_a_legacy_windows_id_still_protects_its_input(db, tmp_path, monkeypatch):
+    """An upgraded install must not delete inputs its tasks still point at.
+
+    Rows staged before the id was canonicalised carry a backslash. The sweeper
+    decides "unreferenced" by comparing ids, so matching a legacy row against a
+    freshly built posix id would read every one of them as garbage and delete
+    the file a surviving task depends on.
+    """
+    root = tmp_path / "artifacts"
+    (root / task_store.INPUTS_DIRNAME).mkdir(parents=True)
+    monkeypatch.setattr(task_store, "artifact_root", lambda **_kw: str(root))
+    source = tmp_path / "voice.wav"
+    source.write_bytes(b"voice")
+    record = task_store.stage_input(str(source), root=str(root))
+    staged = root / record["artifact_id"]
+    os.utime(staged, (0, 0))  # older than any cutoff
+
+    # The row exactly as a pre-fix Windows control plane wrote it. Inserted
+    # directly: `create` validates against today's rules, and the point is a
+    # row that predates them.
+    legacy = dict(record, artifact_id=record["artifact_id"].replace("/", "\\"))
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO remote_tasks"
+            " (id, operation, params_json, state, created_at, updated_at)"
+            " VALUES (?, 'tts', ?, 'queued', 1000.0, 1000.0)",
+            ("legacy-1", json.dumps({task_store.INPUTS_PARAM_KEY: [legacy]})),
+        )
+
+    with task_store.db_conn() as conn:
+        referenced = task_store._referenced_artifacts(conn)
+    task_store.purge_artifacts((), referenced, cutoff=1e12, root=str(root))
+
+    assert staged.is_file(), "a legacy-id input that a task still references was deleted"
 
 
 def test_attempts_round_trip(db):
@@ -397,3 +458,38 @@ def test_result_directory_delete_is_durable_before_its_row_is_forgotten(
         == 1
     )
     assert task_store.get("t1") is None
+
+
+def test_dispatch_budget_survives_reload_without_worker(db):
+    from worker.deadlines import Deadlines
+    from worker.pool import WorkerPool
+    from worker.scheduler import Scheduler
+
+    task = _task()
+    task_store.create(task, now=1000.0)
+    attempt = task.assign(worker_id="w1", session_epoch=1, now=1001.0)
+    budget = Deadlines(20, 1800, 900, 120, 900, 75)
+    attempt.deadlines = budget
+    task_store.save(task, now=1002.0)
+    loaded = task_store.get(task.task_id)
+    assert loaded.active_attempt.deadlines == budget
+    assert Scheduler(WorkerPool(), persist=False)._budget_for(loaded) == budget
+
+
+@pytest.mark.parametrize("gpu_seconds", [300, 900])
+def test_legacy_attempt_without_worker_keeps_conservative_execution_budget(db, monkeypatch, gpu_seconds):
+    from services import model_manager
+    from worker.pool import WorkerPool
+    from worker.scheduler import Scheduler
+
+    monkeypatch.setattr(model_manager, "GPU_JOB_TIMEOUT_S", gpu_seconds)
+    monkeypatch.setattr(model_manager, "CPU_JOB_TIMEOUT_S", 600.0)
+    monkeypatch.setattr(model_manager, "_CPU_GENERATE_TIMEOUT_EXPLICIT", True)
+    task = _task()
+    task_store.create(task, now=1000.0)
+    task.assign(worker_id="old-worker", session_epoch=1, now=1001.0)
+    task_store.save(task, now=1002.0)  # legacy NULL deadlines_json
+    loaded = task_store.get(task.task_id)
+    assert loaded.active_attempt.deadlines is None
+    budget = Scheduler(WorkerPool(), persist=False)._budget_for(loaded)
+    assert budget.execution_seconds >= max(gpu_seconds, 600)

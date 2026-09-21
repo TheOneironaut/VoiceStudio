@@ -18,6 +18,18 @@ vi.mock('../api/archetypes', () => ({ useArchetypeAsProfile: vi.fn() }));
 
 import DubSegmentRow from '../components/DubSegmentRow';
 
+it('edits wrapping two-line text without seeking the player', () => {
+  const props = makeProps();
+  render(<DubSegmentRow {...props} />);
+  const field = screen.getByDisplayValue('hola mundo');
+  expect(field.tagName).toBe('TEXTAREA');
+  expect(field).toHaveAttribute('rows', '2');
+  fireEvent.click(field);
+  fireEvent.change(field, { target: { value: 'first line\nsecond line' } });
+  expect(props.onEditField).toHaveBeenCalledWith('s1', 'text', 'first line\nsecond line');
+  expect(props.onSeek).not.toHaveBeenCalled();
+});
+
 function makeProps(over = {}) {
   return {
     seg: { id: 's1', start: 1, end: 3, text: 'hola mundo' },
@@ -207,6 +219,34 @@ describe('DubSegmentRow timing fields', () => {
 
     fireEvent.blur(end);
     expect(props.onMoveResize).not.toHaveBeenCalled();
+  });
+
+  it('leaves a time the field rounds for display where it is', () => {
+    // Transcribed times carry hundredths; the field shows tenths. Tabbing
+    // through it must not snap the edge to the shown value.
+    const props = makeProps({ seg: { id: 's1', start: 1.23, end: 3.27, text: 'x' } });
+    render(<DubSegmentRow {...props} />);
+    const [start, end] = timeFields();
+    expect(start.value).toBe('0:01.2');
+    expect(end.value).toBe('0:03.3');
+
+    fireEvent.blur(start);
+    fireEvent.blur(end);
+
+    expect(props.onMoveResize).not.toHaveBeenCalled();
+  });
+
+  it('commits the shown time when it is typed on purpose', () => {
+    const props = makeProps({ seg: { id: 's1', start: 1.23, end: 3.27, text: 'x' } });
+    render(<DubSegmentRow {...props} />);
+    const end = timeFields()[1];
+
+    fireEvent.focus(end);
+    fireEvent.change(end, { target: { value: '' } });
+    fireEvent.change(end, { target: { value: '0:03.3' } });
+    fireEvent.blur(end);
+
+    expect(props.onMoveResize).toHaveBeenCalledWith('s1', { start: 1.23, end: 3.3 });
   });
 });
 

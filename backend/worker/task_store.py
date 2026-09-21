@@ -33,6 +33,7 @@ from core.db import db_conn
 from core.path_security import UnsafePath, resolve_within, safe_filename
 from worker.clock import resolve
 from worker.errors import ErrorClass, WorkerError
+from worker.deadlines import Deadlines
 from worker.lifecycle import Attempt, AttemptState, PriorityClass, Task, TaskState
 
 logger = logging.getLogger("omnivoice.worker")
@@ -67,6 +68,8 @@ def _row_to_attempt(row) -> Attempt:
         state=AttemptState(row["state"]),
         created_at=float(row["created_at"]),
     )
+    if row["deadlines_json"]:
+        attempt.deadlines = Deadlines(**json.loads(row["deadlines_json"]))
     attempt.accepted_at = row["accepted_at"]
     attempt.started_at = row["started_at"]
     attempt.finished_at = row["finished_at"]
@@ -131,6 +134,32 @@ INPUT_PARAM_KEYS: tuple[str, ...] = (
 # task records what was staged for it. The record is what makes the purge
 # exact: an input is deletable only when no surviving task still refers to it.
 INPUTS_DIRNAME = "inputs"
+
+
+def artifact_id_for(name: str) -> str:
+    """The id a staged input is known by, everywhere.
+
+    This is a PROTOCOL identifier, not a local path: it is persisted in
+    ``params_json``, handed to remote workers over gRPC, and matched against
+    what a later sweep finds on disk. ``os.path.join`` made it OS-specific, so
+    a Windows control plane stored and shipped ``inputs\\<sha>.wav`` — which a
+    Linux worker cannot resolve, and which stops matching the moment the same
+    data directory is opened on another OS. Always ``/``; ``resolve_within``
+    already treats both separators as structural, so resolution is unaffected.
+    """
+    return f"{INPUTS_DIRNAME}/{name}"
+
+
+def normalize_artifact_id(artifact_id: str) -> str:
+    """Compare ids written by any host on equal terms.
+
+    Rows staged by a Windows control plane before this was canonicalised carry
+    a backslash. The sweeper decides whether a file on disk is still
+    referenced by comparing ids, so without this an upgraded install would
+    read every legacy row as unreferenced and delete inputs that surviving
+    tasks still point at.
+    """
+    return (artifact_id or "").replace("\\", "/")
 INPUTS_PARAM_KEY = "inputs"
 
 _HASH_CHUNK_BYTES = 1024 * 1024
@@ -289,7 +318,7 @@ def stage_input(
             f"Could not read the task input {source!r}: {exc}"
         ) from exc
 
-    artifact_id = os.path.join(INPUTS_DIRNAME, f"{digest}{_extension(source)}")
+    artifact_id = artifact_id_for(f"{digest}{_extension(source)}")
     try:
         destination = resolve_within(base, artifact_id)
     except UnsafePath as exc:  # pragma: no cover — the id is ours, hex only
@@ -470,7 +499,7 @@ def _referenced_artifacts(conn) -> set[str]:
             continue
         for entry in entries:
             if isinstance(entry, dict) and entry.get("artifact_id"):
-                referenced.add(str(entry["artifact_id"]))
+                referenced.add(normalize_artifact_id(str(entry["artifact_id"])))
     return referenced
 
 
@@ -557,8 +586,7 @@ def purge_artifacts(
     except OSError:
         return removed
     for name in names:
-        artifact_id = os.path.join(INPUTS_DIRNAME, name)
-        if artifact_id in referenced:
+        if artifact_id_for(name) in referenced:
             continue
         path = os.path.join(inputs_dir, name)
         try:
@@ -635,12 +663,13 @@ def _upsert_attempts(conn, task: Task) -> None:
             "INSERT INTO remote_task_attempts "
             "(id, task_id, worker_id, session_epoch, attempt_number, state, progress, stage, "
             " error_json, created_at, accepted_at, started_at, finished_at, lease_expires_at, "
-            " grace_expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " grace_expires_at, deadlines_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(id) DO UPDATE SET state=excluded.state, progress=excluded.progress, "
             " stage=excluded.stage, error_json=excluded.error_json, accepted_at=excluded.accepted_at, "
             " started_at=excluded.started_at, finished_at=excluded.finished_at, "
-            " lease_expires_at=excluded.lease_expires_at, grace_expires_at=excluded.grace_expires_at",
+            " lease_expires_at=excluded.lease_expires_at, grace_expires_at=excluded.grace_expires_at, "
+            " deadlines_json=excluded.deadlines_json",
             (
                 attempt.attempt_id,
                 attempt.task_id,
@@ -657,6 +686,7 @@ def _upsert_attempts(conn, task: Task) -> None:
                 attempt.finished_at,
                 attempt.lease_expires_at,
                 attempt.grace_expires_at,
+                json.dumps(attempt.deadlines.to_dict()) if attempt.deadlines else None,
             ),
         )
 
@@ -888,6 +918,8 @@ def purge_finished(
 
 __all__ = [
     "INPUTS_DIRNAME",
+    "artifact_id_for",
+    "normalize_artifact_id",
     "INPUTS_PARAM_KEY",
     "INPUT_PARAM_KEYS",
     "InputStagingError",

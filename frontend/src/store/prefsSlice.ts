@@ -136,6 +136,16 @@ export interface PrefsSlice {
   voiceMatch: VoiceMatch;
 
   /**
+   * Opt-in live dub preview (default OFF). When on, editing a segment's
+   * translated text streams TTS for that line over the existing `/ws/tts`
+   * socket (debounced, local playback only) so the user hears the edit
+   * without pressing Generate. Never persisted as job audio — export still
+   * goes through the full-quality generate path.
+   */
+  dubLivePreview: boolean;
+  setDubLivePreview: (on: boolean) => void;
+
+  /**
    * Last app version whose release notes the user has seen (feat/safe-updates).
    * `null` = never recorded (fresh install / pre-feature profile): the first
    * launch baselines it silently so brand-new users don't get a "What's new"
@@ -225,7 +235,11 @@ export interface PrefsSlice {
   setDictationMode: (mode: DictationMode) => void;
   setDictationModelId: (id: string) => void;
   /** Hydrate from GET /dictation/prefs (called once on app init). */
-  loadDictationPrefs: () => Promise<void>;
+  /** Resolves true when the backend answered, false when the seeds were
+   *  kept because it did not. `dictationLoaded` is set either way (so the
+   *  Settings panel never spins forever); this is how a caller can tell
+   *  the two apart and retry. */
+  loadDictationPrefs: () => Promise<boolean>;
 
   /**
    * Auto-play the output preview as soon as a render finishes (Voice Clone /
@@ -258,6 +272,20 @@ export interface PrefsSlice {
    */
   langPromptSeen: boolean;
   setLangPromptSeen: (seen: boolean) => void;
+
+  /**
+   * Force reduced motion regardless of the OS setting.
+   *
+   * The CSS already honours `prefers-reduced-motion` in a dozen places, but
+   * that is the OS switch and nothing else. Someone who wants a calm app
+   * without turning motion off system-wide had no way to ask for it, and
+   * someone whose OS setting is not respected by their environment had no
+   * recourse at all (#1857). This is additive: the media query still applies
+   * on its own, so turning this off never re-enables motion for a user whose
+   * OS asked for less.
+   */
+  reduceMotion: boolean;
+  setReduceMotion: (on: boolean) => void;
 
   theme: ThemeId;
   setTheme: (id: ThemeId) => void;
@@ -293,6 +321,7 @@ export const createPrefsSlice: StateCreator<PrefsSlice, [], [], PrefsSlice> = (s
   timingStrategy: 'strict_slot',
   fitOptions: null,
   voiceMatch: 'per_line',
+  dubLivePreview: false,
   whatsNewSeenVersion: null,
   dismissedNotificationIds: [],
   aecEnabled: false,
@@ -318,6 +347,7 @@ export const createPrefsSlice: StateCreator<PrefsSlice, [], [], PrefsSlice> = (s
   setTimingStrategy: (s) => set({ timingStrategy: s }),
   setFitOptions: (o) => set({ fitOptions: o }),
   setVoiceMatch: (m) => set({ voiceMatch: m }),
+  setDubLivePreview: (on) => set({ dubLivePreview: on }),
   setWhatsNewSeenVersion: (v) => set({ whatsNewSeenVersion: v }),
   dismissNotification: (id) =>
     set((s) => ({
@@ -361,11 +391,13 @@ export const createPrefsSlice: StateCreator<PrefsSlice, [], [], PrefsSlice> = (s
     try {
       const p = await apiJson<any>('/dictation/prefs');
       set({ ..._dictationFromPrefs(p), dictationLoaded: true });
+      return true;
     } catch {
       // Backend not ready / older build without the route — keep the seeds and
       // mark loaded so the panel renders defaults rather than a perpetual
       // spinner. A later manual interaction will retry the write-through.
       set({ dictationLoaded: true });
+      return false;
     }
   },
 
@@ -406,6 +438,16 @@ export const createPrefsSlice: StateCreator<PrefsSlice, [], [], PrefsSlice> = (s
   localeChosen: false,
   langPromptSeen: false,
   setLangPromptSeen: (seen) => set({ langPromptSeen: seen }),
+
+  reduceMotion: false,
+  setReduceMotion: (on) => {
+    set({ reduceMotion: on });
+    if (on) {
+      document.documentElement.setAttribute('data-motion', 'reduce');
+    } else {
+      document.documentElement.removeAttribute('data-motion');
+    }
+  },
 
   theme: 'gruvbox',
   setTheme: (id) => {

@@ -22,6 +22,8 @@ only process isolation.
 from __future__ import annotations
 
 import logging
+import math
+import os
 import sys
 import threading
 from pathlib import Path
@@ -34,7 +36,8 @@ from services.subprocess_backend import (
 logger = logging.getLogger("omnivoice.asr.subprocess")
 
 # A model load + transcription can take a while on CPU for a long clip; give
-# the transcribe round-trip more headroom than the TTS default.
+# the transcribe round-trip more headroom than the TTS default. Configurable via
+# OMNIVOICE_ASR_RECV_TIMEOUT_S (#2103).
 ASR_RECV_TIMEOUT_S = 600.0
 
 
@@ -60,6 +63,11 @@ class SubprocessASRBackend(SubprocessBackend):
     def generate(self, text: str, **kw):  # pragma: no cover - unused
         raise NotImplementedError("ASR sidecar does not synthesize speech")
 
+    def ensure_loaded(self) -> None:
+        """Prove the lazy ASR sidecar is ready for the shared loader."""
+        with self._lock:
+            self._spawn()
+
     # ── ASR surface ────────────────────────────────────────────────────────
     @staticmethod
     def _device() -> str:
@@ -72,6 +80,17 @@ class SubprocessASRBackend(SubprocessBackend):
         except Exception:
             pass
         return "cpu"
+
+    @property
+    def recv_timeout_s(self) -> float:
+        """Wall-clock timeout in seconds waiting for an ASR sidecar response (#2103)."""
+        try:
+            v = float(os.environ.get("OMNIVOICE_ASR_RECV_TIMEOUT_S", str(ASR_RECV_TIMEOUT_S)))
+        except (ValueError, TypeError):
+            return ASR_RECV_TIMEOUT_S
+        if not math.isfinite(v):
+            return ASR_RECV_TIMEOUT_S
+        return max(30.0, v)
 
     def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
         """Transcribe ``audio_path`` in the sidecar. Returns the engine's
@@ -107,21 +126,35 @@ class SubprocessASRBackend(SubprocessBackend):
                 if slot_future is not None:
                     slot_future.cancel()
                 raise TimeoutError("timed out waiting for a free GPU worker")
+            timeout_s = self.recv_timeout_s
             with self._lock:
                 self._spawn()
+                from services.performance_profiles import asr_decode_defaults
                 self._send({
                     "op": "transcribe",
                     "audio_path": str(audio_path),
                     "word_timestamps": bool(word_timestamps),
+                    "decode_options": asr_decode_defaults(),
                 })
-                reply = self._recv_with_timeout(ASR_RECV_TIMEOUT_S)
-            if not reply:
-                # Pipe closed mid-transcription → the child crashed.
-                raise RuntimeError(
-                    f"{self.id} ASR sidecar crashed mid-transcription "
-                    f"(device={self._device()}); the job failed but the backend "
-                    f"stayed up — retry to respawn a fresh sidecar."
-                )
+                reply = self._recv_with_timeout(timeout_s)
+                timed_out = self._last_recv_timed_out
+                if not reply:
+                    # EOF can arrive before Windows updates poll(); retire the
+                    # stale handle so an immediate retry respawns the sidecar.
+                    self.shutdown()
+                    if timed_out:
+                        raise RuntimeError(
+                            f"{self.id} ASR sidecar exceeded receive timeout "
+                            f"({timeout_s:g}s); killed mid-transcription "
+                            f"(device={self._device()}) — retry or raise "
+                            f"OMNIVOICE_ASR_RECV_TIMEOUT_S."
+                        )
+                    # Pipe closed mid-transcription → the child crashed.
+                    raise RuntimeError(
+                        f"{self.id} ASR sidecar crashed mid-transcription "
+                        f"(device={self._device()}); the job failed but the backend "
+                        f"stayed up — retry to respawn a fresh sidecar."
+                    )
             if reply.get("op") == "error":
                 raise RuntimeError(
                     f"{self.id} ASR sidecar error (device={self._device()}): "
@@ -155,6 +188,11 @@ class IsolatedFasterWhisperBackend(SubprocessASRBackend):
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
+        from core.execstack import ensure_ctranslate2_loadable
+
+        ok, detail = ensure_ctranslate2_loadable()
+        if not ok:
+            return False, f"faster-whisper cannot load CTranslate2: {detail}"
         try:
             import faster_whisper  # noqa: F401
         except Exception as e:
@@ -164,7 +202,7 @@ class IsolatedFasterWhisperBackend(SubprocessASRBackend):
         # Same CTranslate2 engine, same cuDNN 8 requirement (#1371). Crash
         # isolation means a missing cuDNN 8 kills only the child — so instead of
         # a dead backend the user gets a sidecar that fails every transcribe
-        # with no explanation. Report it here, where Model Catalogue → Engines shows it.
+        # with no explanation. Report it here, where Model Catalogue shows it.
         from services.asr_backend import _ctranslate2_cudnn_ok
 
         return _ctranslate2_cudnn_ok()

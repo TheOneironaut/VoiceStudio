@@ -306,6 +306,27 @@ export default function PronunciationPanel() {
               />
               <Badge tone="neutral">{typeLabel(e.type)}</Badge>
               <Badge tone="neutral">{scopeLabel(e.scope || e.language)}</Badge>
+              {/* An IPA or CMU row saves, validates and toggles on, and is
+                  then dropped before term matching — Phase 1 only substitutes
+                  respelling. #1984 said so in the test preview, which a user
+                  only sees if they run a test. The list is where they look at
+                  what they have saved, so it says so there too (#1949, #2002
+                  by @utkarsha741).
+
+                  Enabled only, matching `inert_entries_for_language`: a row the
+                  user switched OFF is also not applied, but for a reason the
+                  toggle already shows, and saying "not applied yet" there
+                  reads as a defect rather than their own choice.
+
+                  The type test mirrors the backend's — everything that is not
+                  respelling is inert today. Naming ipa/cmu explicitly would
+                  silently stop badging a notation added later, which is the
+                  invisibility this exists to remove. */}
+              {!!e.enabled && e.type !== 'respelling' && (
+                <Badge tone="warning" data-testid={`pron-not-applied-${e.id}`}>
+                  {t('pronunciation.not_applied_badge')}
+                </Badge>
+              )}
               <Button
                 variant="danger"
                 size="sm"
@@ -423,6 +444,19 @@ export default function PronunciationPanel() {
           ) : (
             t('pronunciation.test_nochange')
           )}
+        </p>
+      )}
+      {testOut?.inert_entries?.length > 0 && (
+        // IPA and CMU entries are validated and stored but not applied yet.
+        // Without this the panel said "no entries match" for a term that DOES
+        // match, which sent the user to re-type an entry that was already
+        // correct (#1949).
+        <p className="perfpanel__help" data-testid="pron-test-inert">
+          {t('pronunciation.test_inert', {
+            terms: testOut.inert_entries.map((e) => e.term).join(', '),
+            defaultValue:
+              'Stored but not applied yet on this engine: {{terms}}. IPA and CMU entries are saved and validated, but only Respelling changes the spoken text today.',
+          })}
         </p>
       )}
       {testError && (

@@ -311,7 +311,7 @@ def test_generate_requires_ref_audio(patched_indextts_backend):
         patched_indextts_backend.generate("hello", ref_audio=None)
 
 
-def test_indextts25_languages_and_unknown_language_fallback(
+def test_indextts25_rejects_unsupported_language_without_synthesizing(
     monkeypatch, patched_indextts_backend, tmp_path,
 ):
     backend = patched_indextts_backend
@@ -330,8 +330,9 @@ def test_indextts25_languages_and_unknown_language_fallback(
         return original_send(self, msg)
 
     monkeypatch.setattr(SubprocessBackend, "_send", spy_send)
-    backend.generate("hello", ref_audio="/tmp/ref.wav", language="fr-FR")
-    assert sent[0]["lang"] == "en"
+    with pytest.raises(ValueError, match="doesn't support language='fr-FR'"):
+        backend.generate("hello", ref_audio="/tmp/ref.wav", language="fr-FR")
+    assert sent == []
 
 
 def test_user_managed_indextts2_keeps_legacy_language_metadata(
@@ -597,7 +598,7 @@ def test_sidecar_loader_prefers_25_and_uses_reviewed_weight_layout(monkeypatch, 
     assert captured["use_qwen_emo"] is True
 
 
-def test_sidecar_loader_keeps_user_managed_v2_compatibility(monkeypatch):
+def test_sidecar_loader_keeps_user_managed_v2_compatibility(monkeypatch, tmp_path):
     from engines.indextts import main as sidecar
 
     captured = {}
@@ -613,7 +614,10 @@ def test_sidecar_loader_keeps_user_managed_v2_compatibility(monkeypatch):
     monkeypatch.setitem(sys.modules, "indextts", package)
     monkeypatch.delitem(sys.modules, "indextts.infer_v2_5", raising=False)
     monkeypatch.setitem(sys.modules, "indextts.infer_v2", legacy_module)
-    monkeypatch.setenv("OMNIVOICE_INDEXTTS_DIR", "/models/index-tts-v2")
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+    monkeypatch.setenv("OMNIVOICE_INDEXTTS_DIR", str(tmp_path))
     monkeypatch.setattr(sidecar, "_model", None)
     monkeypatch.setattr(sidecar, "_model_version", None)
 

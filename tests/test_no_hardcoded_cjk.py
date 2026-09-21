@@ -41,10 +41,11 @@ _SKIP_EXT = {
 # CJK (test-fixture descriptions, model/engine identifiers like CosyVoice
 # speaker IDs, multilingual sample text) — they are documentation, not shipped
 # UI strings, so they belong on the same footing as the allowlisted docs below.
-_ALLOWED_PREFIXES = ("frontend/src/i18n/", "docs/specs/")
+_ALLOWED_PREFIXES = ("frontend/src/i18n/", "electron/src/renderer/src/i18n/", "docs/specs/")
 
 # Functional / data / documentation files where CJK is intentional and required.
 _ALLOWED_FILES = {
+    "electron/src/main/blank-window-guard.ts",
     # Documentation & translated docs
     "README.md",                                  # native language-switcher link
     "README_CN.md",                               # Chinese README (a translation)
@@ -57,6 +58,7 @@ _ALLOWED_FILES = {
     "backend/services/segmentation.py",
     "backend/services/sentence_chunker.py",       # streaming-TTS terminator tables (Patter port, Wave 1.4)
     "backend/services/subtitle_segmenter.py",
+    "backend/services/text_normalization.py",  # spoken range word per language ("20~30" must not read as one number)
     "backend/core/http_headers.py",               # docstring quotes the CJK filename that 500'd the header (#1262)
     "frontend/src/components/DubSegmentRow.jsx",
     "frontend/src/components/StoriesEditor.jsx",

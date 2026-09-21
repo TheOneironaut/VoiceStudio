@@ -1,3 +1,7 @@
+import { generationFailureMessage } from '../utils/generationFailureMessage.ts';
+import { languageRejectionMessage } from '../utils/languageRejection.ts';
+import i18n from 'i18next';
+import { abortableDelay } from '../utils/abortableDelay.ts';
 // Backend base URL.
 //   • VITE_API_URL                → explicit override (any deploy).
 //   • Tauri webview               → the local sidecar (127.0.0.1:<port>).
@@ -12,10 +16,10 @@
 // under `node --experimental-strip-types`, whose ESM resolver requires real
 // file extensions (tsconfig has allowImportingTsExtensions for tsc).
 import {
+  awaitBackendCrashMarker,
   getUnacknowledgedBackendCrash,
   describeCrashExit,
   crashAge,
-  type BackendCrashMarker,
 } from '../utils/backendCrash.ts';
 import { backendLifecycleStage, type BackendLifecycle } from '../utils/backendLifecycle.ts';
 import { scrubText } from '../utils/scrub.js';
@@ -235,11 +239,29 @@ if (typeof window !== 'undefined') {
 export class ApiError extends Error {
   status?: number;
   detail?: unknown;
-  constructor(message: string, init: { status?: number; detail?: unknown } = {}) {
+  /**
+   * The backend exception type behind an unclassified failure.
+   *
+   * The 500 handler puts `error_class` in the response body, but nothing
+   * lifted it onto the Error — so the auto bug reporter, which reads the
+   * Error, filed "VoiceStudio hit an internal error; check the backend log"
+   * and nothing else. Every such report looked identical and none could be
+   * triaged (#1773).
+   *
+   * #1956 did this for the streaming path. This is the classic path, which
+   * had been carrying the datum on the wire the whole time.
+   */
+  errorClass?: string;
+  constructor(
+    message: string,
+    init: { status?: number; detail?: unknown; errorClass?: string } = {},
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = init.status;
     this.detail = init.detail;
+    this.errorClass =
+      typeof init.errorClass === 'string' && init.errorClass ? init.errorClass : undefined;
   }
 }
 
@@ -277,7 +299,9 @@ const BACKEND_MARKER_HEADER = 'x-omnivoice-backend';
 // "Not Found" — the one non-JSON backend voice. That fallback is a heuristic,
 // which is exactly why the header exists: a proxy CAN return
 // `{"error":"Not Found"}` and impersonate the shape.
-async function readError(res: Response): Promise<{ detail: unknown; backendShaped: boolean }> {
+async function readError(
+  res: Response,
+): Promise<{ detail: unknown; backendShaped: boolean; localized?: string }> {
   const marked = Boolean(res.headers?.get?.(BACKEND_MARKER_HEADER));
   const text = await res.text().catch(() => '');
   try {
@@ -286,7 +310,9 @@ async function readError(res: Response): Promise<{ detail: unknown; backendShape
     // `{"detail":"Not Found"}` an unrouted path produces. `error` is used by
     // a few 4xx/5xx handlers but never for a 404, so an unmarked
     // `{"error":…}` 404 is a foreign server, not an old backend.
-    if (j.detail) return { detail: j.detail, backendShaped: true };
+    const localized =
+      generationFailureMessage(j, i18n.t) || generationFailureMessage(j.detail, i18n.t);
+    if (j.detail) return { detail: j.detail, backendShaped: true, localized };
     if (j.error) return { detail: j.error, backendShaped: marked };
     return { detail: text || res.statusText, backendShaped: marked };
   } catch {
@@ -384,7 +410,7 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
       if (signal?.aborted || (e as Error)?.name === 'AbortError') throw e;
       lastDetail = String((e as Error)?.message || e);
       if (retryTransport && attempt < TRANSPORT_RETRY_BACKOFF_MS.length) {
-        await new Promise((r) => setTimeout(r, TRANSPORT_RETRY_BACKOFF_MS[attempt]));
+        await abortableDelay(TRANSPORT_RETRY_BACKOFF_MS[attempt], signal);
         continue;
       }
       // The short cascade is exhausted, but the desktop shell may KNOW the
@@ -400,7 +426,7 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
         }
         const stage = lastStage.stage;
         if (stage === 'starting') {
-          await new Promise((r) => setTimeout(r, RESTART_WAIT_INTERVAL_MS));
+          await abortableDelay(RESTART_WAIT_INTERVAL_MS, signal);
           continue;
         }
         // `ready` while the transport is failing is a contradiction — the
@@ -410,7 +436,7 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
         // marker. 'failed'/'unknown' fall through and error now, so a shell
         // that gave up — or no shell at all — still surfaces promptly.
         if (stage === 'ready' && elapsed < RECONCILE_MS) {
-          await new Promise((r) => setTimeout(r, RECONCILE_INTERVAL_MS));
+          await abortableDelay(RECONCILE_INTERVAL_MS, signal);
           continue;
         }
       }
@@ -429,12 +455,21 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
       // watcher, or (browser/dev/Docker) by the backend's own run sentinel —
       // tell the honest story instead of the vague "can't reach" and let
       // BackendCrashNotice raise its "View crash details" affordance.
-      let crash: BackendCrashMarker | null = null;
-      try {
-        crash = await getUnacknowledgedBackendCrash();
-      } catch {
-        /* forensics unavailable — fall through to the generic message */
-      }
+      //
+      // #1802/#1805: asking ONCE, right now, races the shell's ~2 s death
+      // poll and loses — the marker for a backend that just died has usually
+      // not been written yet. We then concluded "no crash" and said so, which
+      // is how a give-up came to assert "it most likely crashed or was killed
+      // mid-request" while carrying no forensics to back it. `streamDropError`
+      // already waits out that poll (#1119); this path never did. The budget
+      // is shorter than the stream path's 8 s because the retry cascade above
+      // has already cost the user a few seconds — two poll intervals is enough
+      // to stop losing the race without turning every failure into a stall.
+      const { crash } = await awaitBackendCrashMarker(getUnacknowledgedBackendCrash, {
+        waitMs: 4_000,
+        intervalMs: 1_000,
+        signal,
+      });
       if (crash) {
         try {
           window.dispatchEvent(new CustomEvent('ov:backend-crashed', { detail: crash }));
@@ -459,8 +494,8 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
           'The local VoiceStudio backend is running but stopped responding. This usually means a ' +
             'job (a generation or a transcription) is stuck holding the engine — often a model ' +
             'too heavy for the available memory on this machine. Check Settings → Logs → Backend ' +
-            'for the last thing it was doing; a smaller model or engine (Model Catalogue → Models) is ' +
-            'the usual fix. Restarting the app clears it for now.',
+            'for the last thing it was doing; a smaller model or a lighter engine, both in Model ' +
+            'Catalogue, is the usual fix. Restarting the app clears it for now.',
           { status: 0, detail: failureDetail },
         );
       }
@@ -512,7 +547,7 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
     }
     if (!res.ok) {
       // An HTTP error means the backend *did* respond — never retry it.
-      const { detail, backendShaped } = await readError(res);
+      const { detail, backendShaped, localized } = await readError(res);
       // #1385: a 404 in some other server's voice means the request never
       // reached a VoiceStudio backend at all — a static host's catch-all page
       // or a reverse proxy with no route for this path. Echoing that page
@@ -564,12 +599,28 @@ export async function apiFetch(path: string, opts: ApiFetchOptions = {}): Promis
       // human-readable `message` — use it for the Error message instead of
       // letting the object stringify to "[object Object]".
       const msg =
-        typeof detail === 'string'
-          ? detail
-          : ((detail as { message?: string })?.message ?? JSON.stringify(detail));
+        localized ||
+        languageRejectionMessage(detail, i18n.t) ||
+        (detail &&
+        typeof detail === 'object' &&
+        'code' in detail &&
+        detail.code === 'argos_runtime_unavailable'
+          ? i18n.t('engines.argosRuntimeUnavailable', {
+              defaultValue: 'Argos runtime unavailable. Reinstall the backend or select NLLB.',
+            })
+          : typeof detail === 'string'
+            ? detail
+            : ((detail as { message?: string })?.message ?? JSON.stringify(detail)));
+      // The backend names the exception type in `error_class` on its 500s.
+      // Lifting it here is what lets the bug report say which failure it was.
+      const errorClass =
+        detail && typeof detail === 'object'
+          ? (detail as { error_class?: unknown }).error_class
+          : undefined;
       throw new ApiError(`${res.status} ${res.statusText}: ${msg}`, {
         status: res.status,
         detail,
+        errorClass: typeof errorClass === 'string' ? errorClass : undefined,
       });
     }
     return res;

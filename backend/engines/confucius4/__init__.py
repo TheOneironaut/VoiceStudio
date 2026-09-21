@@ -25,6 +25,8 @@ runs under the Confucius4 venv — never imported by the parent), and
 from __future__ import annotations
 
 import logging
+import math
+import os
 from typing import TYPE_CHECKING
 
 from services.subprocess_backend import SubprocessBackend
@@ -56,15 +58,15 @@ class Confucius4Backend(SubprocessBackend):
 
     id = "confucius4-tts"
     display_name = (
-        "Confucius4-TTS (LLM, 14 langs, cross-lingual zero-shot clone, CUDA/CPU, Apache-2.0)"
+        "Confucius4-TTS (LLM, 14 langs, cross-lingual zero-shot clone, Apache-2.0)"
     )
     supports_voice_design = False  # timbre comes from a reference clip
     # Upstream vocoder rate (config target_sample_rate) — confirmed 22 050 Hz by
     # a live run (2026-07-02); still re-read from the sidecar's ready/audio frames.
     _DEFAULT_SAMPLE_RATE = 22050
-    # CUDA fast path + CPU fallback, both exercised (CPU end-to-end validated).
-    # No MPS claim — upstream has no Metal path.
-    gpu_compat = ("cuda", "cpu")
+    # Match device propagation into upstream .to(device). XPU/NPU routing is
+    # contract-tested, not a claim of physical-hardware synthesis validation.
+    gpu_compat = ("cuda", "rocm", "xpu", "npu", "cpu")
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:
@@ -100,31 +102,62 @@ class Confucius4Backend(SubprocessBackend):
         return CONFUCIUS4_SIDECAR_SCRIPT
 
     @property
+    def recv_timeout_s(self) -> float:
+        """Receive timeout in seconds for the Confucius4 sidecar process (#2103)."""
+        # Confucius4 is an LLM-based TTS (~17x realtime on CPU); synthesis legitimately
+        # outruns the 60s class default. OMNIVOICE_CONFUCIUS4_RECV_TIMEOUT_S tunes it (#2103).
+        try:
+            v = float(os.environ.get("OMNIVOICE_CONFUCIUS4_RECV_TIMEOUT_S", "900"))
+        except (ValueError, TypeError):
+            return 900.0
+        if not math.isfinite(v):
+            return 900.0
+        return max(30.0, v)
+
+    @property
     def sample_rate(self) -> int:
         return self._DEFAULT_SAMPLE_RATE
 
     @property
     def supported_languages(self) -> list[str]:
-        # 14 languages with the caller's language passed through at synthesize
-        # time; "multi" on the protocol surface.
-        return ["multi"]
+        # Upstream README: "14 Languages Supported: Chinese, English,
+        # Japanese, Korean, German, French, Spanish, Indonesian, Italian,
+        # Thai, Portuguese, Russian, Malay and Vietnamese". Declaring this
+        # honestly enables the base-class ``_check_language`` (#2104) to
+        # reject a caller-supplied language outside the set instead of the
+        # sidecar passing it through and producing an accented approximation
+        # — a 14-language engine with ``["multi"]`` on its contract surface
+        # lied about what it can do.
+        return [
+            "zh", "en", "ja", "ko", "de", "fr", "es", "id", "it",
+            "th", "pt", "ru", "ms", "vi",
+        ]
 
     def generate(self, text: str, **kw) -> "torch.Tensor":
         """Synthesize one utterance through the Confucius4 sidecar.
 
         kwargs honored:
-          * ``ref_audio`` — reference clip path → ``prompt_wav`` (zero-shot
-            cloning). Optional but recommended for a specific voice.
+          * ``ref_audio`` — reference clip path → ``prompt_wav``. **Required**
+            by the pinned upstream ``ConfuciusTTS.generate`` signature
+            (#2099); requests without it raise a clear error here instead of
+            surfacing the upstream ``TypeError: missing 1 required positional
+            argument: 'prompt_wav'``.
           * ``language`` — ISO code / name → ``lang`` (cross-lingual transfer).
           * ``ref_text`` is intentionally ignored — Confucius4 is unconstrained
             cloning (no reference transcript needed).
 
         Returns a tensor of shape (1, n_samples) at :attr:`sample_rate`.
         """
+        self._check_language(kw.get("language"))
         forwarded: dict = {}
         ref_audio = kw.get("ref_audio")
-        if ref_audio:
-            forwarded["ref_audio"] = ref_audio
+        if not ref_audio:
+            raise RuntimeError(
+                "Confucius4-TTS requires a reference audio for voice cloning "
+                "(prompt_wav). Pass ref_audio= with a path to a speaker "
+                "reference clip."
+            )
+        forwarded["ref_audio"] = os.path.abspath(os.fspath(ref_audio))
         language = kw.get("language")
         if language:
             forwarded["language"] = str(language)

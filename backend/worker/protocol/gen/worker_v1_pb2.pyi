@@ -93,7 +93,7 @@ class HostInfo(_message.Message):
     def __init__(self, hostname: _Optional[str] = ..., os: _Optional[str] = ..., arch: _Optional[str] = ..., worker_version: _Optional[str] = ..., cpu_count: _Optional[int] = ..., system_memory_bytes: _Optional[int] = ..., gpus: _Optional[_Iterable[_Union[GpuInfo, _Mapping]]] = ...) -> None: ...
 
 class ModelCapability(_message.Message):
-    __slots__ = ("engine", "model_id", "operations", "supported", "installed", "downloaded", "resident", "min_memory_bytes", "precision", "derived_concurrency", "cpu_fallback", "repo_ids", "display_name")
+    __slots__ = ("engine", "model_id", "operations", "supported", "installed", "downloaded", "resident", "min_memory_bytes", "precision", "derived_concurrency", "cpu_fallback", "repo_ids", "display_name", "backend", "free_memory_bytes")
     ENGINE_FIELD_NUMBER: _ClassVar[int]
     MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     OPERATIONS_FIELD_NUMBER: _ClassVar[int]
@@ -107,6 +107,8 @@ class ModelCapability(_message.Message):
     CPU_FALLBACK_FIELD_NUMBER: _ClassVar[int]
     REPO_IDS_FIELD_NUMBER: _ClassVar[int]
     DISPLAY_NAME_FIELD_NUMBER: _ClassVar[int]
+    BACKEND_FIELD_NUMBER: _ClassVar[int]
+    FREE_MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
     engine: str
     model_id: str
     operations: _containers.RepeatedScalarFieldContainer[str]
@@ -120,7 +122,9 @@ class ModelCapability(_message.Message):
     cpu_fallback: bool
     repo_ids: _containers.RepeatedScalarFieldContainer[str]
     display_name: str
-    def __init__(self, engine: _Optional[str] = ..., model_id: _Optional[str] = ..., operations: _Optional[_Iterable[str]] = ..., supported: _Optional[bool] = ..., installed: _Optional[bool] = ..., downloaded: _Optional[bool] = ..., resident: _Optional[bool] = ..., min_memory_bytes: _Optional[int] = ..., precision: _Optional[str] = ..., derived_concurrency: _Optional[int] = ..., cpu_fallback: _Optional[bool] = ..., repo_ids: _Optional[_Iterable[str]] = ..., display_name: _Optional[str] = ...) -> None: ...
+    backend: str
+    free_memory_bytes: int
+    def __init__(self, engine: _Optional[str] = ..., model_id: _Optional[str] = ..., operations: _Optional[_Iterable[str]] = ..., supported: _Optional[bool] = ..., installed: _Optional[bool] = ..., downloaded: _Optional[bool] = ..., resident: _Optional[bool] = ..., min_memory_bytes: _Optional[int] = ..., precision: _Optional[str] = ..., derived_concurrency: _Optional[int] = ..., cpu_fallback: _Optional[bool] = ..., repo_ids: _Optional[_Iterable[str]] = ..., display_name: _Optional[str] = ..., backend: _Optional[str] = ..., free_memory_bytes: _Optional[int] = ...) -> None: ...
 
 class RegisterRequest(_message.Message):
     __slots__ = ("envelope", "protocol_version_min", "protocol_version_max", "enrollment_token", "worker_id", "public_key", "challenge_signature", "challenge", "host", "capabilities", "max_concurrent_tasks", "in_flight", "completed_unacked", "key_id", "nonce", "labels", "features")
@@ -190,20 +194,22 @@ class RegisterResponse(_message.Message):
     def __init__(self, envelope: _Optional[_Union[Envelope, _Mapping]] = ..., worker_id: _Optional[str] = ..., session_token: _Optional[str] = ..., session_epoch: _Optional[int] = ..., protocol_version: _Optional[int] = ..., session_expires_at_unix: _Optional[int] = ..., heartbeat_interval_seconds: _Optional[int] = ..., authoritative_in_flight: _Optional[_Iterable[_Union[TaskRef, _Mapping]]] = ..., error: _Optional[_Union[Error, _Mapping]] = ...) -> None: ...
 
 class Heartbeat(_message.Message):
-    __slots__ = ("envelope", "active_tasks", "available_slots", "resident_models", "free_memory_bytes", "cpu_percent")
+    __slots__ = ("envelope", "active_tasks", "available_slots", "resident_models", "free_memory_bytes", "cpu_percent", "gpu_utilization_percent")
     ENVELOPE_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_TASKS_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_SLOTS_FIELD_NUMBER: _ClassVar[int]
     RESIDENT_MODELS_FIELD_NUMBER: _ClassVar[int]
     FREE_MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
     CPU_PERCENT_FIELD_NUMBER: _ClassVar[int]
+    GPU_UTILIZATION_PERCENT_FIELD_NUMBER: _ClassVar[int]
     envelope: Envelope
     active_tasks: int
     available_slots: int
     resident_models: _containers.RepeatedScalarFieldContainer[str]
     free_memory_bytes: int
     cpu_percent: float
-    def __init__(self, envelope: _Optional[_Union[Envelope, _Mapping]] = ..., active_tasks: _Optional[int] = ..., available_slots: _Optional[int] = ..., resident_models: _Optional[_Iterable[str]] = ..., free_memory_bytes: _Optional[int] = ..., cpu_percent: _Optional[float] = ...) -> None: ...
+    gpu_utilization_percent: float
+    def __init__(self, envelope: _Optional[_Union[Envelope, _Mapping]] = ..., active_tasks: _Optional[int] = ..., available_slots: _Optional[int] = ..., resident_models: _Optional[_Iterable[str]] = ..., free_memory_bytes: _Optional[int] = ..., cpu_percent: _Optional[float] = ..., gpu_utilization_percent: _Optional[float] = ...) -> None: ...
 
 class TaskAccepted(_message.Message):
     __slots__ = ("ref", "envelope")
@@ -476,6 +482,14 @@ class PrewarmRequest(_message.Message):
     download_if_missing: bool
     def __init__(self, envelope: _Optional[_Union[Envelope, _Mapping]] = ..., engine: _Optional[str] = ..., model_id: _Optional[str] = ..., download_if_missing: _Optional[bool] = ...) -> None: ...
 
+class ModelInstallCancelRequest(_message.Message):
+    __slots__ = ("envelope", "model_id")
+    ENVELOPE_FIELD_NUMBER: _ClassVar[int]
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    envelope: Envelope
+    model_id: str
+    def __init__(self, envelope: _Optional[_Union[Envelope, _Mapping]] = ..., model_id: _Optional[str] = ...) -> None: ...
+
 class Ping(_message.Message):
     __slots__ = ("envelope", "nonce")
     ENVELOPE_FIELD_NUMBER: _ClassVar[int]
@@ -503,7 +517,7 @@ class Shutdown(_message.Message):
     def __init__(self, envelope: _Optional[_Union[Envelope, _Mapping]] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class ServerMessage(_message.Message):
-    __slots__ = ("assignment", "cancel", "result_ack", "config", "ping", "drain", "shutdown", "prewarm", "registered")
+    __slots__ = ("assignment", "cancel", "result_ack", "config", "ping", "drain", "shutdown", "prewarm", "registered", "model_install_cancel")
     ASSIGNMENT_FIELD_NUMBER: _ClassVar[int]
     CANCEL_FIELD_NUMBER: _ClassVar[int]
     RESULT_ACK_FIELD_NUMBER: _ClassVar[int]
@@ -513,6 +527,7 @@ class ServerMessage(_message.Message):
     SHUTDOWN_FIELD_NUMBER: _ClassVar[int]
     PREWARM_FIELD_NUMBER: _ClassVar[int]
     REGISTERED_FIELD_NUMBER: _ClassVar[int]
+    MODEL_INSTALL_CANCEL_FIELD_NUMBER: _ClassVar[int]
     assignment: TaskAssignment
     cancel: TaskCancel
     result_ack: ResultAckMessage
@@ -522,7 +537,8 @@ class ServerMessage(_message.Message):
     shutdown: Shutdown
     prewarm: PrewarmRequest
     registered: RegisterResponse
-    def __init__(self, assignment: _Optional[_Union[TaskAssignment, _Mapping]] = ..., cancel: _Optional[_Union[TaskCancel, _Mapping]] = ..., result_ack: _Optional[_Union[ResultAckMessage, _Mapping]] = ..., config: _Optional[_Union[ConfigUpdate, _Mapping]] = ..., ping: _Optional[_Union[Ping, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., shutdown: _Optional[_Union[Shutdown, _Mapping]] = ..., prewarm: _Optional[_Union[PrewarmRequest, _Mapping]] = ..., registered: _Optional[_Union[RegisterResponse, _Mapping]] = ...) -> None: ...
+    model_install_cancel: ModelInstallCancelRequest
+    def __init__(self, assignment: _Optional[_Union[TaskAssignment, _Mapping]] = ..., cancel: _Optional[_Union[TaskCancel, _Mapping]] = ..., result_ack: _Optional[_Union[ResultAckMessage, _Mapping]] = ..., config: _Optional[_Union[ConfigUpdate, _Mapping]] = ..., ping: _Optional[_Union[Ping, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., shutdown: _Optional[_Union[Shutdown, _Mapping]] = ..., prewarm: _Optional[_Union[PrewarmRequest, _Mapping]] = ..., registered: _Optional[_Union[RegisterResponse, _Mapping]] = ..., model_install_cancel: _Optional[_Union[ModelInstallCancelRequest, _Mapping]] = ...) -> None: ...
 
 class ArtifactRef(_message.Message):
     __slots__ = ("artifact_id", "task_id", "attempt_id", "filename", "content_type", "size_bytes", "sha256", "session_token")

@@ -42,6 +42,11 @@ describe('errorDocsMap', () => {
     expect(Object.keys(ERROR_DOCS).sort()).toEqual([...ERROR_CLASS_KEYS].sort());
     expect(Object.keys(ERROR_DOCS).sort()).toEqual(
       [
+        'GPU_ARCH_UNSUPPORTED',
+        'WINDOWS_APP_CONTROL_BLOCKED',
+        'AUDIO_IO_FAILED',
+        'DIARIZATION_MODEL_MISSING',
+        'DIARIZATION_LOAD_FAILED',
         'APPIMAGE_WEBKIT_WHITESCREEN',
         'GATEKEEPER_QUARANTINE',
         'HF_AUTH_FAILED',
@@ -84,7 +89,7 @@ describe('errorDocsMap', () => {
       classifyError(new Error('pyannote/speaker-diarization-3.1 is gated; 401 Unauthorized')),
     ).toBe('PYANNOTE_LICENSE_REQUIRED');
     expect(classifyError(new Error('Speaker diarization model failed to load'))).toBe(
-      'PYANNOTE_LICENSE_REQUIRED',
+      'DIARIZATION_LOAD_FAILED',
     );
     expect(classifyError(new Error('You must accept the user conditions for this model'))).toBe(
       'PYANNOTE_LICENSE_REQUIRED',

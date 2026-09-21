@@ -6,7 +6,7 @@ version that conflicts with the parent's ``>=5.3``. They run as sidecars:
 a source checkout + a dedicated venv + (for IndexTTS-2) model weights in
 ``<checkout>/checkpoints/``. Until now provisioning that trio was four
 manual terminal steps; this module turns it into a resumable background
-job the Model Catalogue → Engines UI can start and poll.
+job the Model Catalogue UI can start and poll.
 
 Design notes (single source of truth for the choices):
 
@@ -57,7 +57,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 from core.config import DATA_DIR
 from core.contained_subprocess import OwnedPopen, WindowsJobPopen, spawn_owned
@@ -86,6 +86,17 @@ _IMPORT_PROBE_TIMEOUT_S = 120
 
 
 # ── Spec ───────────────────────────────────────────────────────────────────
+
+
+class ExtraSource(NamedTuple):
+    """A second pinned source tree fetched into the checkout: an upstream git
+    submodule, which neither a depth-1 clone nor GitHub's source tarball
+    includes. Always fetched as the tarball of its pinned commit."""
+
+    path: str           # where it goes, relative to the checkout
+    revision: str       # reviewed upstream commit
+    tarball_url: str    # GitHub archive of that commit
+    required_path: str  # a file, relative to *path*, proving the tree is there
 
 
 @dataclass(frozen=True)
@@ -126,6 +137,55 @@ class SidecarSpec:
     invalidate: Callable[[], None] = field(default=lambda: None)
     # Cheap "is a healthy install already present?" probe (file existence only).
     installed_probe: Callable[[], bool] = field(default=lambda: False)
+    # Extra `uv venv` arguments — an interpreter pin for an upstream that
+    # declares one, e.g. ("--python", "3.10").
+    venv_args: tuple[str, ...] = ()
+    # Existing environments may support more minors than the preferred pin.
+    compatible_python: tuple[str, ...] = ()
+    # `uv pip install` target, "{checkout}" substituted. Each upstream installs
+    # differently (editable, editable with an extra, a requirements file, a
+    # constraints file); the default is the editable install IndexTTS uses.
+    install_args: tuple[str, ...] = ("-e", "{checkout}")
+    # Add PyTorch's CUDA index on a CUDA host. Plain PyPI torch is CPU-only on
+    # Windows, and `+cuNNN` local-version pins exist nowhere else.
+    uses_cuda_index: bool = False
+    # Python that proves the venv works; "{checkout}" / "{checkout_repr}"
+    # substituted. None means `import <probe_module>`.
+    probe_code: Optional[str] = None
+    # The file whose presence proves a fetched checkout is the whole
+    # repository. Most upstreams ship a pyproject.toml; Confucius4 ships
+    # only requirements.txt and setup.py.
+    source_manifest: str = "pyproject.toml"
+    # False for an engine that is a PyPI package, not a repository: nothing
+    # is fetched, and the managed root holds only the engine's own venv.
+    has_source: bool = True
+    # Add PyTorch's CPU index on every host, for an engine that only ever
+    # runs torch on the CPU (see core.torch_indexes).
+    cpu_torch_index: bool = False
+    # torch/torchaudio pins for an upstream that leaves torch unpinned. Left
+    # to the resolver, PyPI's newest torch (CPU-only on Windows) pairs with a
+    # CUDA torchaudio from the other index. The host picks the build of the
+    # pinned pair: `+cu128` on a CUDA host, `+cpu` on other Windows and Linux
+    # hosts, plain on macOS.
+    torch_pins: tuple[str, ...] = ()
+    # Submodule trees the upstream repository needs (see ExtraSource).
+    extra_sources: tuple[ExtraSource, ...] = ()
+    # Download only these files of the weights repo (huggingface_hub
+    # allow_patterns). Empty downloads the whole repository.
+    weights_allow_patterns: tuple[str, ...] = ()
+    # Require the completion marker the import probe writes. Only IndexTTS,
+    # installed before the marker existed, opts out.
+    requires_install_marker: bool = True
+    # Opt-in recipe revision: legacy markers stay valid for unchanged engines.
+    install_revision: str = ""
+    # The weights repo is also an ordinary Model Catalogue download that the
+    # engine's in-process path uses (CosyVoice). Otherwise it is one only the
+    # installer can place, and a plain download is not offered for it.
+    weights_catalogue_download: bool = False
+    # Can the one-click install work on THIS machine? (ok, reason). Consulted
+    # before an Install button is offered and again when an install starts, so
+    # a host the upstream does not support never gets a job that can only fail.
+    host_supported: Callable[[], tuple[bool, str]] = field(default=lambda: (True, ""))
 
 
 def _indextts_invalidate() -> None:
@@ -136,6 +196,105 @@ def _indextts_invalidate() -> None:
 def _indextts_installed() -> bool:
     from engines.indextts.bootstrap import is_indextts_installed
     return is_indextts_installed()
+
+
+def _moss_invalidate() -> None:
+    from engines.moss_tts_v15 import bootstrap
+    bootstrap.invalidate()
+
+
+def _moss_installed() -> bool:
+    from engines.moss_tts_v15.bootstrap import is_moss_tts_v15_installed
+    return is_moss_tts_v15_installed()
+
+
+def _confucius4_invalidate() -> None:
+    from engines.confucius4 import bootstrap
+    bootstrap.invalidate()
+
+
+def _confucius4_installed() -> bool:
+    from engines.confucius4.bootstrap import is_confucius4_installed
+    return is_confucius4_installed()
+
+
+def _dots_invalidate() -> None:
+    from engines.dots_tts import bootstrap
+    bootstrap.invalidate()
+
+
+def _dots_installed() -> bool:
+    from engines.dots_tts.bootstrap import is_dots_tts_installed
+    return is_dots_tts_installed()
+
+
+def _host_family() -> str:
+    """The accelerator family this host runs, or "cpu" when it cannot tell."""
+    try:
+        from core.device_caps import detect_host_caps
+        return str(detect_host_caps().family)
+    except Exception:  # noqa: BLE001 — a probe failure must not break installs
+        return "cpu"
+
+
+def _torch_pin_args(spec: "SidecarSpec") -> list[str]:
+    from core.torch_indexes import UV_PIP_CPU_ARGS, UV_PIP_CU128_ARGS
+
+    if _host_family() == "cuda":
+        return [f"{pin}+cu128" for pin in spec.torch_pins] + list(UV_PIP_CU128_ARGS)
+    if sys.platform in ("win32", "linux"):
+        return [f"{pin}+cpu" for pin in spec.torch_pins] + list(UV_PIP_CPU_ARGS)
+    return list(spec.torch_pins)
+
+
+def _moss_host() -> tuple[bool, str]:
+    if _host_family() == "cuda":
+        return True, ""
+    return False, (
+        "MOSS-TTS-v1.5's one-click install uses its CUDA build of PyTorch, and "
+        "this machine has no NVIDIA GPU available. Its guide covers a manual "
+        "CPU install."
+    )
+
+
+def _dots_host() -> tuple[bool, str]:
+    if sys.platform != "win32":
+        return True, ""
+    return False, (
+        "dots.tts publishes no Windows install. Run VoiceStudio on Linux or "
+        "macOS, or under WSL2, to use it."
+    )
+
+
+def _no_intel_mac(message: str) -> Callable[[], tuple[bool, str]]:
+    """A host gate for an engine whose pinned PyTorch has no Intel Mac build
+    (PyTorch stopped publishing macOS x86_64 wheels after 2.2)."""
+    def gate() -> tuple[bool, str]:
+        import platform
+        if sys.platform == "darwin" and platform.machine().lower() == "x86_64":
+            return False, message
+        return True, ""
+    return gate
+
+
+def _in_app_env(module: str) -> Callable[[], bool]:
+    """An install made with ``uv sync --extra`` lives in the app's own
+    environment. It counts as installed, so the installer never provisions a
+    second copy over one that works."""
+    def probe() -> bool:
+        import importlib.util
+        try:
+            return importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            return False
+    return probe
+
+
+# The trimmed CosyVoice requirements ship with the app (see that file for
+# what was dropped from upstream's list and why).
+_COSYVOICE_REQUIREMENTS = str(
+    Path(__file__).resolve().parents[1] / "engines" / "cosyvoice_subprocess" / "requirements.txt"
+)
 
 
 SPECS: dict[str, SidecarSpec] = {
@@ -150,6 +309,8 @@ SPECS: dict[str, SidecarSpec] = {
         checkout_dirname="index-tts-2.5",
         env_var="OMNIVOICE_INDEXTTS_DIR",
         probe_module="indextts.infer_v2_5",
+        venv_args=("--python", "3.11"),
+        compatible_python=("3.10", "3.11"),
         repo_ref="indextts-2.5",
         source_revision="bf2e967fac7933197143b017a60820b1ad40c448",
         source_required_path="indextts/infer_v2_5.py",
@@ -169,8 +330,309 @@ SPECS: dict[str, SidecarSpec] = {
         disk_confidence="estimated",
         invalidate=_indextts_invalidate,
         installed_probe=_indextts_installed,
+        # Installed before the completion marker existed; its weights
+        # marker already proves a finished install.
+        requires_install_marker=False,
+    ),
+    # Pinned to the upstream commits current on 2026-09-10. Weights are not
+    # fetched here: each engine downloads them into the shared HF cache on its
+    # first synthesis, as its manual install always has.
+    "moss-tts-v15": SidecarSpec(
+        engine_id="moss-tts-v15",
+        display_name="MOSS-TTS-v1.5",
+        repo_url="https://github.com/OpenMOSS/MOSS-TTS.git",
+        tarball_url=(
+            "https://github.com/OpenMOSS/MOSS-TTS/archive/"
+            "934d6826b084c46a0d033402174d5f8ac4ed2519.tar.gz"
+        ),
+        checkout_dirname="MOSS-TTS",
+        env_var="OMNIVOICE_MOSS_TTS_V15_DIR",
+        probe_module="transformers",
+        probe_code="import transformers, torch",
+        source_revision="934d6826b084c46a0d033402174d5f8ac4ed2519",
+        source_required_path="pyproject.toml",
+        venv_args=("--python", "3.11"),
+        install_args=("-e", "{checkout}[torch-runtime]"),
+        uses_cuda_index=True,
+        host_supported=_moss_host,
+        docs_path="docs/engines/moss-tts-v15.md",
+        # ~7 GB CUDA torch venv now, ~16 GB of weights on first synthesis.
+        required_bytes=24 * _GIB,
+        dependency_bytes=8 * _GIB,
+        temporary_free_bytes=8 * _GIB,
+        disk_confidence="estimated",
+        invalidate=_moss_invalidate,
+        installed_probe=_moss_installed,
+    ),
+    "confucius4-tts": SidecarSpec(
+        engine_id="confucius4-tts",
+        display_name="Confucius4-TTS",
+        repo_url="https://github.com/netease-youdao/Confucius4-TTS.git",
+        tarball_url=(
+            "https://github.com/netease-youdao/Confucius4-TTS/archive/"
+            "4fb32c481302d8858c3aec6a1c2a8b4cea8894c0.tar.gz"
+        ),
+        checkout_dirname="Confucius4-TTS",
+        env_var="OMNIVOICE_CONFUCIUS4_TTS_DIR",
+        probe_module="confuciustts",
+        # Upstream is not pip-installable; the package resolves from the
+        # checkout on sys.path, exactly as the engine's sidecar imports it.
+        probe_code="import sys; sys.path.insert(0, {checkout_repr}); import confuciustts",
+        source_revision="4fb32c481302d8858c3aec6a1c2a8b4cea8894c0",
+        # No pyproject.toml upstream: requirements.txt is its manifest.
+        source_manifest="requirements.txt",
+        source_required_path="setup.py",
+        venv_args=("--python", "3.10"),
+        install_args=("-r", "{checkout}/requirements.txt"),
+        # torch==2.7.0: CPU-only from PyPI on Windows; the CUDA index supplies
+        # 2.7.0+cu128, which satisfies the same pin.
+        uses_cuda_index=True,
+        docs_path="docs/engines/confucius4-tts.md",
+        # ~7 GB venv now, ~5 GB of weights on first synthesis.
+        required_bytes=14 * _GIB,
+        dependency_bytes=8 * _GIB,
+        temporary_free_bytes=8 * _GIB,
+        disk_confidence="estimated",
+        invalidate=_confucius4_invalidate,
+        installed_probe=_confucius4_installed,
+    ),
+    "dots-tts": SidecarSpec(
+        engine_id="dots-tts",
+        display_name="dots.tts",
+        repo_url="https://github.com/rednote-hilab/dots.tts.git",
+        tarball_url=(
+            "https://github.com/rednote-hilab/dots.tts/archive/"
+            "32407a55228630475c48ecdb2c4e2c0f9c09e030.tar.gz"
+        ),
+        checkout_dirname="dots.tts",
+        env_var="OMNIVOICE_DOTS_TTS_DIR",
+        probe_module="dots_tts.runtime",
+        source_revision="32407a55228630475c48ecdb2c4e2c0f9c09e030",
+        source_required_path="constraints/recommended.txt",
+        # Upstream requires-python is >=3.10,<3.13.
+        venv_args=("--python", "3.11"),
+        install_args=("-e", "{checkout}", "-c", "{checkout_uri}/constraints/recommended.txt"),
+        host_supported=_dots_host,
+        docs_path="docs/engines/dots-tts.md",
+        # ~7 GB venv now, ~9 GB checkpoint on first synthesis.
+        required_bytes=18 * _GIB,
+        dependency_bytes=8 * _GIB,
+        temporary_free_bytes=8 * _GIB,
+        disk_confidence="estimated",
+        invalidate=_dots_invalidate,
+        installed_probe=_dots_installed,
+    ),
+    # PyPI packages rather than repositories: nothing to clone, and the managed
+    # root holds only the engine's own venv. The pins are the app's own
+    # optional extras (a test ties the two together), so the engine runs the
+    # same wheel whichever way it was installed.
+    "supertonic3": SidecarSpec(
+        engine_id="supertonic3",
+        display_name="Supertonic-3",
+        repo_url="",
+        tarball_url="",
+        checkout_dirname="supertonic3",
+        env_var="OMNIVOICE_SUPERTONIC3_DIR",
+        probe_module="supertonic",
+        has_source=False,
+        venv_args=("--python", "3.11"),
+        install_args=("supertonic==1.3.1",),
+        docs_path="docs/engines/supertonic3.md",
+        # onnxruntime + numpy + huggingface_hub, no torch. The ~400 MB of
+        # weights download on first synthesis into the shared HF cache.
+        required_bytes=1 * _GIB,
+        installed_probe=_in_app_env("supertonic"),
+    ),
+    "pockettts": SidecarSpec(
+        engine_id="pockettts",
+        display_name="PocketTTS",
+        repo_url="",
+        tarball_url="",
+        checkout_dirname="pockettts",
+        env_var="OMNIVOICE_POCKETTTS_DIR",
+        probe_module="pocket_tts",
+        has_source=False,
+        venv_args=("--python", "3.11"),
+        install_args=("pocket-tts==2.1.0",),
+        cpu_torch_index=True,
+        docs_path="docs/engines/pockettts.md",
+        # CPU torch + scipy. The gated weights download on first use.
+        required_bytes=3 * _GIB,
+        installed_probe=_in_app_env("pocket_tts"),
+        host_supported=_no_intel_mac(
+            "PocketTTS needs a PyTorch version that has no Intel Mac build."
+        ),
+    ),
+    # Run in a sidecar from its own venv (engines/voxcpm2_subprocess). voxcpm
+    # leaves torch unpinned, so the pair is pinned here; each build of it was
+    # resolved with voxcpm==2.0.3 on 2026-09-10 (Windows and Linux: +cu128 and
+    # +cpu; Apple Silicon: plain). Weights download on first synthesis.
+    "voxcpm2": SidecarSpec(
+        engine_id="voxcpm2",
+        display_name="VoxCPM2",
+        repo_url="",
+        tarball_url="",
+        checkout_dirname="voxcpm2",
+        env_var="OMNIVOICE_VOXCPM2_DIR",
+        probe_module="voxcpm",
+        has_source=False,
+        venv_args=("--python", "3.11"),
+        install_args=("voxcpm==2.0.3",),
+        torch_pins=("torch==2.11.0", "torchaudio==2.11.0"),
+        docs_path="docs/engines/voxcpm2.md",
+        # CUDA torch (~5 GB unpacked) + transformers.
+        required_bytes=10 * _GIB,
+        installed_probe=_in_app_env("voxcpm"),
+        host_supported=_no_intel_mac(
+            "VoxCPM2 needs a PyTorch version that has no Intel Mac build."
+        ),
+    ),
+    # Upstream is unpinned and its entry point has moved before (#1287), so the
+    # install pins a reviewed commit (2026-09-06) and the sidecar drives the
+    # runtime that commit ships (moss_tts_nano_runtime.NanoTTSService). Its
+    # pyproject pins torch==2.7.0 exactly, so the CUDA index yields +cu128.
+    "moss-tts-nano": SidecarSpec(
+        engine_id="moss-tts-nano",
+        display_name="MOSS-TTS-Nano",
+        repo_url="https://github.com/OpenMOSS/MOSS-TTS-Nano.git",
+        tarball_url=(
+            "https://github.com/OpenMOSS/MOSS-TTS-Nano/archive/"
+            "8b7bcc9341b3b4ef3a3a58ba1338a7d85ff133eb.tar.gz"
+        ),
+        checkout_dirname="MOSS-TTS-Nano",
+        env_var="OMNIVOICE_MOSS_TTS_NANO_DIR",
+        probe_module="moss_tts_nano_runtime",
+        probe_code=(
+            "import moss_tts_nano_runtime, torchaudio\n"
+            "if not torchaudio.list_audio_backends():\n"
+            "    raise RuntimeError('torchaudio has no I/O backend (install soundfile)')"
+        ),
+        source_revision="8b7bcc9341b3b4ef3a3a58ba1338a7d85ff133eb",
+        source_required_path="moss_tts_nano_runtime.py",
+        docs_path="docs/engines/moss-tts-nano.md",
+        venv_args=("--python", "3.11"),
+        # Upstream's pyproject pins torchaudio==2.7.0 but ships no I/O backend
+        # — torchaudio 2.7 dispatches load/save to soundfile/torchcodec, and
+        # the engine cannot read its own bundled reference clip without one
+        # (#2100). Pulling soundfile alongside the editable install keeps
+        # every audio read inside this engine's own venv.
+        install_args=("-e", "{checkout}", "soundfile"),
+        install_revision="audio-backend-v1",
+        uses_cuda_index=True,
+        # torch 2.7 (CUDA build on NVIDIA hosts) + transformers + onnxruntime.
+        # The model and its audio tokenizer download on first synthesis.
+        required_bytes=8 * _GIB,
+        installed_probe=_in_app_env("moss_tts_nano"),
+        host_supported=_no_intel_mac(
+            "MOSS-TTS-Nano pins a PyTorch version that has no Intel Mac build."
+        ),
+    ),
+    # A reviewed commit (2026-05-25) plus the Matcha-TTS submodule it imports.
+    # No pyproject: its dependencies come from the trimmed requirements file,
+    # and like upstream's example.py the sidecar puts the checkout and
+    # third_party/Matcha-TTS on sys.path. Only the CosyVoice 3 weights it loads
+    # are downloaded (about 5.4 of 9.8 GB).
+    "cosyvoice": SidecarSpec(
+        engine_id="cosyvoice",
+        display_name="CosyVoice 3",
+        repo_url="https://github.com/FunAudioLLM/CosyVoice.git",
+        tarball_url=(
+            "https://github.com/FunAudioLLM/CosyVoice/archive/"
+            "074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc.tar.gz"
+        ),
+        checkout_dirname="CosyVoice",
+        env_var="OMNIVOICE_COSYVOICE_DIR",
+        probe_module="cosyvoice",
+        probe_code=(
+            "import os, sys; c = {checkout_repr}; "
+            "sys.path[:0] = [c, os.path.join(c, 'third_party', 'Matcha-TTS')]; "
+            "from cosyvoice.cli.cosyvoice import AutoModel; "
+            "import cosyvoice.dataset.processor; import matcha.utils"
+        ),
+        source_revision="074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc",
+        source_manifest="requirements.txt",
+        source_required_path="cosyvoice/cli/cosyvoice.py",
+        extra_sources=(
+            ExtraSource(
+                path="third_party/Matcha-TTS",
+                revision="dd9105b34bf2be2230f4aa1e4769fb586a3c824e",
+                tarball_url=(
+                    "https://github.com/shivammehta25/Matcha-TTS/archive/"
+                    "dd9105b34bf2be2230f4aa1e4769fb586a3c824e.tar.gz"
+                ),
+                required_path="matcha/__init__.py",
+            ),
+            ExtraSource(
+                path="third_party/PyWorld",
+                revision="f31ad88d543fdaebbda2d0c9a5e4d4f991ae0b6c",
+                tarball_url="https://github.com/JeremyCCHsu/Python-Wrapper-for-World-Vocoder/archive/f31ad88d543fdaebbda2d0c9a5e4d4f991ae0b6c.tar.gz",
+                required_path="pyworld/__init__.py",
+            ),
+            ExtraSource(
+                path="third_party/PyWorld/lib/World",
+                revision="d625e7608ca23a870018f01e7c562ac683d9847f",
+                tarball_url="https://github.com/mmorise/World/archive/d625e7608ca23a870018f01e7c562ac683d9847f.tar.gz",
+                required_path="src/dio.cpp",
+            ),
+        ),
+        venv_args=("--python", "3.10"),
+        install_args=("-r", _COSYVOICE_REQUIREMENTS, "{checkout}/third_party/PyWorld"),
+        install_revision="inference-imports-v2",
+        torch_pins=("torch==2.7.0", "torchaudio==2.7.0"),
+        weights_repo_id="FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+        weights_revision="29e01c4e8d000f4bcd70751be16fa94bf3d85a18",
+        weights_subdir="pretrained_models/Fun-CosyVoice3-0.5B",
+        weights_config_names=("cosyvoice3.yaml",),
+        # Also a Model Catalogue download, used by the in-process engine and
+        # by remote workers that run it.
+        weights_catalogue_download=True,
+        weights_allow_patterns=(
+            "cosyvoice3.yaml", "config.json", "configuration.json",
+            "campplus.onnx", "speech_tokenizer_v3.onnx",
+            "llm.pt", "flow.pt", "hift.pt", "CosyVoice-BlankEN/*",
+        ),
+        docs_path="docs/engines/cosyvoice.md",
+        # ~0.1 GB source + ~7 GB venv (CUDA torch) + ~5.4 GB weights.
+        required_bytes=14 * _GIB,
+        weights_bytes=6 * _GIB,
+        dependency_bytes=7 * _GIB,
+        installed_probe=_in_app_env("cosyvoice"),
+        host_supported=_no_intel_mac(
+            "CosyVoice 3 needs a PyTorch version that has no Intel Mac build."
+        ),
     ),
 }
+
+
+class HostUnsupported(RuntimeError):
+    """The one-click install cannot work on this machine. The message is a
+    VoiceStudio-owned sentence from the spec, safe to show the user."""
+
+
+def host_support(spec: SidecarSpec) -> tuple[bool, str]:
+    """Whether *spec*'s install can work here. A probe that raises counts as
+    unsupported: offering a button that fails is worse than not offering it."""
+    try:
+        ok, why = spec.host_supported()
+    except Exception:  # noqa: BLE001
+        return False, (
+            f"Could not check whether {spec.display_name} can be installed on "
+            f"this machine. Its guide ({spec.docs_path}) has the manual steps."
+        )
+    return bool(ok), (why or "")
+
+
+def installable_engine_ids() -> frozenset[str]:
+    """Engines that get an Install button on THIS host."""
+    return frozenset(eid for eid, spec in SPECS.items() if host_support(spec)[0])
+
+
+def _expand(value: str, checkout: Path) -> str:
+    return value.replace("{checkout_uri}", checkout.resolve().as_uri()).replace(
+        "{checkout_repr}", repr(str(checkout))
+    ).replace(
+        "{checkout}", str(checkout)
+    )
 
 
 def get_spec(engine_id: str) -> Optional[SidecarSpec]:
@@ -196,6 +658,33 @@ def managed_checkout(spec: SidecarSpec) -> Path:
     return managed_root(spec) / spec.checkout_dirname
 
 
+def engine_venv_python(env_var: str) -> Optional[Path]:
+    """The interpreter of the install *env_var* points at, if it has one.
+
+    For engines that can live in the app's environment or in a venv of their
+    own (PocketTTS, Supertonic-3): they prefer their own, and fall back to the
+    app's interpreter for an install made with ``uv sync --extra``.
+    """
+    env_dir = os.environ.get(env_var)
+    if not env_dir:
+        return None
+    py = _venv_python(Path(env_dir) / ".venv")
+    # The interpreter alone proves nothing: a reinstall that failed partway
+    # leaves it behind. The completion marker is written only after the
+    # engine's import probe passed in this venv, and removed when a new
+    # dependency step starts, so it is the probe's verdict without running a
+    # multi-second import on every engine-list refresh.
+    if not py.is_file() or not (Path(env_dir) / _INSTALL_COMPLETE_MARKER).is_file():
+        return None
+    # Apply recipe upgrades only to app-managed environments. External source
+    # installations keep their own dependency contract and marker format.
+    spec = next((s for s in SPECS.values() if s.env_var == env_var), None)
+    if spec and Path(env_dir) == managed_checkout(spec):
+        if not _install_marker_valid(spec, Path(env_dir)):
+            return None
+    return py
+
+
 def _legacy_managed_checkouts(spec: SidecarSpec) -> tuple[Path, ...]:
     """App-owned predecessor checkouts retained during in-place upgrades."""
     if spec.engine_id == "indextts2":
@@ -211,10 +700,16 @@ def _venv_python(venv_dir: Path) -> Path:
 
 
 def _locate_uv() -> Optional[str]:
-    """Find uv: bundled (Tauri-set OMNIVOICE_BUNDLED_UV) first, then PATH.
+    """Find uv: bundled (shell-set OMNIVOICE_BUNDLED_UV) first, then PATH.
 
     Same resolution order as engines.indextts.bootstrap._locate_uv — the
     canonical uv-resolution pattern for sidecar venvs.
+
+    The desktop shell sets OMNIVOICE_BUNDLED_UV because PATH alone cannot find
+    the packaged uv: it ships in the app's own resources directory, which is on
+    nobody's PATH, and a GUI launch does not inherit the shell's PATH additions
+    either (#2215). Without it every sidecar installer fails preflight on a
+    clean install even though the binary is right there in the bundle.
     """
     bundled = os.environ.get("OMNIVOICE_BUNDLED_UV")
     if bundled and Path(bundled).is_file():
@@ -272,13 +767,20 @@ def _default_uv_cache_root() -> Path:
     return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "uv"
 
 
-def uv_subprocess_env(cache_parent: Path) -> "dict[str, str] | None":
+def uv_subprocess_env(cache_parent: Path) -> "dict[str, str]":
     """Environment for ``uv`` subprocesses that install into *cache_parent*'s volume.
 
-    Returns ``None`` (inherit the parent environment untouched) when uv's
-    default cache already shares a volume with *cache_parent* or the user
-    pinned both variables themselves. Otherwise returns a copy of
-    ``os.environ`` with the *unset* one(s) of ``UV_CACHE_DIR`` /
+    Always a copy of ``os.environ`` with ``UV_NO_CONFIG=1``: an engine's
+    install resolves its own requirements, never VoiceStudio's. The backend
+    runs inside the app's tree, so uv would otherwise discover the app's
+    ``pyproject.toml`` and apply its ``[tool.uv] constraint-dependencies``
+    (``torch==2.8.0``) to the engine's venv. An engine pinning another torch
+    (MOSS-TTS-v1.5, Confucius4) could then never resolve, and one that pins
+    none got the app's torch instead of its own. Mirrors still apply: they
+    arrive as ``UV_INDEX_URL``, an environment variable, not a config file.
+
+    When uv's default cache is on another volume than *cache_parent*, the
+    copy also places the *unset* one(s) of ``UV_CACHE_DIR`` /
     ``UV_PYTHON_INSTALL_DIR`` placed inside *cache_parent*, so downloads, the
     unpacked wheel cache, managed Pythons, and the venv all stay on the
     target volume — and same-volume hardlink installs work again. The two
@@ -291,17 +793,15 @@ def uv_subprocess_env(cache_parent: Path) -> "dict[str, str] | None":
     pass the directory that should hold the shared ``.uv-cache`` — typically
     the common parent of the engine venvs on that volume.
     """
-    if _same_volume(cache_parent, _default_uv_cache_root()):
-        return None
     env = dict(os.environ)
-    overrode = False
+    env["UV_NO_CONFIG"] = "1"
+    if _same_volume(cache_parent, _default_uv_cache_root()):
+        return env
     if not env.get("UV_CACHE_DIR"):  # explicit user choice always wins
         env["UV_CACHE_DIR"] = str(Path(cache_parent) / ".uv-cache")
-        overrode = True
     if not env.get("UV_PYTHON_INSTALL_DIR"):
         env["UV_PYTHON_INSTALL_DIR"] = str(Path(cache_parent) / ".uv-python")
-        overrode = True
-    return env if overrode else None
+    return env
 
 
 # ── Disk preflight ─────────────────────────────────────────────────────────
@@ -522,7 +1022,26 @@ def _healthy(spec: SidecarSpec) -> bool:
         return False
     if spec.weights_repo_id and not _weights_present(spec):
         return False
-    return True
+    # Weights left by an earlier run do not prove this run's dependencies
+    # finished; only the marker the import probe writes does. IndexTTS
+    # predates the marker and keeps its weights check, so no existing install
+    # is asked to reinstall.
+    if not spec.requires_install_marker:
+        return True
+    return _install_marker_valid(spec, checkout)
+
+
+def _install_marker_valid(spec: SidecarSpec, checkout: Path) -> bool:
+    """Share the completion verdict between inventory and runtime selection."""
+    marker = checkout / _INSTALL_COMPLETE_MARKER
+    if not spec.install_revision:
+        return marker.is_file()
+    try:
+        return marker.read_text(encoding="utf-8").splitlines() == [
+            spec.probe_module, spec.install_revision,
+        ]
+    except (OSError, UnicodeError):
+        return False
 
 
 def _persist(spec: SidecarSpec) -> None:
@@ -548,6 +1067,9 @@ def start_install(engine_id: str) -> dict:
     spec = get_spec(engine_id)
     if spec is None:
         raise KeyError(engine_id)
+    ok, why = host_support(spec)
+    if not ok:
+        raise HostUnsupported(why)
     with _jobs_lock:
         existing = _jobs.get(engine_id)
         if existing and existing["state"] == "running":
@@ -677,8 +1199,19 @@ def _step_preflight(spec: SidecarSpec, job: dict) -> None:
 
 
 def _step_fetch_source(spec: SidecarSpec, job: dict) -> None:
+    _fetch_main_source(spec, job)
+    if spec.has_source and spec.extra_sources:
+        _ensure_extra_sources(spec, job, managed_checkout(spec))
+
+
+def _fetch_main_source(spec: SidecarSpec, job: dict) -> None:
     step = _job_step(job, "fetch_source")
     checkout = managed_checkout(spec)
+    if not spec.has_source:
+        checkout.mkdir(parents=True, exist_ok=True)
+        step["state"] = "done"
+        step["detail"] = "PyPI package, no source to fetch"
+        return
     if _source_present(spec, checkout):
         step["state"] = "done"
         step["detail"] = "source already present"
@@ -717,7 +1250,7 @@ def _step_fetch_source(spec: SidecarSpec, job: dict) -> None:
     _fetch_tarball(spec, job, checkout)
     if not _source_layout_ok(spec, checkout):
         raise _StepError(
-            f"Fetched source at {checkout} has no pyproject.toml — the download "
+            f"Fetched source at {checkout} has no {spec.source_manifest} — the download "
             "appears incomplete or the upstream layout changed.",
             "Re-run the install; if it keeps failing, clone the repository "
             f"manually and set {spec.env_var} to the clone (see the engine docs).",
@@ -727,10 +1260,14 @@ def _step_fetch_source(spec: SidecarSpec, job: dict) -> None:
 
 
 _SOURCE_REVISION_MARKER = ".voicestudio_source_revision"
+# Written once the import probe passes. For an engine with no weights
+# download, the venv interpreter existing proves nothing: a dependency
+# install that died halfway leaves one behind.
+_INSTALL_COMPLETE_MARKER = ".voicestudio_install_complete"
 
 
 def _source_layout_ok(spec: SidecarSpec, checkout: Path) -> bool:
-    if not (checkout / "pyproject.toml").is_file():
+    if not (checkout / spec.source_manifest).is_file():
         return False
     return not spec.source_required_path or (checkout / spec.source_required_path).is_file()
 
@@ -743,6 +1280,8 @@ def _write_source_marker(spec: SidecarSpec, checkout: Path) -> None:
 
 
 def _source_present(spec: SidecarSpec, checkout: Path) -> bool:
+    if not spec.has_source:
+        return checkout.is_dir()
     if not _source_layout_ok(spec, checkout):
         return False
     if not spec.source_revision:
@@ -754,22 +1293,23 @@ def _source_present(spec: SidecarSpec, checkout: Path) -> bool:
     return marker == spec.source_revision
 
 
-def _fetch_tarball(spec: SidecarSpec, job: dict, checkout: Path) -> None:
-    """Download + extract the GitHub source tarball (no git required).
+def _download_and_extract(job: dict, url: str, dest: Path, work_root: Path, env_var: str) -> None:
+    """Download a GitHub source tarball and move its one top-level directory
+    to *dest* (no git required).
 
     Extraction is member-validated (no absolute paths / parent escapes) and
     never uses symlinks, so it behaves identically on Windows.
     """
     import httpx
 
-    root = managed_root(spec)
+    root = work_root
     root.mkdir(parents=True, exist_ok=True)
-    _log(job, f"Downloading {spec.tarball_url} …")
+    _log(job, f"Downloading {url} …")
     fd, tmp_tar = tempfile.mkstemp(suffix=".tar.gz", dir=str(root))
     try:
         with os.fdopen(fd, "wb") as out:
             with httpx.stream(
-                "GET", spec.tarball_url, follow_redirects=True,
+                "GET", url, follow_redirects=True,
                 timeout=_TARBALL_TIMEOUT_S,
             ) as resp:
                 resp.raise_for_status()
@@ -779,7 +1319,7 @@ def _fetch_tarball(spec: SidecarSpec, job: dict, checkout: Path) -> None:
         with tempfile.TemporaryDirectory(dir=str(root)) as tmp_dir:
             with tarfile.open(tmp_tar, "r:gz") as tf:
                 try:
-                    tf.extractall(tmp_dir, filter="data")  # stdlib safe-extract (3.11.4+)
+                    tf.extractall(tmp_dir, members=_members_without_links(tf), filter="data")
                 except TypeError:  # pragma: no cover — pre-filter= interpreters
                     _safe_extract_members(tf, tmp_dir)
             entries = [p for p in Path(tmp_dir).iterdir() if p.is_dir()]
@@ -787,15 +1327,62 @@ def _fetch_tarball(spec: SidecarSpec, job: dict, checkout: Path) -> None:
                 raise _StepError(
                     f"Unexpected tarball layout ({len(entries)} top-level dirs).",
                     "Re-run the install; if it keeps failing, clone the repository "
-                    f"manually and set {spec.env_var} (see the engine docs).",
+                    f"manually and set {env_var} (see the engine docs).",
                 )
             # os.replace-style move keeps this atomic-ish on the same volume.
-            shutil.move(str(entries[0]), str(checkout))
+            shutil.move(str(entries[0]), str(dest))
     finally:
         try:
             os.unlink(tmp_tar)
         except OSError:
             pass  # temp tarball already gone / locked — harmless leftover
+
+
+def _fetch_tarball(spec: SidecarSpec, job: dict, checkout: Path) -> None:
+    """Download + extract the engine's GitHub source tarball (no git required)."""
+    _download_and_extract(job, spec.tarball_url, checkout, managed_root(spec), spec.env_var)
+
+
+def _extra_source_present(extra: ExtraSource, dest: Path) -> bool:
+    if not (dest / extra.required_path).is_file():
+        return False
+    try:
+        marker = (dest / _SOURCE_REVISION_MARKER).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return marker == extra.revision
+
+
+def _ensure_extra_sources(spec: SidecarSpec, job: dict, checkout: Path) -> None:
+    for extra in spec.extra_sources:
+        dest = checkout / extra.path
+        if _extra_source_present(extra, dest):
+            continue
+        shutil.rmtree(dest, ignore_errors=True)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _log(job, f"Fetching {extra.path} at {extra.revision[:8]} …")
+        _download_and_extract(job, extra.tarball_url, dest, managed_root(spec), spec.env_var)
+        if not (dest / extra.required_path).is_file():
+            raise _StepError(
+                f"Fetched {extra.path} has no {extra.required_path}; the download "
+                "appears incomplete or the upstream layout changed.",
+                "Re-run the install; if it keeps failing, see the engine docs.",
+            )
+        (dest / _SOURCE_REVISION_MARKER).write_text(f"{extra.revision}\n", encoding="utf-8")
+
+
+def _members_without_links(tf: "tarfile.TarFile") -> "list[tarfile.TarInfo]":
+    """Every member except links.
+
+    The stdlib "data" filter raises on a link to an absolute path, and the
+    pinned Matcha-TTS tarball (a CosyVoice submodule) ships one: ``data``
+    points at its author's own training-data folder. That aborted the whole
+    fetch. No installer here uses a link from a source tree, symlinks need
+    privileges on Windows, and the pre-3.11.4 path below already drops them,
+    so both paths behave the same. Everything that IS extracted still goes
+    through the "data" filter.
+    """
+    return [m for m in tf.getmembers() if not (m.issym() or m.islnk())]
 
 
 def _safe_extract_members(tf: "tarfile.TarFile", dest: str) -> None:
@@ -820,24 +1407,66 @@ def _safe_extract_members(tf: "tarfile.TarFile", dest: str) -> None:
         tf.extract(member, dest)
 
 
+def _existing_venv_compatible(spec: SidecarSpec, py: Path) -> bool:
+    if not spec.compatible_python:
+        return True
+    accepted = spec.compatible_python
+    try:
+        result = subprocess.run(
+            [str(py), "-I", "-c", "import sys; print('%s.%s' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=15,
+        )
+        version = result.stdout.strip()
+        if result.returncode != 0 or not version or not all(
+            part.isdigit() for part in version.split(".")
+        ) or len(version.split(".")) != 2:
+            raise ValueError("interpreter did not report its Python version")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        # TimeoutExpired includes the full command and OSError may include the
+        # user's home path. Keep job errors useful without copying either.
+        if isinstance(exc, subprocess.TimeoutExpired):
+            reason = "interpreter check timed out after 15 seconds"
+        elif isinstance(exc, OSError):
+            reason = f"{type(exc).__name__} (error {exc.errno})"
+        else:
+            reason = "interpreter did not report its Python version"
+        raise _StepError(
+            f"Could not check the existing {spec.display_name} Python environment: {reason}",
+            "Check that the environment's Python can run, then retry. "
+            "The existing environment has not been removed.",
+        ) from exc
+    return version in accepted
+
+
 def _step_create_venv(spec: SidecarSpec, job: dict) -> None:
     step = _job_step(job, "create_venv")
     checkout = managed_checkout(spec)
     venv_dir = checkout / ".venv"
     py = _venv_python(venv_dir)
     if py.is_file():
-        step["state"] = "done"
-        step["detail"] = "venv already present"
-        _log(job, f"Venv already present at {venv_dir} — skipping.")
-        return
+        if _existing_venv_compatible(spec, py):
+            step["state"] = "done"
+            step["detail"] = "venv already present"
+            _log(job, "Compatible .venv already present — skipping.")
+            return
+        # Never follow a user-provided venv symlink/junction when repairing.
+        if venv_dir.resolve() != checkout.resolve() / ".venv":
+            raise _StepError(
+                "Incompatible Python environment is linked outside its managed checkout.",
+                "Repair the linked environment manually or remove its link, then retry.",
+            )
+        _log(job, "Rebuilding incompatible .venv Python environment …")
+        (checkout / _INSTALL_COMPLETE_MARKER).unlink(missing_ok=True)
+        shutil.rmtree(venv_dir)
+        spec.invalidate()
     uv = _locate_uv()
-    _log(job, f"Creating venv at {venv_dir} …")
+    _log(job, "Creating managed .venv …")
     # Keep uv's cache on the engines volume (D:-install class) — see
     # uv_subprocess_env. The cache parent is the shared engines root, so
     # every sidecar engine reuses one cache.
     uv_env = uv_subprocess_env(Path(DATA_DIR) / "engines")
-    rc = _run_logged(job, [uv, "venv", str(venv_dir)], timeout=_UV_VENV_TIMEOUT_S,
-                     env=uv_env)
+    rc = _run_logged(job, [uv, "venv", str(venv_dir), *spec.venv_args],
+                     timeout=_UV_VENV_TIMEOUT_S, env=uv_env)
     if rc != 0 or not py.is_file():
         raise _StepError(
             f"uv venv failed (exit {rc}) at {venv_dir}.",
@@ -857,20 +1486,53 @@ def _step_install_deps(spec: SidecarSpec, job: dict) -> None:
     """
     checkout = managed_checkout(spec)
     py = _venv_python(checkout / ".venv")
+    # A reinstall that fails must not leave the previous run's marker.
+    (checkout / _INSTALL_COMPLETE_MARKER).unlink(missing_ok=True)
     uv = _locate_uv()
     _log(job, f"Installing {spec.display_name} into its venv (this can take several minutes) …")
+    target = [_expand(arg, checkout) for arg in spec.install_args]
+    if spec.engine_id == "dots-tts":
+        from engines.dots_tts.install import compatible_constraints
+        constraint = compatible_constraints(checkout / "constraints" / "recommended.txt")
+        target[target.index("-c") + 1] = constraint.resolve().as_uri()
+    if spec.torch_pins:
+        target += _torch_pin_args(spec)
+    elif spec.cpu_torch_index:
+        from core.torch_indexes import UV_PIP_CPU_ARGS
+        target += list(UV_PIP_CPU_ARGS)
+    elif spec.uses_cuda_index and _host_family() == "cuda":
+        from core.torch_indexes import UV_PIP_CU128_ARGS
+        target += list(UV_PIP_CU128_ARGS)
+    # Always `--python <this engine's venv>`: the install can only ever land in
+    # the venv this engine owns, never the app's interpreter.
     rc = _run_logged(
         job,
-        [uv, "pip", "install", "--python", str(py), "-e", str(checkout)],
+        [uv, "pip", "install", "--python", str(py), *target],
         timeout=_UV_PIP_INSTALL_TIMEOUT_S,
         env=uv_subprocess_env(Path(DATA_DIR) / "engines"),
     )
     if rc != 0:
-        raise _StepError(
-            f"uv pip install -e failed (exit {rc}).",
+        hint = (
             "Usually a network hiccup — re-run the install to resume. Behind a "
-            "proxy, set HTTPS_PROXY in Settings → Environment first.",
+            "proxy, set HTTPS_PROXY in Settings → Environment first."
         )
+        if spec.engine_id == "dots-tts":
+            hint = (
+                "If the log mentions pynini or fst/util.h, install OpenFst and a "
+                "C++ compiler first (macOS: brew install openfst; Debian/Ubuntu: "
+                "sudo apt install libfst-dev libfst-tools build-essential), then "
+                "retry. See docs/engines/dots-tts.md for include/library paths. "
+            ) + hint
+        if sys.platform == "win32":
+            # Packages built from source (openai-whisper, for CosyVoice) nest
+            # deep build folders under uv's cache; past Windows' 260-character
+            # limit the build fails with "No such file or directory".
+            hint += (
+                " If the log shows \"No such file or directory\" while building a "
+                "package, the path is too long for Windows: turn on Windows "
+                "long-path support (the LongPathsEnabled setting) and re-run."
+            )
+        raise _StepError(f"uv pip install failed (exit {rc}).", hint)
     _job_step(job, "install_deps")["detail"] = "dependencies installed"
 
 
@@ -879,15 +1541,20 @@ def _step_verify(spec: SidecarSpec, job: dict) -> None:
     py = _venv_python(checkout / ".venv")
     _log(job, f"Verifying `import {spec.probe_module}` inside the venv …")
     try:
+        probe = (
+            _expand(spec.probe_code, checkout)
+            if spec.probe_code
+            else f"import {spec.probe_module}"
+        )
         proc = subprocess.run(
-            [str(py), "-c", f"import {spec.probe_module}"],
+            [str(py), "-c", probe],
             capture_output=True, timeout=_IMPORT_PROBE_TIMEOUT_S,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise _StepError(
             f"Import probe failed to run: {exc}",
             "Re-run the install; if it keeps failing, delete the engine in "
-            "Model Catalogue → Engines and install again.",
+            "Model Catalogue and install again.",
         ) from exc
     if proc.returncode != 0:
         tail = proc.stderr.decode("utf-8", errors="replace")[-500:]
@@ -898,6 +1565,10 @@ def _step_verify(spec: SidecarSpec, job: dict) -> None:
             "the engine docs.",
         )
     _job_step(job, "verify")["detail"] = f"import {spec.probe_module} OK"
+    marker_text = f"{spec.probe_module}\n"
+    if spec.install_revision:
+        marker_text += f"{spec.install_revision}\n"
+    (checkout / _INSTALL_COMPLETE_MARKER).write_text(marker_text, encoding="utf-8")
     _log(job, "Venv verified.")
 
 
@@ -987,13 +1658,20 @@ def _step_fetch_weights(spec: SidecarSpec, job: dict) -> None:
         # other model download in the app — see setup/download.py): the
         # source checkout is unpinned upstream `main` anyway, and hf_hub
         # checksum-verifies each artifact. Hence the B615 waiver below.
+        # Unwrap to the bearer string: snapshot_download takes `token: str |
+        # None`, and a ResolvedToken record is ignored in favour of ambient
+        # discovery, so gated engine weights 401 for a user whose token lives
+        # in VoiceStudio's settings rather than HF's own cache (#2163).
+        _resolved = resolve_token()
         kwargs: dict = {
             "repo_id": spec.weights_repo_id,
             "local_dir": str(wdir),
-            "token": resolve_token(),
+            "token": _resolved.token if _resolved else None,
         }
         if spec.weights_revision:
             kwargs["revision"] = spec.weights_revision
+        if spec.weights_allow_patterns:
+            kwargs["allow_patterns"] = list(spec.weights_allow_patterns)
         endpoint = endpoint_race.effective_endpoint()
         if endpoint:
             kwargs["endpoint"] = endpoint

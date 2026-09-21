@@ -6,6 +6,13 @@ this error" button targets directly.
 
 ## Start here: self-diagnosis
 
+Electron native-crash reports preserve the fatal-error header and the current
+thread's first frames, rather than letting a long extension-module list displace
+them. Include the selected engine and GPU/driver when reporting a native crash;
+the excerpt is bounded, so attach the full scrubbed log if more context is needed.
+Home-directory prefixes and credential patterns are scrubbed before the local
+crash journal is written, as well as before reports are displayed or exported.
+
 <a id="self-diagnosis"></a>
 
 Before digging through the entries below, let the app diagnose itself:
@@ -38,6 +45,23 @@ Before digging through the entries below, let the app diagnose itself:
   relevant library versions, and whether parent-process memory counters cover
   the engine. Subprocess engines report memory visibility as false because
   their accelerator allocations belong to the child process.
+
+## Generation failure diagnosis
+
+Streaming and HTTP generation failures can identify these causes. Electron and
+web clients show the recovery guidance in the selected language; API clients
+receive a stable `docs_topic` and a safe fallback message, never private exception text.
+
+| Topic | Recovery |
+| --- | --- |
+| `GPU_ARCH_UNSUPPORTED` | The installed PyTorch build cannot run kernels on this GPU. Select CPU in Settings → Performance & Device, or use a PyTorch build compatible with the GPU. |
+| `WINDOWS_APP_CONTROL_BLOCKED` | Windows application control blocked a required file. Ask the administrator to allow the trusted VoiceStudio runtime, then restart the app. |
+| `AUDIO_IO_FAILED` | Check the audio format, free disk space, and file permissions; review the folder in Settings → Storage. |
+
+Unsupported GPU builds and application-control blocks are terminal for the current
+stream: the client does not automatically render the whole passage again. After
+correcting the cause, start a new generation. Unknown failures retain generic
+guidance; a report with only `RuntimeError` does not establish which cause applies.
 
 ## 1. `pkg_resources` missing (ModuleNotFoundError)
 
@@ -89,7 +113,7 @@ uv pip install --reinstall transformers
 ```
 
 Or, as a quick workaround, switch ASR to **faster-whisper** in
-**Model Catalogue → Models**. If it recurs, add the backend **`.venv`** to your
+**Model Catalogue** (ASR tab → **Use**). If it recurs, add the backend **`.venv`** to your
 antivirus exclusions (see §1). Newer builds classify this error and show the
 reinstall hint directly instead of a bare path + "try restarting".
 
@@ -141,7 +165,7 @@ uv pip install --reinstall pytorch-lightning
 
 If it recurs, add the backend **`.venv`** to your antivirus exclusions (see
 §1). Since this fix landed the app also degrades gracefully: WhisperX is
-marked unavailable (Model Catalogue → Engines shows why, with this repair command)
+marked unavailable (Model Catalogue shows why, with this repair command)
 and dubbing automatically falls through to **faster-whisper** instead of
 failing outright.
 
@@ -188,7 +212,13 @@ before the token works for downloads.
 3. Retry the job. The token state in **Settings → API Keys** should now show
    the "App" row with a green check next to your username.
 
-**Linked issue:** [#35](https://github.com/debpalash/VoiceStudio/issues/35)
+If the token and license are already valid but an older build still reports
+401 during installation, update VoiceStudio and retry. Settings tokens now
+reach both the fast download path and engine-weight installers; no token
+rotation is needed for that fixed client bug.
+
+**Linked issues:** [#35](https://github.com/debpalash/VoiceStudio/issues/35),
+[#2163](https://github.com/debpalash/VoiceStudio/issues/2163)
 
 ### PocketTTS gated weights
 
@@ -205,7 +235,7 @@ itself does not grant access.
    license and prohibited-use conditions, share the requested contact details,
    and accept the conditions.
 2. Open **Settings → API Keys** and save a read token from that same account.
-3. Open **Model Catalogue → Engines**, review and accept the PocketTTS terms locally,
+3. Open **Model Catalogue**, review and accept the PocketTTS terms locally,
    then retry. VoiceStudio stores this acknowledgement only on your machine.
 
 ## 3. Gatekeeper quarantine on macOS
@@ -247,6 +277,122 @@ peak memory footprint that exceeds free VRAM. Windows-only quirk.
 **Fix:** see [windows.md#torch-compile-oom](windows.md#torch-compile-oom).
 
 **Linked issue:** [#65](https://github.com/debpalash/VoiceStudio/issues/65)
+
+## 5a. Backend dies on the first `/generate` (older NVIDIA GPUs, e.g. Tesla T4)
+
+**Symptom:** the backend starts fine, `/health` reports your GPU, the model
+preloads — and then the first generation request returns
+`RemoteDisconnected: Remote end closed connection without response`. Every call
+after it gets `ConnectionRefused`, because the backend process is gone. No
+Python traceback is printed.
+
+**Cause:** `torch.compile(mode="reduce-overhead")` captures CUDA graphs. On
+pre-Ampere cards (Turing sm_75 / Volta sm_70 — the Tesla T4 on Google Colab is
+the common case) that capture can abort the process from inside the native CUDA
+library. It happens below the interpreter, so no `except` in the app can catch
+it and nothing is logged.
+
+**Fix:** update — VoiceStudio now selects the compile mode per GPU and does not
+capture CUDA graphs below sm_80, so this should no longer happen. If you still
+see a crash in the generate path on any GPU, turn compilation off entirely:
+
+- **In the app:** Settings → Performance → **"Disable torch.compile"**.
+- **From the CLI / from source:** `TORCH_COMPILE_DISABLE=1` before launching.
+  This is honoured on every platform and by every engine, in-process or
+  sidecar.
+
+**Getting a traceback:** the backend now arms `faulthandler`, so a native crash
+writes the faulting thread's Python stack to `backend_err.log` on the way down.
+Include that stack when reporting — without it a native crash is unattributable.
+(`OMNIVOICE_DISABLE_FAULTHANDLER=1` turns it off.)
+
+**Extra containment:** to keep a crashing engine from taking the API down with
+it, run the engine in a killable child process — select
+**OmniVoice (subprocess-isolated)** in Settings → Engines, or
+`OMNIVOICE_TTS_BACKEND=omnivoice-subprocess`. The parent then returns an HTTP
+error and respawns the sidecar instead of dying.
+
+**Linked issue:** [#2135](https://github.com/debpalash/VoiceStudio/issues/2135)
+
+## 5b. RTX 50-series (Blackwell, sm_120): backend crashes during `ml_imports`
+
+**Symptom:** on an RTX 5070 / 5070 Ti / 5080 / 5090, the backend never becomes
+ready. The desktop app sits on "starting backend", `/health` returns 503, and
+`/startup/progress` shows `ml_imports` active. From source you see `import
+torch` die with a native access violation rather than a Python traceback.
+
+**Cause:** not established. The pinned build is not missing Blackwell code:
+`torch 2.8.0+cu128` lists `sm_120` in `torch.cuda.get_arch_list()`, and that
+build imports and runs CUDA normally on some Blackwell cards. What is confirmed
+is that on the Windows setups in
+[#1931](https://github.com/debpalash/VoiceStudio/issues/1931) `import torch`
+faults inside the native library before Python can raise an error, and moving
+the torch trio to 2.9.x clears it.
+
+If `import torch` crashes for you, that crash *is* the symptom — skip straight
+to the fix below. Where torch does import, this shows what the build actually
+contains:
+
+```bash
+uv run python -c "import torch; print(torch.__version__, torch.cuda.get_arch_list())"
+```
+
+`sm_120` in that list means the kernels are present and the crash is elsewhere
+in the native init path. Either way the upgrade below is the known workaround.
+
+**Fix:** move the whole torch trio to 2.9.x. They must move together —
+upgrading one past the ABI the others were built against gives you
+`RuntimeError: operator torchvision::nms does not exist`, which is the next
+section's problem instead.
+
+Edit **both** pin lists, keeping them identical:
+
+- `[tool.uv] constraint-dependencies` in `pyproject.toml`
+- `deploy/torch-constraints.txt`
+
+```
+torch==2.9.1
+torchaudio==2.9.1
+torchvision==0.24.1
+```
+
+Then relock and reinstall:
+
+```bash
+uv lock
+uv sync
+```
+
+Confirm the GPU is actually usable before relaunching:
+
+```bash
+uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_capability())"
+```
+
+`True (12, 0)` means the kernels are there.
+
+**Why both files:** `constraint-dependencies` governs `uv sync` / `uv lock` /
+`uv run`, and `deploy/torch-constraints.txt` governs the `uv pip install`
+paths (Docker and the Colab notebook), which ignore project-level uv settings.
+`tests/test_torch_constraints_are_applied.py` fails if the two drift, so a
+one-sided edit is caught rather than shipped.
+
+**What you do not have to do:** `torchaudio 2.9` removed `set_audio_backend()`,
+which VoiceStudio used to call unguarded — that turned this upgrade into a
+different hard startup crash (`AttributeError` inside `ml_imports`). It is
+guarded now, so the upgrade path above is clean on a current checkout.
+
+**Keeping the change:** these are the repo's own pins, so a `git pull` that
+touches them will conflict or overwrite. Re-apply after updating until the
+default pin moves — the default cannot move for everyone until the newer torch
+is verified across the older GPUs VoiceStudio supports, since a newer build can
+drop older architectures. Which ones varies by torch release, not by the CUDA
+variant alone: the pinned 2.8.0+cu128 build reports `sm_70` first, while the
+cu128 arch list captured in #1285 still carried `sm_61`.
+
+**Linked issue:** [#1931](https://github.com/debpalash/VoiceStudio/issues/1931)
+— thanks to the reporter for the full diagnosis, including the verification
+commands above.
 
 ## 6. `uv venv` Python download fails (restricted network)
 
@@ -300,7 +446,8 @@ version** reverts to the build the app shipped with.
 
 First update yt-dlp under **Settings → Audio tools**. If YouTube still requires
 your signed-in session, export its cookies in Netscape `cookies.txt` format,
-then choose that file beside the URL field before importing. VoiceStudio uses
+then open **Advanced** on the dubbing import card and choose that file under
+**YouTube sign-in** before importing. VoiceStudio uses
 the export for that import only and makes two best-effort attempts to delete
 its temporary copy.
 
@@ -343,7 +490,7 @@ Intel-Mac wheels, so this entry only applies to historical installs (see
 ## 10. Windows: `Could not locate cudnn_ops_infer64_8.dll` during transcription
 
 **Symptom:** on Windows + NVIDIA, transcription/dubbing fails and the backend
-log shows `Could not locate cudnn_ops_infer64_8.dll`. Model Catalogue → Models shows
+log shows `Could not locate cudnn_ops_infer64_8.dll`. Model Catalogue (ASR tab) shows
 WhisperX or faster-whisper selected.
 
 On builds before this was fixed, the failure looked much worse than a failed
@@ -379,7 +526,7 @@ uv pip install --no-deps --python .venv\Scripts\python.exe --target .venv\Lib\si
 (On Linux the target is `.venv/lib/pythonX.Y/site-packages/cudnn8_compat`.)
 
 Or sidestep cuDNN 8 entirely: switch the ASR backend to **PyTorch Whisper** in
-**Model Catalogue → Models**. It runs on PyTorch's own stack (cuDNN 9, bundled with
+**Model Catalogue** (ASR tab → **Use**). It runs on PyTorch's own stack (cuDNN 9, bundled with
 torch) and needs no cuDNN-8 DLL — it loads its Whisper pipeline on demand (no
 extra env var).
 
@@ -535,12 +682,12 @@ did was `generate:start (audio)`, a dub, or a dictation.
 
 **Fix — reduce ASR load (any one of these):**
 
-1. **Pick a smaller ASR model / engine** in **Model Catalogue → Models** — e.g.
+1. **Pick a smaller ASR model / engine** in **Model Catalogue** (ASR tab: **Use** an engine, then a smaller model under the engine's **Weights**) — e.g.
    faster-whisper **medium** or **small**, instead of large-v3. Biggest win on
    low-VRAM GPUs.
 2. **Free VRAM**: **Flush the TTS model** before dubbing so ASR isn't competing
    for memory (top toolbar → Flush → "Unload all + flush", or per-model from
-   Model Catalogue → Models — see [Flush caches / Unload resident model](../performance.md#flush-caches--unload-resident-model)
+   the engine's Weights list in Model Catalogue under the engine's family tab — see [Flush caches / Unload resident model](../performance.md#flush-caches--unload-resident-model)
    for exactly what it frees and the API equivalents for scripts), or
 3. **Run ASR on CPU** (slower but reliable) if your GPU is small.
 4. **Test with a 10-second clip** first — if that returns quickly, it confirms a
@@ -557,8 +704,21 @@ them to fail faster on a small machine.
 
 CPU-only hosts use a bounded 600-second generation floor because correct CPU
 synthesis can take longer than the accelerated five-minute budget. Override it
-with `OMNIVOICE_CPU_GENERATE_TIMEOUT_S`; an explicit higher
-or lower `OMNIVOICE_GENERATE_TIMEOUT_S` always wins.
+with `OMNIVOICE_CPU_GENERATE_TIMEOUT_S` — an explicit value here always
+governs CPU-family generation, independent of `OMNIVOICE_GENERATE_TIMEOUT_S`.
+Setting *only* `OMNIVOICE_GENERATE_TIMEOUT_S` still governs CPU hosts too, the
+same as it always has (a quick way to lower the watchdog everywhere with one
+var); it only stops doing so once you also set an explicit
+`OMNIVOICE_CPU_GENERATE_TIMEOUT_S`, which then takes precedence for CPU jobs.
+
+Both budgets are also editable from **Settings → Performance & Device →
+Compute-time budget** — no env var or config file needed. A value saved there
+persists across restarts but only takes effect on the *next* backend restart
+(the running process already read the old value at startup), which the panel
+states — and if an external env var (shell profile, `.env`, Docker `-e`,
+systemd unit, …) is already providing the same key, the panel says so instead,
+since that external value keeps winning on every future restart too, not just
+this one.
 
 **Two things changed here** ([#1190](https://github.com/debpalash/VoiceStudio/issues/1190)):
 
@@ -597,7 +757,7 @@ hammering — on a 1-worker machine, concurrent requests serialize by design.
 recovering the underlying hang — the wedged thread keeps its VRAM until the app
 exits. The error message will then recommend switching the ASR engine to
 **Faster-Whisper (crash-isolated subprocess)** (`faster-whisper-isolated`) in
-**Model Catalogue → Engines**: it runs transcription in a separate process that can be
+**Model Catalogue**: it runs transcription in a separate process that can be
 force-killed to reclaim a hung transcribe *and* its VRAM, at a small per-call
 overhead. It reuses your existing faster-whisper install (nothing extra to
 download). VoiceStudio never switches engines automatically — this stays your
@@ -640,6 +800,8 @@ up, or you're not running the desktop app) still errors promptly. If you see
 the error persistently on a current build, that's section **14** (a wedged GPU
 job), section **14d** (the backend never started), or the crash notice above —
 not this window.
+
+A startup timeout from an earlier attempt cannot replace the current startup state after **Retry** takes over.
 
 Desktop startup, **Retry**, storage reset, setup re-entry, in-app uninstall,
 app shutdown, and automatic crash recovery also share one backend lifecycle
@@ -829,6 +991,73 @@ unaffected and works normally.
 > deep-links the exact OS pane described above. The dictation blocker rechecks
 > Accessibility while it is visible and closes as soon as macOS reports the grant.
 
+## 17. Windows: backend won't start with a non-English (CJK) username — `UnicodeDecodeError` in `site`
+
+**Symptom:** the app never gets past first-run setup / "starting_backend", and
+the backend log shows the interpreter dying before any VoiceStudio code runs:
+
+```
+Fatal Python error: init_import_site: Failed to import the site module
+  File "<frozen site>", line 188, in addpackage
+UnicodeDecodeError: 'gbk' codec can't decode byte 0x80 in position 11: illegal multibyte sequence
+```
+
+**Cause:** Python 3.11's `site` module opens every `.pth` file in
+`site-packages` using the ANSI code page — even with `PYTHONUTF8=1` set. When
+the managed environment lives under a Windows user profile whose account name
+contains non-ASCII characters (most commonly CJK), `uv sync`'s editable
+install `.pth` embeds that path in UTF-8, which is rarely a valid byte
+sequence in the active ANSI code page (`gbk`, `shift_jis`, etc.), and the
+interpreter can never start (#1783).
+
+**Fix:** current builds resolve the managed environment through Windows' 8.3
+short filename for any path containing non-ASCII bytes (the same trick
+already used for the HuggingFace cache — see
+[`backend/core/config.py`](../../backend/core/config.py)) whenever there is
+no usable environment yet, or an existing one shows exactly this crash — so
+a first-time install, and an install already broken by this bug, both land
+at an ASCII-safe path automatically with no user action needed. The old
+broken environment (if any) is left in place, not deleted, in case manual
+recovery is ever needed. An existing environment that already works — ASCII
+path or not — is never touched or relocated.
+
+**Prevention, on a brand new install:** on the first-run setup screen (before
+clicking through it), the **Change…** button on the "App environment" row
+(or "Portable folder" in portable mode) lets you pick an ASCII-only path up
+front — nothing below is needed if you do this before setup completes.
+
+If it still happens — most likely because Windows' 8.3 short filenames are
+off on the system drive, or the affected folder already existed before this
+fix shipped — the app names this cause specifically rather than the generic
+"backend never reported ready." By the time this message can appear, setup
+has already been confirmed (it's only reached after the first-run screen
+hands off to the installer), so the error screen you're actually looking at
+offers only **Retry** and **Clean & Retry** — neither changes where the
+environment is stored, so both fail identically, and the first-run picker
+above is no longer reachable either. The right fix depends on which install
+mode you're in:
+
+- **Standard (non-portable) install:** quit VoiceStudio, open (creating it
+  if it doesn't exist) `%LOCALAPPDATA%\com.debpalash.omnivoice-studio\config.json`
+  in a text editor, add `"env_dir": "C:/VoiceStudio/env"` (any path using
+  only English letters/numbers — forward slashes are fine on Windows), save,
+  and relaunch.
+- **Portable install:** the `env_dir` config key above does **not** apply —
+  portable mode resolves its own environment folder from the portable
+  location and never consults it. Quit VoiceStudio, then either move the
+  whole VoiceStudio folder (the app plus its `OmniVoiceStudio-Data` folder)
+  to an ASCII-only path and run it from there, or create a `portable.path`
+  text file beside the app containing one line — an absolute ASCII-only path
+  for the data folder (e.g. `C:\VoiceStudio\Data`) — and relaunch.
+
+Re-enabling 8.3 short filenames (`fsutil 8dot3name`) is deliberately **not**
+recommended here: the setting is per-volume and only affects directories
+created *after* it's changed, so toggling it does nothing for a folder that
+already exists — it would not actually fix this without also recreating the
+folder, which the ASCII-path options above already do more reliably.
+
+**Linked issue:** [#1783](https://github.com/debpalash/VoiceStudio/issues/1783) (auto-captured from [#1771](https://github.com/debpalash/VoiceStudio/issues/1771))
+
 ## Dub: "translation engine needs the optional … package"
 
 **Symptom:** in the Dub tab, translating fails with e.g. *"The 'google'
@@ -880,6 +1109,70 @@ repair is required.
 
 **Linked issue:** [#1590](https://github.com/debpalash/VoiceStudio/issues/1590)
 
+
+## Reading the first-run install log after setup finishes
+
+The Activity panel on the first-run screen shows the install as it happens, and
+that screen closes the moment setup succeeds — so it is not where you go
+afterwards to check what was installed, or to attach the log to a bug report.
+
+The same lines are written to **`bootstrap.log`**, beside the backend logs:
+
+| Platform | Location |
+|---|---|
+| macOS | `~/Library/Logs/OmniVoice/bootstrap.log` |
+| Windows | `%LOCALAPPDATA%\OmniVoice\Logs\bootstrap.log` |
+| Linux | `~/.local/state/OmniVoice/bootstrap.log` |
+
+`OMNIVOICE_LOG_DIR` moves it, along with the other logs.
+
+It covers the current run only — it is truncated when a bootstrap starts, so a
+retry replaces the previous attempt rather than appending to it. If you need
+the log from an attempt that has already been superseded, copy it before
+retrying.
+
+## RTX 50-series (Blackwell, `sm_120`): backend never starts
+
+**Symptom.** The desktop app stays on "starting backend", `/health` returns 503,
+and the backend log ends inside the `ml_imports` phase — often with a native
+crash (exit code `0xffffffff` / `-1073741819`) rather than a Python traceback.
+
+**Cause.** Not established. `torch 2.8.0+cu128` does contain Blackwell code:
+`sm_120` is in `torch.cuda.get_arch_list()`, and that build imports and runs
+CUDA normally on some Blackwell cards, so this is not simply a wheel without
+kernels for your GPU. What is confirmed is that on the Windows setups in
+[#1931](https://github.com/debpalash/VoiceStudio/issues/1931) `import torch`
+dies natively before any VoiceStudio code can classify it, which is why the app
+can only say the backend did not start. Moving to torch 2.9.x clears it for the
+users who hit it.
+
+**Fix.** Move to torch 2.9.x. From a source checkout, in the project folder:
+
+1. Edit `pyproject.toml` → `[tool.uv] constraint-dependencies` and raise the
+   torch constraint to `torch==2.9.1+cu128` (matching `torchaudio` /
+   `torchvision` for that release).
+2. `uv lock`
+3. `uv sync --all-extras`
+
+Then confirm the card is actually visible:
+
+```bash
+uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_capability())"
+```
+
+`True (12, 0)` means Blackwell is working.
+
+**Note.** torchaudio 2.9 removed `set_audio_backend()`. VoiceStudio's call is
+guarded, so the upgrade above no longer trades one startup crash for another —
+but if you are on a build older than that guard you will see
+`AttributeError: module 'torchaudio' has no attribute 'set_audio_backend'`
+in the same phase. Update VoiceStudio, or delete that line in
+`backend/main.py`.
+
+**Why the pin has not moved.** Raising it for everyone changes the CUDA build
+on every platform, in Docker, and in CI, so it is a deliberate decision rather
+than a patch. Track it in [#1931](https://github.com/debpalash/VoiceStudio/issues/1931).
+
 ## Uninstalling / removing all of VoiceStudio's data
 
 VoiceStudio is fully local — no accounts, no services, nothing to deactivate. To
@@ -903,3 +1196,48 @@ remove the app binary itself are in
 [docs/install/uninstall.md](uninstall.md).
 
 **Linked issue:** [#1089](https://github.com/debpalash/VoiceStudio/issues/1089)
+
+### Pedalboard illegal-instruction crashes
+
+VoiceStudio pins pedalboard to `>=0.9.14,<0.9.21` while [upstream portable-wheel repair #466](https://github.com/spotify/pedalboard/pull/466) remains open. Re-sync the locked environment after updating from a build with newer affected wheels. This keeps the existing effects API floor while avoiding the reported Linux CPU import crash.
+
+### TorchCodec unavailable
+
+When torchaudio requires an unavailable TorchCodec installation, VoiceStudio writes through soundfile and reads reference audio through its FFmpeg fallback. Reference amplitude is normalized using the decoded sample representation, including 8-, 24-, and 32-bit PCM.
+
+### Isolated engine timeouts
+
+Generation has a separate deadline from health checks. Default sidecar deadlines scale with text length and the host execution budget; per-engine timeout overrides remain supported. The outer job guard includes time for sidecar termination and error reporting. A timeout identifies the deadline, while a closed pipe without a timeout indicates a crash.
+
+Per-engine receive overrides include `OMNIVOICE_CONFUCIUS4_RECV_TIMEOUT_S`, `OMNIVOICE_DOTS_TTS_RECV_TIMEOUT_S`, `OMNIVOICE_MOSS_TTS_V15_RECV_TIMEOUT_S`, and `OMNIVOICE_SUPERTONIC3_RECV_TIMEOUT_S` (seconds). Invalid or non-finite values use the default; values below 30 seconds are raised to 30.
+
+### FFprobe alongside FFmpeg
+
+When FFprobe is not on PATH, VoiceStudio also checks beside the selected FFmpeg binary. Parent folders named `ffmpeg` remain unchanged; only the executable name becomes `ffprobe` (or `ffprobe.exe` on Windows).
+
+### Subtitle and manuscript encodings
+
+Electron and web imports accept UTF-8, UTF-16 with a byte-order mark, and Windows-1252 text. The same decoder rules apply to uploaded subtitles and audiobook manuscripts; legacy punctuation is preserved.
+
+
+### Compile fallback after startup
+
+An architecture accepted by the torch.compile preflight may still encounter independent Dynamo, Inductor, Triton, or CUDA-graph runtime errors. VoiceStudio distinguishes those from GPU memory exhaustion and retries with eager execution; architecture support alone does not guarantee compilation succeeds.
+
+### Native engine installation from a remote client
+
+Sidecar and audio.cpp runtime installation is restricted to requests from the backend computer's loopback interface. An API key does not bypass this restriction. The catalogue now shows local setup guidance instead of offering a remote install that will be rejected. Open the backend through `localhost` on that computer, or follow the engine's setup guide there. In Docker, bridge-network requests may not be loopback even when the browser runs on the host; use the documented container setup rather than weakening the native-install gate.
+
+### Dubbing extraction fails
+
+Extraction errors show the FFmpeg exit code and the end of its diagnostics, with private paths scrubbed. Use the final error line to distinguish missing audio streams, unsupported inputs, permissions, or disk errors. A version banner alone does not identify the cause; include the final diagnostic and source format when reporting a failure.
+
+Explicit generation budgets remain authoritative. If an outer TTS/ASR guard times out or its caller disconnects, the active sidecar receive kills and reaps its captured child; it cannot terminate a later retry. In-process inference keeps its existing lifetime accounting until the native call returns.
+
+### Voice conversion requires a cloning model
+
+In Electron, voice conversion stays disabled until the active text-to-speech
+model is ready and supports voice cloning. Use the Models link to choose one;
+the source recording and target voice are preserved when returning. Preset-only
+models such as MLX Kokoro cannot clone a target voice. This capability check does
+not download or load model weights.

@@ -24,18 +24,24 @@ for this model.
    uv sync --extra pockettts
    ```
 
-   (Or enable it from **Model Catalogue → Engines**.)
+   Or click **Install** in **Model Catalogue → PocketTTS**. That
+   installs the same pinned package into the engine's own Python environment
+   under VoiceStudio's data directory, with the CPU build of PyTorch, because
+   PocketTTS never uses a GPU. Nothing it installs touches VoiceStudio itself
+   or any other engine, and **Uninstall** in the same row removes only that
+   folder. An install made with `uv sync` keeps working as it is. The button
+   is not offered on Intel Macs (see Platform notes).
 
 2. **Accept the license in-app**
    ([#1306](https://github.com/debpalash/VoiceStudio/issues/1306)). The code
    is MIT and the weights are CC-BY-4.0, but the weights are **gated on
    HuggingFace** behind an access agreement with an acceptable-use clause.
    VoiceStudio surfaces this before first use: the engine stays unavailable
-   until you review and accept in **Model Catalogue → Engines → PocketTTS**.
+   until you review and accept in **Model Catalogue → PocketTTS**.
    You also need HuggingFace access to the gated repo (see
    [downloading-models.md](../downloading-models.md) for token setup).
 
-3. Select the engine via **Model Catalogue → Engines** or
+3. Select the engine via **Model Catalogue** (TTS tab → **Use**) or
    `OMNIVOICE_TTS_BACKEND=pockettts`.
 
 ## Platform notes
@@ -50,8 +56,9 @@ for this model.
 - Output is 24 kHz mono.
 - Six languages, one model per language, chosen by the `language` you
   request; cloning takes a short reference clip.
-- Runs in a crash-isolated sidecar process (parent Python environment): a
-  wedged generation is hard-killed by a watchdog and its memory reclaimed —
+- Runs in a crash-isolated sidecar process: from its own environment after
+  a one-click install, otherwise from VoiceStudio's (where `uv sync --extra
+  pockettts` puts it). A wedged generation is hard-killed by a watchdog and its memory reclaimed —
   something an in-process engine cannot do.
 - The first use downloads the gated weights; the sidecar heartbeats
   progress during the download so the watchdog doesn't fire.
@@ -77,7 +84,7 @@ for this model.
 ## Troubleshooting
 
 - "pocket_tts package not installed": run the `uv sync` above.
-- "license not accepted": open **Model Catalogue → Engines → PocketTTS**
+- "license not accepted": open **Model Catalogue → PocketTTS**
   and review/accept.
 - Timeouts on a slow connection: raise
   `OMNIVOICE_POCKETTTS_RECV_TIMEOUT_S` for the first (download-heavy) run.

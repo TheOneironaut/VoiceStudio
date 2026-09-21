@@ -18,10 +18,10 @@ export type EngineFamily = 'tts' | 'asr' | 'llm';
 // (`effective_device` / `routing_status` / `routing_reason`). They stay
 // optional so the matrix still renders a legacy/older payload that omits them
 // (it gates with `??` / `?.length` and suppresses the routing badge).
-type GPUTarget = 'cuda' | 'mps' | 'rocm' | 'xpu' | 'cpu';
+type GPUTarget = 'cuda' | 'mps' | 'rocm' | 'vulkan' | 'xpu' | 'cpu';
 // Where an engine actually runs on THIS host. `network` is remote/cloud.
 type EffectiveDevice = GPUTarget | 'network';
-// `n/a` is used by remote engines; resolve_routing only returns the first four.
+// `n/a` is used by remote engines; resolve_routing only returns local targets.
 type RoutingStatus = 'accelerated' | 'cpu_fallback' | 'cpu_only' | 'unavailable' | 'n/a';
 
 export interface EngineBackend {
@@ -45,10 +45,20 @@ export interface EngineBackend {
   // Copy-paste-ready `export VAR=...` line for a path-gated opt-in engine
   // (IndexTTS / MOSS-v1.5 / dots.tts / Confucius4), else null/absent.
   setup_snippet?: string | null;
+  // This engine's documentation page (#1866). A registry-authored constant, so
+  // it survives the public-metadata scrub that replaces `reason`/`last_error`.
+  // Absent on legacy payloads.
+  docs_url?: string | null;
   // True when the backend's sidecar provisioner can install this engine
   // in-app (Settings renders an Install button; the manual snippet is
   // demoted to a collapsible fallback). Absent on legacy payloads.
   one_click_install?: boolean;
+  local_install_required?: boolean;
+  // Stable public state for engines whose first use needs an explicit local
+  // license acknowledgement. This remains visible when probe details are
+  // redacted from the public catalogue.
+  license_required?: boolean;
+  license_accepted?: boolean;
   last_error?: string | null;
   isolation_mode?: 'in-process' | 'subprocess';
   gpu_compat?: GPUTarget[];
@@ -66,8 +76,8 @@ export interface EngineBackend {
   // Settings can render a model picker. Absent on every other backend.
   curated_models?: CuratedModel[];
   active_model_id?: string;
-  // Gemini TTS preset voices. Kept separate from curated_models so model
-  // registry consumers can retain the mlx-audio-only invariant.
+  // Gemini TTS preset voices. Separate from curated_models, which describes
+  // downloadable model variants rather than provider voice choices.
   curated_voices?: CuratedModel[];
   active_voice_id?: string;
   disk_usage?: EngineDiskUsage;
@@ -224,7 +234,15 @@ export interface Profile {
 
 export interface ProfileUsage {
   projects: { project_id: string; project_name: string; segment_count: number }[];
-  total_segments: number;
+  synth_total: number;
+  synth_recent: {
+    id: string;
+    text: string;
+    audio_path: string;
+    created_at: number;
+    generation_time: number | null;
+  }[];
+  project_total_segments: number;
 }
 
 // ── Portable persona bundles (.ovsvoice, #29) ──────────────────────────────

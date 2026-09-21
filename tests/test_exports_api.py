@@ -209,13 +209,13 @@ def test_export_404_when_source_gone(client, outputs_dir, tmp_path, authorize_de
 
 
 def test_export_symlink_inside_outputs_pointing_outside_is_rejected(
-    client, outputs_dir, tmp_path, authorize_destination
+    client, outputs_dir, tmp_path, authorize_destination, symlink_or_skip
 ):
     # A symlink planted in OUTPUTS_DIR must not let /export read arbitrary
     # files: realpath resolves it outside the root, failing containment.
     secret = tmp_path / "secret.txt"
     secret.write_bytes(b"credentials")
-    (outputs_dir / "innocent.wav").symlink_to(secret)
+    symlink_or_skip(outputs_dir / "innocent.wav", secret)
 
     r = client.post("/export", json={
         "source_filename": "innocent.wav",
@@ -309,16 +309,86 @@ def test_export_mp4_plain_copy_when_visible_watermark_disabled(
     assert not called
 
 
-def test_export_mp4_falls_back_to_plain_copy_when_ffmpeg_fails(
+def test_export_mp4_overlay_spawns_the_resolved_ffmpeg(
     client, outputs_dir, tmp_path, monkeypatch, authorize_destination
 ):
+    """The overlay must run the binary `find_ffmpeg()` resolved, not the bare
+    name. imageio-ffmpeg — the app's default source — ships its binary as
+    `ffmpeg-<platform>-v<version>`, so spawning "ffmpeg" raised
+    FileNotFoundError and the watermark was silently dropped from the export.
+    """
     from services import watermark
+    from services import ffmpeg_utils
+
+    _make_source(outputs_dir, name="dub.mp4", data=b"\x00\x00\x00\x1cftyp-fake-mp4")
+    bundled = str(tmp_path / "bundle" / "ffmpeg-linux-x86_64-v7.1")
+    monkeypatch.setattr(watermark, "is_visible_video_enabled", lambda: True)
+    monkeypatch.setattr(
+        watermark, "get_ffmpeg_overlay_args", lambda logo: ["-filter_complex", "overlay"]
+    )
+    monkeypatch.setattr(ffmpeg_utils, "find_ffmpeg", lambda: bundled)
+
+    spawned = []
+    dest = tmp_path / "dub-export.mp4"
+
+    def _record(cmd, **kw):
+        spawned.append(cmd)
+        dest.write_bytes(b"overlaid")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", _record)
+
+    r = client.post("/export", json={
+        "source_filename": "dub.mp4",
+        "authorization": authorize_destination(dest),
+    })
+    assert r.status_code == 200
+    assert spawned and spawned[0][0] == bundled
+    assert dest.read_bytes() == b"overlaid"
+
+
+def test_export_mp4_plain_copies_when_no_ffmpeg_resolves(
+    client, outputs_dir, tmp_path, monkeypatch, authorize_destination
+):
+    """Nothing resolved → the user still gets their file, and no spawn is
+    attempted just to watch it fail."""
+    from services import watermark
+    from services import ffmpeg_utils
 
     src = _make_source(outputs_dir, name="dub.mp4", data=b"\x00\x00\x00\x1cftyp-fake-mp4")
     monkeypatch.setattr(watermark, "is_visible_video_enabled", lambda: True)
     monkeypatch.setattr(
         watermark, "get_ffmpeg_overlay_args", lambda logo: ["-filter_complex", "overlay"]
     )
+    monkeypatch.setattr(ffmpeg_utils, "find_ffmpeg", lambda: None)
+
+    spawned = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: spawned.append(cmd))
+
+    dest = tmp_path / "dub-export.mp4"
+    r = client.post("/export", json={
+        "source_filename": "dub.mp4",
+        "authorization": authorize_destination(dest),
+    })
+    assert r.status_code == 200
+    assert dest.read_bytes() == src.read_bytes()
+    assert not spawned
+
+
+def test_export_mp4_falls_back_to_plain_copy_when_ffmpeg_fails(
+    client, outputs_dir, tmp_path, monkeypatch, authorize_destination
+):
+    from services import watermark
+    from services import ffmpeg_utils
+
+    src = _make_source(outputs_dir, name="dub.mp4", data=b"\x00\x00\x00\x1cftyp-fake-mp4")
+    monkeypatch.setattr(watermark, "is_visible_video_enabled", lambda: True)
+    monkeypatch.setattr(
+        watermark, "get_ffmpeg_overlay_args", lambda logo: ["-filter_complex", "overlay"]
+    )
+    # Pinned so the real resolver never runs its `-version` probe through the
+    # stub below (which would cache the probe's failure for the whole session).
+    monkeypatch.setattr(ffmpeg_utils, "find_ffmpeg", lambda: "/opt/ffmpeg")
 
     def _ffmpeg_dies(cmd, **kw):
         raise subprocess.CalledProcessError(1, cmd)
