@@ -11,7 +11,11 @@ const frontendPkg = JSON.parse(
   readFileSync(resolve(__dirname, '../frontend/package.json'), 'utf-8'),
 ) as { version: string };
 
-const define = { __APP_VERSION__: JSON.stringify(frontendPkg.version) };
+const edition = process.env.VOICESTUDIO_EDITION === 'gemini' ? 'gemini' : 'standard';
+const define = {
+  __APP_VERSION__: JSON.stringify(frontendPkg.version),
+  __VOICESTUDIO_EDITION__: JSON.stringify(edition),
+};
 
 export default defineConfig({
   main: {

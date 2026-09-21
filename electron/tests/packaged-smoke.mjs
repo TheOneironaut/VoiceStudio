@@ -414,6 +414,15 @@ try {
     assert.equal(state.status, 200);
     assert.equal(state.bridge, 'object');
     assert(state.version);
+    const expectedTtsEngine = process.env.VOICESTUDIO_EXPECTED_TTS_ENGINE;
+    if (expectedTtsEngine) {
+      const activeTtsEngine = await window.evaluate(async () => {
+        const response = await fetch('/api/engines/tts');
+        if (!response.ok) throw new Error(`TTS engines returned ${response.status}`);
+        return (await response.json()).active;
+      });
+      assert.equal(activeTtsEngine, expectedTtsEngine);
+    }
     await window.goto('app://voicestudio/#/settings/models');
     await window.getByRole('textbox', { name: 'Custom mirror URL', exact: true }).waitFor();
     assert.deepEqual(errors, []);

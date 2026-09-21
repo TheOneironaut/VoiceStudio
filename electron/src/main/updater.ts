@@ -16,6 +16,13 @@ const FEEDS: Record<UpdateChannel, string> = {
 };
 const RELEASES_API = 'https://api.github.com/repos/debpalash/VoiceStudio/releases?per_page=30';
 
+export function desktopUpdatesSupported(
+  isPackaged: boolean,
+  edition: 'standard' | 'gemini' = __VOICESTUDIO_EDITION__,
+): boolean {
+  return isPackaged && edition !== 'gemini';
+}
+
 function feedChannelName(
   channel: UpdateChannel,
   platform: NodeJS.Platform = process.platform,
@@ -173,7 +180,7 @@ export class DesktopUpdater {
   private downloadInFlight: Promise<UpdateState> | null = null;
 
   constructor(private readonly fetcher: typeof fetch = fetch) {
-    const supported = app.isPackaged;
+    const supported = desktopUpdatesSupported(app.isPackaged);
     this.state = {
       status: supported ? 'idle' : 'unsupported',
       currentVersion: app.getVersion(),
@@ -429,6 +436,7 @@ export function registerUpdateIpc(
   ipcMain.handle(UPDATE_CHANNELS.listReleases, (event, channel: UpdateChannel) => {
     trusted(event);
     if (channel !== 'stable' && channel !== 'preview') throw new Error('Invalid update channel');
+    if (updater.snapshot().status === 'unsupported') return [];
     return listDesktopReleases();
   });
   const unsubscribe = updater.subscribe((state) => {
