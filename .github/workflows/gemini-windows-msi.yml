@@ -69,7 +69,10 @@ jobs:
       - name: Bundle uv
         shell: pwsh
         run: |
-          $version = "0.11.7"
+          # Keep this pinned version in sync with UV_VERSION in tools.rs. The
+          # desktop rejects a mismatched sidecar and otherwise falls back to a
+          # first-run PowerShell install, which is unavailable in the MSI smoke.
+          $version = "0.12.13"
           $archive = Join-Path $env:RUNNER_TEMP "uv.zip"
           $expanded = Join-Path $env:RUNNER_TEMP "uv"
           Invoke-WebRequest "https://github.com/astral-sh/uv/releases/download/$version/uv-$env:RUST_TARGET.zip" -OutFile $archive
