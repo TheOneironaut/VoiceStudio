@@ -304,6 +304,11 @@ async def twilio_voice_webhook(request: Request):
             session.registry.note("busy", call_sid)
             return Response(provider.reject_twiml(), media_type=_XML)
         inbound = calls.create_inbound(call_sid, fields.get("From", ""))
+        asyncio.get_running_loop().call_later(
+            session.TOKEN_TTL_S + session.START_TIMEOUT_S,
+            calls.finish_stale_inbound,
+            inbound.id,
+        )
         return _stream_twiml(cfg, call_sid, epoch, inbound.id)
     if not cfg.greeting:
         session.registry.note("busy", call_sid)
@@ -332,6 +337,14 @@ async def twilio_media_stream(websocket: WebSocket):
         return
     agent_call: dict = {}
 
+    def _track_reserved_call(start):
+        session_id = start.params.get("call", "")
+        if not session_id:
+            return
+        reserved = calls.get_live(session_id)
+        if reserved is not None and reserved.provider_call_id == start.call_id:
+            agent_call["reserved"] = reserved
+
     def _responder(start):
         session_id = start.params.get("call", "")
         if session_id:
@@ -354,6 +367,7 @@ async def twilio_media_stream(websocket: WebSocket):
             responder_factory=_responder,
             max_calls=config.max_concurrent_calls(),
             max_seconds=config.max_call_seconds(),
+            start_observer=_track_reserved_call,
         )
     finally:
         agent = agent_call.get("agent")
@@ -362,3 +376,7 @@ async def twilio_media_stream(websocket: WebSocket):
             # failed or this handler is cancelled — or it would hold its
             # max_concurrent slot until a restart.
             await asyncio.shield(calls.finish(agent.call, outcome, agent))
+        else:
+            reserved = agent_call.get("reserved")
+            if reserved is not None and not reserved.finalized:
+                calls.finish_unconnected(reserved, "failed", error=outcome)

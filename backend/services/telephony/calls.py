@@ -831,6 +831,18 @@ def finish_unconnected(session: CallSession, status: str, *, error: str = "") ->
     _complete(session, status)
 
 
+def finish_stale_inbound(session_id: str) -> None:
+    """Release an answered inbound call whose authenticated stream never starts."""
+    call = get_live(session_id)
+    if (
+        call is not None
+        and call.direction == "inbound"
+        and not call.stream_connected
+        and not call.finalized
+    ):
+        finish_unconnected(call, "failed", error="Media stream did not start")
+
+
 # ── Control (main API) ──────────────────────────────────────────────────────
 
 

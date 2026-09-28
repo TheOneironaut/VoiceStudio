@@ -515,6 +515,7 @@ async def run_call(
     responder_factory,
     max_calls: int,
     max_seconds: float,
+    start_observer=None,
 ) -> str:
     """Drive one media stream from handshake to hang-up; returns the outcome.
 
@@ -550,6 +551,9 @@ async def run_call(
         registry.note("rejected_stream", start.call_id if start else "")
         await _close(websocket, 1008)
         return "rejected_stream"
+
+    if start_observer is not None:
+        start_observer(start)
 
     record = registry.begin(start.call_id, max_calls)
     if record is None:
