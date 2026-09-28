@@ -5,7 +5,12 @@ import { app, safeStorage } from 'electron';
 import { matchesProLicense, type LicenseResponse } from './pro-license-validation';
 
 export type ProLicenseStatus = { active: boolean; configured: boolean; error?: 'offline' | 'invalid' | 'storage' };
-type StoredLicense = { encryptedKey?: string; fileKey?: string; instanceId: string };
+type StoredLicense = {
+  encryptedPayload?: string;
+  encryptedKey?: string;
+  fileKey?: string;
+  instanceId?: string;
+};
 
 const LICENSE_API = 'https://api.lemonsqueezy.com/v1/licenses';
 const path = () => join(app.getPath('userData'), 'pro-license.json');
@@ -37,6 +42,13 @@ async function request(action: 'activate' | 'validate' | 'deactivate', key: stri
 async function readStored(): Promise<{ key: string; instanceId: string } | null> {
   try {
     const stored = JSON.parse(await readFile(path(), 'utf8')) as StoredLicense;
+    if (stored.encryptedPayload) {
+      const payload = JSON.parse(
+        safeStorage.decryptString(Buffer.from(stored.encryptedPayload, 'base64')),
+      ) as { key?: unknown; instanceId?: unknown };
+      if (typeof payload.key !== 'string' || typeof payload.instanceId !== 'string') return null;
+      return { key: payload.key, instanceId: payload.instanceId };
+    }
     if (!stored.instanceId) return null;
     const key = stored.encryptedKey
       ? safeStorage.decryptString(Buffer.from(stored.encryptedKey, 'base64'))
@@ -53,7 +65,10 @@ async function saveStored(key: string, instanceId: string): Promise<void> {
   const temporary = `${file}.${randomUUID()}.tmp`;
   await mkdir(dirname(file), { recursive: true });
   if (!safeStorage.isEncryptionAvailable() || safeStorage.getSelectedStorageBackend?.() === 'basic_text') throw new Error('storage');
-  const stored: StoredLicense = { encryptedKey: safeStorage.encryptString(key).toString('base64'), instanceId };
+  const encryptedPayload = safeStorage
+    .encryptString(JSON.stringify({ key, instanceId }))
+    .toString('base64');
+  const stored: StoredLicense = { encryptedPayload };
   await writeFile(temporary, JSON.stringify(stored), { mode: 0o600 });
   await rename(temporary, file);
 }

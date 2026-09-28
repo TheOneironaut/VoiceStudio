@@ -746,8 +746,13 @@ def _clone_prompt_key(ref_audio: str, ref_text, preprocess_prompt: bool = True, 
         mtime = 0.0
     # The selected passage changes conditioning even if two windows have the
     # same transcript. Keep the outer key shape stable for every call.
-    key = (os.path.abspath(ref_audio), mtime, ref_text or "", bool(preprocess_prompt))
-    return key, passage
+    return (
+        os.path.abspath(ref_audio),
+        mtime,
+        ref_text or "",
+        bool(preprocess_prompt),
+        passage,
+    )
 
 
 def reference_duration_s(path) -> Optional[float]:
@@ -1117,8 +1122,7 @@ def _omnivoice_installed_passage(ref_audio: str) -> Optional[tuple[str, str]]:
                 try:
                     os.remove(best_path)
                 except OSError:
-                    # Best-effort cleanup; the temporary file may already be gone.
-                    pass
+                    logger.debug("ranked-window cleanup skipped", exc_info=True)
             best_score = score
             best_activity = activity
             best_path = path
@@ -1128,8 +1132,7 @@ def _omnivoice_installed_passage(ref_audio: str) -> Optional[tuple[str, str]]:
             try:
                 os.remove(path)
             except OSError:
-                # Best-effort cleanup; the temporary file may already be gone.
-                pass
+                logger.debug("candidate-window cleanup skipped", exc_info=True)
     if best_path is None:
         _remember_passage(ref_audio, _NO_PASSAGE, "")
         return None
@@ -1163,8 +1166,7 @@ def _materialize_window(ref_audio: str, index: int) -> Optional[str]:
         try:
             os.remove(path)
         except OSError:
-            # Best-effort cleanup; the temporary file may already be gone.
-            pass
+            logger.debug("failed-window cleanup skipped", exc_info=True)
         return None
     return path
 
@@ -1252,8 +1254,7 @@ def _get_clone_prompt(
                     ref_audio, None, preprocess_prompt
                 )
             except Exception:
-                # Cache eviction is optional when the preliminary key cannot be built.
-                pass
+                logger.debug("pre-transcription prompt key unavailable", exc_info=True)
             try:
                 transcribe_reference = getattr(
                     importlib.import_module("services.asr_backend"),
