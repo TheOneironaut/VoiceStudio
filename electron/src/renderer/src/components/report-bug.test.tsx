@@ -14,11 +14,11 @@ vi.mock('@/hooks/use-backend-status', () => ({
 }));
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { addBreadcrumb, clearBreadcrumbs } from '../../../../../frontend/src/utils/breadcrumbs';
+import { addBreadcrumb, clearBreadcrumbs } from '@shared/utils/breadcrumbs';
 import {
   _resetBackendContactForTests,
   recordBackendContact,
-} from '../../../../../frontend/src/utils/backendContact';
+} from '@shared/utils/backendContact';
 const mock = vi.hoisted(() => ({
   crashed: false,
   native: true,
@@ -291,4 +291,43 @@ it('attaches the scrubbed current backend log when a live operation fails', asyn
   expect(body).toContain('RuntimeError: failed in ~/model');
   expect(body).not.toContain('/Users/alice');
   expect(body).not.toContain(secret);
+});
+
+it.each([
+  [3221225477, null, true],
+  [-1073741819, null, true],
+  [null, 'SIGSEGV', true],
+  [null, 'SIGILL', true],
+  [1, null, false],
+  [null, 'SIGTERM', false],
+])('classifies current and recorded native failures (%s, %s)', async (exitCode, signal, nativeFault) => {
+  mock.api.mockRejectedValue(new Error('offline'));
+  mock.backendStatus.mockResolvedValue({
+    stage: 'crashed', managed: true, remote: false, exitCode, exitSignal: signal,
+    message: 'Backend exited', logTail: [],
+    lastCrash: { timestamp: 1000000, version: '0.5.4', exitCode, signal, uptimeMs: 1000, logTail: [] },
+  });
+  render(<ReportBug />);
+  fireEvent.click(screen.getByRole('button', { name: 'reportBug.label' }));
+  await waitFor(() => expect(mock.open).toHaveBeenCalledTimes(1));
+  const body = new URL(mock.open.mock.calls[0]![0]).searchParams.get('body')!;
+  expect(body.split('reportBug.native_fault_cause').length - 1).toBe(nativeFault ? 2 : 0);
+  if (exitCode === 3221225477) expect(body).toContain('STATUS_ACCESS_VIOLATION');
+  if (signal) expect(body.split('## Last native backend exit')[0]).toContain('Signal: ' + signal);
+});
+
+it('does not label an unreachable backend using a previous run’s signal', async () => {
+  mock.api.mockRejectedValue(new Error('offline'));
+  mock.backendStatus.mockResolvedValue({
+    stage: 'crashed', managed: false, remote: false,
+    message: 'Backend stopped answering', logTail: [],
+    lastCrash: { timestamp: 1000000, version: '0.5.4', exitCode: null, signal: 'SIGSEGV', uptimeMs: 1000, logTail: [] },
+  });
+  render(<ReportBug />);
+  fireEvent.click(screen.getByRole('button', { name: 'reportBug.label' }));
+  await waitFor(() => expect(mock.open).toHaveBeenCalledTimes(1));
+  const body = new URL(mock.open.mock.calls[0]![0]).searchParams.get('body')!;
+  const [current, recorded] = body.split('## Last native backend exit');
+  expect(current).not.toContain('reportBug.native_fault_cause');
+  expect(recorded).toContain('reportBug.native_fault_cause');
 });

@@ -32,9 +32,10 @@ import { useTtsReadiness } from '@/hooks/use-tts-readiness';
 import { getBridge } from '@/components/bridge';
 import { apiJson, apiPath, describeError } from '@/lib/api/client';
 import { saveExport } from '@/lib/export-history';
-import { LANG_CODES } from '../../../../../../frontend/src/utils/languages';
-import { PRESETS } from '../../../../../../frontend/src/utils/constants';
-import type { BatchJob } from '../../../../../../frontend/src/api/batch-types';
+import { LANG_CODES } from '@shared/utils/languages';
+import { PRESETS } from '@shared/utils/constants';
+import type { BatchJob } from '@shared/api/batch-types';
+import { generationFailureMessage } from '@shared/utils/generationFailureMessage';
 import { enqueueVideos } from './enqueue';
 import { useTranslationEngines } from '@/features/settings/translation-settings';
 const languageOptions = LANG_CODES.map((item) => item.label);
@@ -547,6 +548,11 @@ function BatchJobCard({
       {duration != null && (
         <p className="mt-3 text-xs tabular-nums text-muted-foreground">
           {t('batch.completed_in', { duration: formatDuration(duration) })}
+        </p>
+      )}
+      {job.error && generationFailureMessage(job, t) && (
+        <p role="alert" className="mt-3 text-xs text-destructive">
+          {generationFailureMessage(job, t)}
         </p>
       )}
       {job.error && (

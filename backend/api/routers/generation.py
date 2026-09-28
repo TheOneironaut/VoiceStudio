@@ -8,11 +8,15 @@ import asyncio
 import tempfile
 import contextlib
 import logging
+from collections import OrderedDict
+import weakref
+
+from core.render_trace import timed as _render_timed
 import threading
 import traceback
 from typing import Optional
 from fastapi import APIRouter, File, Form, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 import sqlite3
@@ -26,11 +30,100 @@ from services.model_manager import (
 from services.audio_io import _safe_torchaudio_save
 from services.binary_preflight import InvalidBinaryError
 from core import event_bus
+from core.render_trace import call as trace_call
 from core.logging_utils import log_safe
 from omnivoice.utils.voice_design import heal_design_instruct
 
 router = APIRouter()
 logger = logging.getLogger("omnivoice.generate")
+
+# A URL can be fetched repeatedly (including the MCP readiness probe). Cache
+# the encoded bytes by WAV version, and coordinate misses per WAV so a slow
+# render cannot block cache hits or unrelated audio.
+_OGG_CACHE_LIMIT = 32 * 1024 * 1024
+_ogg_cache: OrderedDict[tuple[str, int, int, int], bytes] = OrderedDict()
+_ogg_cache_bytes = 0
+_ogg_state_lock = threading.Lock()
+_ogg_encode_locks = weakref.WeakValueDictionary()
+
+
+def _ogg_cache_key(path: str) -> tuple[str, int, int, int]:
+    info = os.stat(path)
+    return path, info.st_ino, info.st_mtime_ns, info.st_size
+
+
+def _cached_ogg(key: tuple[str, int, int, int]) -> bytes | None:
+    with _ogg_state_lock:
+        encoded = _ogg_cache.get(key)
+        if encoded is not None:
+            _ogg_cache.move_to_end(key)
+        return encoded
+
+
+@router.get("/audio/{audio_id}.ogg")
+@router.get("/audio/{audio_id}.opus")
+async def generated_ogg_opus(audio_id: str):
+    """Serve the same render as /audio/<id>.wav, encoded as Ogg/Opus."""
+    if not re.fullmatch(r"[0-9a-f]{8}", audio_id):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    path = _safe_output_path(f"{audio_id}.wav")
+    if path is None:
+        raise HTTPException(status_code=404, detail="Audio file not found")
+    try:
+        key = _ogg_cache_key(path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Audio file not found") from None
+    encoded = _cached_ogg(key)
+    if encoded is not None:
+        return Response(encoded, media_type="audio/ogg")
+
+    with _ogg_state_lock:
+        encode_lock = _ogg_encode_locks.get(key)
+        if encode_lock is None:
+            encode_lock = asyncio.Lock()
+            _ogg_encode_locks[key] = encode_lock
+    async with encode_lock:
+        try:
+            if _ogg_cache_key(path) != key:
+                return await generated_ogg_opus(audio_id)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Audio file not found") from None
+        encoded = _cached_ogg(key)
+        if encoded is None:
+            from services.audio_io import encode_ogg_opus
+            try:
+                encoded = await encode_ogg_opus(path)
+            except asyncio.TimeoutError as exc:
+                logger.warning("Ogg/Opus encoding timed out")
+                raise HTTPException(
+                    status_code=503, detail="Ogg/Opus encoding timed out; try again later"
+                ) from exc
+            except RuntimeError as exc:
+                logger.warning("Ogg/Opus encoding failed: %s", exc)
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            if len(encoded) <= _OGG_CACHE_LIMIT:
+                global _ogg_cache_bytes
+                with _ogg_state_lock:
+                    while _ogg_cache_bytes + len(encoded) > _OGG_CACHE_LIMIT:
+                        _ogg_cache_bytes -= len(_ogg_cache.popitem(last=False)[1])
+                    _ogg_cache[key] = encoded
+                    _ogg_cache_bytes += len(encoded)
+    return Response(encoded, media_type="audio/ogg")
+
+
+# Same containers POST /profiles stores for a clone reference. /generate used
+# to write every upload with suffix=".wav"; pydub then passes -f wav to ffmpeg,
+# so an MP3/M4A/WebM one-shot clip failed to decode while a saved voice of the
+# same file worked.
+_REF_UPLOAD_EXTS = frozenset({
+    ".wav", ".mp3", ".m4a", ".flac", ".ogg", ".oga", ".opus", ".aac", ".webm",
+})
+
+
+def _ref_upload_suffix(filename: Optional[str]) -> str:
+    """On-disk suffix for a one-shot /generate reference upload."""
+    ext = os.path.splitext(filename or "")[1].lower()
+    return ext if ext in _REF_UPLOAD_EXTS else ".wav"
 
 
 class _TempReferenceLease:
@@ -199,13 +292,16 @@ def _resolve_profile_conditioning(row, *, ref_text=None, instruct=None,
             out["instruct"] = row["instruct"]
         if out["seed"] is None and row["seed"] is not None:
             out["seed"] = row["seed"]
-    if out["language"] == "Auto":
+    explicit_auto = isinstance(language, str) and language.strip().lower() == "auto"
+    if explicit_auto:
         out["language"] = None
     # #533: a profile's stored language must drive generation when the request
     # didn't pin one. An EXPLICIT non-Auto request language still wins; we
-    # only fill the gap. `row` is a sqlite3.Row, so guard the column lookup
+    # only fill an omitted value. Explicit Auto chooses language-agnostic
+    # synthesis from the target script, even when the reference voice has a
+    # saved language. `row` is a sqlite3.Row, so guard the column lookup
     # for pre-language DBs mid-upgrade.
-    if out["language"] is None:
+    if out["language"] is None and not explicit_auto:
         try:
             prof_lang = row["language"]
         except (KeyError, IndexError):
@@ -213,7 +309,7 @@ def _resolve_profile_conditioning(row, *, ref_text=None, instruct=None,
         if prof_lang and prof_lang != "Auto":
             out["language"] = prof_lang
             # #2156: record that the caller never asked for this language. The
-            # UI omits `language` entirely while its picker reads "Auto", so a
+            # Older clients omit `language` while their picker reads "Auto", so a
             # profile-filled language must not be reported back as if the user
             # had picked it — an engine that can't speak it would otherwise
             # tell them to "leave language as Auto", which is what they did.
@@ -299,6 +395,7 @@ def _sanitize_audio(audio_out):
     return audio_out
 
 
+@_render_timed('effects')
 def _apply_effect_chain(audio_out, sample_rate, effect_preset, *, skip_mastering=False):
     """Shared post-DSP for /generate: preset validation → mastering →
     effect chain → loudness normalization.
@@ -584,12 +681,10 @@ def _oom_friendly_reraise(e):
     """Best-effort cache flush + the user-facing OOM hint shared by both
     inference paths."""
     import gc
-    import torch
+    from services.model_manager import release_device_cache
+
     gc.collect()
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-    elif torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    release_device_cache()
     # #278: don't mislabel a torch.compile/Triton/Inductor crash as an
     # out-of-memory condition. (model_manager's generate wrapper already
     # retries these eagerly; this only triggers if that retry also died.)
@@ -866,7 +961,7 @@ def _run_inference(
 
         def _gen(gen_text, gen_duration):
             """One generate call for this request's voice, reference encoded once."""
-            return generate_with_cached_ref(
+            return trace_call("synthesis", generate_with_cached_ref,
                 model, ref_audio=ref_audio_path, ref_text=ref_text,
                 text=gen_text, language=language, instruct=instruct,
                 duration=gen_duration, num_step=num_step,
@@ -985,7 +1080,7 @@ def _run_backend_inference(
                 if native_proxy and first_span and used_seed is not None:
                     span_kwargs["seed"] = used_seed
                 first_span = False
-                return backend.generate(span_text, duration=None, **span_kwargs)
+                return trace_call("synthesis", backend.generate, span_text, duration=None, **span_kwargs)
             audio_out = _render_with_pauses(_gen_span, segments, sr)
         else:
             # Wave 1.2: sentence-boundary chunking for long text (see
@@ -1005,7 +1100,7 @@ def _run_backend_inference(
                     chunk_kwargs = dict(gen_kwargs)
                     if native_proxy and used_seed is not None:
                         chunk_kwargs["seed"] = used_seed + i
-                    parts.append(backend.generate(
+                    parts.append(trace_call("synthesis", backend.generate,
                         chunk_text, duration=None, **chunk_kwargs
                     ))
                     _note_generate_progress()
@@ -1015,7 +1110,7 @@ def _run_backend_inference(
             else:
                 if native_proxy and used_seed is not None:
                     gen_kwargs["seed"] = used_seed
-                audio_out = backend.generate(text, duration=duration, **gen_kwargs)
+                audio_out = trace_call("synthesis", backend.generate, text, duration=duration, **gen_kwargs)
 
         return _apply_effect_chain(
             audio_out, sr, effect_preset,
@@ -1663,7 +1758,28 @@ async def generate_speech(
                     f"for progress), not that generation failed. Retry once the "
                     f"model shows as installed."
                 ),
+                headers={"Retry-After": "30", "X-OmniVoice-Retryable": "true"},
             ) from exc
+        except HTTPException:
+            raise
+        # #2298: everything else the load can raise. A JSONResponse rather than
+        # an HTTPException because the classified `hint` / `docs_topic` are
+        # top-level keys the client already reads off a failure body, and
+        # HTTPException would bury them under `detail`. The global 500 handler
+        # produced exactly this shape — the only thing that changes is that the
+        # reply now names the engine and the model load, and arrives as a 503
+        # the client can treat as retryable instead of a crash.
+        except Exception as exc:
+            if type(exc).__name__ == "ModelLoadInterruptedByShutdown":
+                raise
+            from core.public_errors import model_load_failure
+
+            logger.error("engine model load failed")
+            return JSONResponse(
+                status_code=503,
+                content=model_load_failure(engine_id, exc),
+                headers={"Retry-After": "30", "X-OmniVoice-Retryable": "true"},
+            )
 
     ref_audio_path = None
     cleanup_ref = False
@@ -1682,6 +1798,10 @@ async def generate_speech(
     # transcript paired with the original reference); design profiles are
     # excluded (a re-render replaces the sample, stranding a stale transcript).
     persist_ref_text_profile_id = None
+    # A transcript the caller sent, before a profile fills in its stored one:
+    # an explicit transcript on an over-long clip gets the actionable 400
+    # below instead of being silently dropped at the engine boundary (#2281).
+    request_ref_text = (ref_text or "").strip()
 
     if profile_id:
         with db_conn() as conn:
@@ -1706,7 +1826,8 @@ async def generate_speech(
                 persist_ref_text_profile_id = profile_id
     elif ref_audio is not None:
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+            suffix = _ref_upload_suffix(ref_audio.filename)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
                 f.write(await ref_audio.read())
                 ref_audio_path = f.name
                 cleanup_ref = True
@@ -1714,12 +1835,36 @@ async def generate_speech(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    # #2281: an engine that picks the best passage of a long clip itself
+    # (OmniVoice) cannot align a whole-clip transcript. A transcript typed on
+    # this request gets the actionable error before any work starts; a missing
+    # one is left missing, because transcribing the full clip here produced
+    # exactly the transcript the engine then rejected — and persisted it.
+    ref_picks_own_passage = False
+    if ref_audio_path:
+        from services.tts_backend import reference_duration_s
+
+        _ref_max = getattr(backend_cls, "max_ref_seconds", None)
+        if getattr(backend_cls, "ref_strategy", None) == "best_window" and _ref_max:
+            # Off the event loop: non-WAV clips decode through ffmpeg.
+            _ref_seconds = await asyncio.to_thread(reference_duration_s, ref_audio_path)
+            ref_picks_own_passage = _ref_seconds is not None and _ref_seconds > _ref_max
+            if ref_picks_own_passage and request_ref_text:
+                from omnivoice.utils.audio import clone_ref_transcript_too_long_message
+
+                if cleanup_ref and ref_lease is not None:
+                    ref_lease.finish_request()
+                raise HTTPException(
+                    status_code=400,
+                    detail=clone_ref_transcript_too_long_message(_ref_seconds),
+                )
+
     # #308: a transcript-less reference is transcribed with the active ASR
     # backend (whisperx / faster-whisper / mlx-whisper) instead of the model's
     # built-in transformers pipeline, which cannot load whisper-large-v3-turbo
     # on transformers 5.3. On failure ref_text stays None and the model's
     # installed-only fallback can try without downloading another ASR model.
-    if ref_audio_path and not ref_text:
+    if ref_audio_path and not ref_text and not ref_picks_own_passage:
         from services.asr_backend import transcribe_reference
         # Same #730 hang risk as any whisperx transcribe — bound + reset the pool
         # so a wedged reference transcribe can't brick the backend. This path is
@@ -1759,6 +1904,10 @@ async def generate_speech(
     # is still None here, never overwritten.
     if used_seed is None:
         used_seed = random.randint(0, 2**31 - 1)
+
+    # Auto is a UI/API choice, not a language token for engines or workers.
+    if isinstance(language, str) and language.strip().lower() == "auto":
+        language = None
 
     # Engine-agnostic text normalization (junk strip, numbers→words,
     # abbreviations) — AFTER `language` is fully resolved, and BEFORE the
@@ -2068,7 +2217,7 @@ async def generate_speech(
                     torch.manual_seed(used_seed + i)
                 if _backend is not None:
                     _lang = None if (language and language.lower() == "auto") else language
-                    raw = _backend.generate(
+                    raw = trace_call("synthesis", _backend.generate,
                         chunk_text, duration=None, language=_lang,
                         ref_audio=ref_audio_path, ref_text=ref_text,
                         instruct=instruct, num_step=num_step,
@@ -2097,7 +2246,7 @@ async def generate_speech(
                     # Same cached-reference path as _run_inference: chunk 0 encodes
                     # the reference, chunks 1..N hit the cache instead of re-encoding.
                     from services.tts_backend import generate_with_cached_ref
-                    raw = generate_with_cached_ref(
+                    raw = trace_call("synthesis", generate_with_cached_ref,
                         _model, ref_audio=ref_audio_path, ref_text=ref_text,
                         text=chunk_text, language=language, instruct=instruct,
                         duration=None, num_step=num_step,

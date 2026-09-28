@@ -6,7 +6,7 @@ import {
   segTimeRange,
   formatTranscriptExport,
   preferredTranscript,
-} from '../../../../../../frontend/src/utils/transcriptionFormat';
+} from '@shared/utils/transcriptionFormat';
 import { RecordingInputs } from '@/components/recording-inputs';
 import { AgentFixButton } from '@/components/agent-fix-button';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -48,17 +48,18 @@ import {
   addTranscription,
   loadTranscriptions,
   subscribeTranscriptions,
+  removeTranscription,
   TRANSCRIPTIONS_KEY,
   TRANSCRIPTION_EVENT,
   type TranscriptEntry,
-} from '../../../../../../frontend/src/utils/transcriptionsStore';
+} from '@shared/utils/transcriptionsStore';
 import { beginAppActivity } from '@/lib/app-activity';
 import { formatRelative } from '@/features/clone/format';
 import { useModelCatalogue } from '@/features/settings/model-catalogue-query';
 import { useNativeShortcut } from '@/hooks/use-native-dictation';
 import { recordActionBreadcrumb } from '@/lib/report-breadcrumb';
 import { saveLocalFile } from '@/lib/local-export';
-import { formatShortcut } from '../../../../../../frontend/src/utils/dictationShortcut';
+import { formatShortcut } from '@shared/utils/dictationShortcut';
 
 type TranscriptionMode = 'fast' | 'accurate';
 const TRANSCRIPTION_MODE_KEY = 'voicestudio.transcription.mode';
@@ -209,9 +210,7 @@ export function TranscriptionsPage() {
   }, [selectedId, visible]);
   const remove = (id: number) => {
     try {
-      const next = loadTranscriptions().filter((entry) => entry.id !== id);
-      localStorage.setItem(TRANSCRIPTIONS_KEY, JSON.stringify(next));
-      setEntries(next);
+      removeTranscription(id);
       if (selectedId === id) setSelectedId(null);
     } catch {
       toast.error(t('modelSettings.failed'));

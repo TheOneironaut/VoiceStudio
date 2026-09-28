@@ -14,6 +14,7 @@ from core.config import DUB_DIR, VOICES_DIR, dub_seg_path
 from core.tasks import task_manager
 from schemas.requests import DubRequest
 from services.model_manager import _gpu_pool, run_on_gpu_pool_guarded
+from services.srt_parser import vouch_cue_source
 from services.tts_backend import TTSBackend, resolve_generation_backend, active_backend_id
 from services.dub_batching import batch_timeout_s, native_batch_width
 from services import gpu_gateway
@@ -78,12 +79,10 @@ def _prepare_oom_retry(error: Exception, *, execution_target: str) -> bool:
         raise error
 
     import gc
+    from services.model_manager import release_device_cache
 
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        torch.mps.empty_cache()
+    release_device_cache()
     return True
 
 
@@ -180,6 +179,7 @@ def _sync_job_segments(job: dict, req: DubRequest) -> None:
     by_id = {str(s["id"]): s for s in existing if s.get("id") is not None}
     seg_ids = req.segment_ids or []
     merged: list[dict] = []
+    vouched: list[str | None] = []
     for i, seg in enumerate(req.segments):
         seg_id = seg_ids[i] if i < len(seg_ids) else None
         prev = by_id.get(str(seg_id)) if seg_id is not None else None
@@ -196,6 +196,9 @@ def _sync_job_segments(job: dict, req: DubRequest) -> None:
         row["start"] = seg.start
         row["end"] = seg.end
         row["text"] = seg.text
+        # Imported cue markup is reused only when the client vouches this is
+        # still that import's text, never because the text happens to match.
+        vouched.append(vouch_cue_source(row, seg.text, seg.cue_source_id))
         merged.append(row)
     job["segments"] = merged
 
@@ -214,6 +217,13 @@ def _sync_job_segments(job: dict, req: DubRequest) -> None:
     i18n[lang] = {
         (str(row["id"]) if row.get("id") is not None else str(i)): row["text"]
         for i, row in enumerate(merged)
+    }
+    # Which imported cue each track's text still is, so a per-language export
+    # reuses markup only for the track that carried the import's own text.
+    job.setdefault("segments_i18n_cue_sources", {})[lang] = {
+        (str(row["id"]) if row.get("id") is not None else str(i)): cue_id
+        for i, (row, cue_id) in enumerate(zip(merged, vouched))
+        if cue_id
     }
 
 
@@ -567,6 +577,8 @@ async def dub_generate(job_id: str, req: DubRequest):
         # serialised the GPU loop; the batched-I/O design it replaced kept
         # it off the hot path on purpose. Flush every ~16 releases instead —
         # frequent enough to bound VRAM, rare enough to stay invisible.
+        from services.model_manager import release_device_cache
+
         _RELEASE_FLUSH_EVERY = 16
         _release_count = {"n": 0}
 
@@ -574,21 +586,17 @@ async def dub_generate(job_id: str, req: DubRequest):
             """Best-effort VRAM cleanup after a segment is safely on disk.
 
             Tensors are freed by the callers' own ``del`` once they fall out
-            of scope; this only throttles the device cache flush. ``*objs`` is
-            kept for call-site compatibility but intentionally unused — a local
-            ``del`` here would only unbind the parameter, never the caller's
-            reference.
+            of scope; this only throttles the device cache flush, which has to
+            cover every backend an engine can synthesize on (CUDA, MPS, XPU,
+            Ascend NPU) — the CUDA/MPS pair this used to open-code skipped the
+            rest. ``*objs`` is kept for call-site compatibility but
+            intentionally unused — a local ``del`` here would only unbind the
+            parameter, never the caller's reference.
             """
             _release_count["n"] += 1
             if _release_count["n"] % _RELEASE_FLUSH_EVERY != 0:
                 return
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    torch.mps.empty_cache()
-            except Exception:
-                pass
+            release_device_cache()
 
         # mix_<id> scratch WAVs written for silence/cached-fail/error slots are
         # pure assembly inputs (no preview/regen contract), so they're deleted

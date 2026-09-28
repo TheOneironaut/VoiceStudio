@@ -2,16 +2,17 @@ import {
   classifyError,
   urlFor,
   type ErrorClass,
-} from '../../../../../frontend/src/utils/errorDocsMap';
+} from '@shared/utils/errorDocsMap';
 import { ExternalLink } from './external-link';
-import { buildIssueSearchUrl } from '../../../../../frontend/src/utils/bugReportDocument';
+import { buildIssueSearchUrl } from '@shared/utils/bugReportDocument';
 import { Component, useEffect, type ReactNode, type ErrorInfo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BotIcon, CircleAlertIcon } from 'lucide-react';
-import { scrubText } from '../../../../../frontend/src/utils/scrub';
+import { scrubText } from '@shared/utils/scrub';
 import { ReportBug } from './report-bug';
 import { Button } from './ui/button';
 import { openRepairAgent } from '@/lib/repair-agent-events';
+import { captureException } from '@shared/utils/analytics';
 
 const MODULE_RETRY_PREFIX = 'voicestudio.moduleRetry:';
 const reloadRenderer = () => window.location.reload();
@@ -117,6 +118,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
     return { error };
   }
   componentDidCatch(error: Error, info: ErrorInfo) {
+    captureException(error, 'renderer:react-boundary');
     console.error('[VoiceStudio UI]', error, info.componentStack);
   }
   render() {

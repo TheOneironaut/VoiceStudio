@@ -137,6 +137,14 @@ it('passes a live nested-operation drain descriptor to POSIX managed backends', 
   expect(windows.env.OMNIVOICE_DESKTOP_DRAIN_FD).toBeUndefined();
 });
 
+it('passes the packaged analytics destination to its managed backend', () => {
+  vi.stubGlobal('__POSTHOG_PROJECT_TOKEN__', 'publishable-test-key');
+  vi.stubGlobal('__POSTHOG_HOST__', 'https://us.i.posthog.com');
+  const { env } = managedBackendSpawnOptions(3900);
+  expect(env.POSTHOG_PROJECT_TOKEN).toBe('publishable-test-key');
+  expect(env.POSTHOG_HOST).toBe('https://us.i.posthog.com');
+});
+
 it('recognizes only expected child-pipe close errors', () => {
   expect(isExpectedPipeClose(Object.assign(new Error('closed'), { code: 'EPIPE' }))).toBe(true);
   expect(isExpectedPipeClose(Object.assign(new Error('reset'), { code: 'ECONNRESET' }))).toBe(true);
@@ -574,4 +582,26 @@ it('only ever names a uv that is really there', () => {
     expect(env.OMNIVOICE_BUNDLED_UV).not.toBe('');
     expect(existsSync(env.OMNIVOICE_BUNDLED_UV)).toBe(true);
   }
+});
+
+it('exposes the current process signal separately from the durable crash journal', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
+  const supervisor = new BackendSupervisor();
+  const internal = supervisor as unknown as {
+    generation: number;
+    recoverAfterChildExit: (
+      gen: number,
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ) => Promise<void>;
+  };
+  internal.generation = 1;
+  const recovery = internal.recoverAfterChildExit(1, null, 'SIGSEGV');
+  await vi.advanceTimersByTimeAsync(10500);
+  await recovery;
+  expect(supervisor.status.exitSignal).toBe('SIGSEGV');
+  await supervisor.shutdown();
+  expect(supervisor.status.exitSignal).toBeUndefined();
+  vi.useRealTimers();
 });

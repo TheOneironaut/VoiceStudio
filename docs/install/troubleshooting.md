@@ -36,6 +36,8 @@ Before digging through the entries below, let the app diagnose itself:
   produces a zip (self-check report, recent classified errors, scrubbed log
   tails) you can drag straight onto the GitHub issue. Home paths and
   anything token-shaped are redacted before they leave your machine.
+  Slow renders: include `render_traces.json` from that bundle; it records local
+  stage timings and counts without scripts or audio ([details](../performance.md#local-render-diagnostics)).
 
   The report's `engine_execution` rows distinguish declared compatibility
   from observed runtime state. `evidence_state: not_loaded` means no actual
@@ -46,7 +48,39 @@ Before digging through the entries below, let the app diagnose itself:
   the engine. Subprocess engines report memory visibility as false because
   their accelerator allocations belong to the child process.
 
+## Backend cannot bind its local port
+
+Windows can reserve port ranges even when no process is listening. If the OS
+denies binding the default port 3900, Electron's managed backend selects another
+loopback port before launching; its API proxy and health checks follow that port
+automatically. Candidates advance by 1000, up to 16 alternatives, so additional
+app windows discover and attach to the same backend. A fresh launch retries the
+default after a fallback backend stops. This recovery is available on all desktop platforms.
+Occupied fallback ports must carry VoiceStudio's backend response marker before
+attachment; unrelated listeners are skipped. This marker distinguishes services,
+not malicious processes running as the same local user.
+If an identified backend is still starting, Electron waits within its startup
+budget instead of launching another process on that occupied port.
+It does not override an explicit `OMNIVOICE_PORT`, a custom backend command, or an
+externally managed backend. For those configurations, choose an allowed port in
+your launch environment. An ordinary “address already in use” conflict still uses
+the existing backend-attachment/conflict flow; VoiceStudio does not stop unrelated
+processes or change firewall rules.
+
 ## Generation failure diagnosis
+
+OmniVoice's in-process and subprocess engines both reuse an installed speech
+recognizer when reference audio has no transcript, including short clips sent
+through batch or API callers. A supplied transcript is preserved for short
+references. Subprocess reference recognition runs inside the killable child,
+under its synthesis watchdog, releasing reference ASR weights before loading TTS.
+Sidecar stderr is scrubbed for home directories and secrets before logging.
+This does not download an ASR model automatically: if no installed
+recognizer can transcribe the clip and no local model fallback is available,
+provide the matching transcript or explicitly install a speech-to-text model.
+Unknown or unverifiable ASR selections are skipped for automatic reference
+transcription. An explicitly selected OpenAI-compatible ASR provider retains its
+opt-in behavior; it does not need local model weights. Default ASR remains local.
 
 Streaming and HTTP generation failures can identify these causes. Electron and
 web clients show the recovery guidance in the selected language; API clients
@@ -57,11 +91,21 @@ receive a stable `docs_topic` and a safe fallback message, never private excepti
 | `GPU_ARCH_UNSUPPORTED` | The installed PyTorch build cannot run kernels on this GPU. Select CPU in Settings → Performance & Device, or use a PyTorch build compatible with the GPU. |
 | `WINDOWS_APP_CONTROL_BLOCKED` | Windows application control blocked a required file. Ask the administrator to allow the trusted VoiceStudio runtime, then restart the app. |
 | `AUDIO_IO_FAILED` | Check the audio format, free disk space, and file permissions; review the folder in Settings → Storage. |
+| `HF_MIRROR_UNREACHABLE` | The configured Hugging Face mirror could not be reached while fetching the engine's weights. Restore the official endpoint in Settings → Models → Hugging Face mirror, then retry. |
 
 Unsupported GPU builds and application-control blocks are terminal for the current
 stream: the client does not automatically render the whole passage again. After
 correcting the cause, start a new generation. Unknown failures retain generic
 guidance; a report with only `RuntimeError` does not establish which cause applies.
+
+An engine downloads its weights the first time it is used, so the first
+generation with a newly selected engine can fail on the download rather than on
+synthesis. Both outcomes are reported the same way: `/generate` and
+`/v1/audio/speech` answer **503** (`Retry-After`, `X-OmniVoice-Retryable`)
+naming the engine whose model could not be loaded, whether the download stalled
+past its budget or failed outright. A failed download is not a crash and is not
+reported as one; check the engine's **Weights** list in Model Catalogue, then
+retry.
 
 ## 1. `pkg_resources` missing (ModuleNotFoundError)
 
@@ -1209,6 +1253,12 @@ When torchaudio requires an unavailable TorchCodec installation, VoiceStudio wri
 
 Generation has a separate deadline from health checks. Default sidecar deadlines scale with text length and the host execution budget; per-engine timeout overrides remain supported. The outer job guard includes time for sidecar termination and error reporting. A timeout identifies the deadline, while a closed pipe without a timeout indicates a crash.
 
+VoiceStudio 0.5.6 could report an installed one-click TTS engine such as
+VoxCPM2 or MOSS-TTS-Nano as unavailable when **Test engine** probed its
+in-process adapter instead of the installed isolated runtime. Update to a
+newer desktop build; reinstalling the engine or downloading its model again
+does not correct the health-check resolver in 0.5.6.
+
 Per-engine receive overrides include `OMNIVOICE_CONFUCIUS4_RECV_TIMEOUT_S`, `OMNIVOICE_DOTS_TTS_RECV_TIMEOUT_S`, `OMNIVOICE_MOSS_TTS_V15_RECV_TIMEOUT_S`, and `OMNIVOICE_SUPERTONIC3_RECV_TIMEOUT_S` (seconds). Invalid or non-finite values use the default; values below 30 seconds are raised to 30.
 
 ### FFprobe alongside FFmpeg
@@ -1241,3 +1291,23 @@ model is ready and supports voice cloning. Use the Models link to choose one;
 the source recording and target voice are preserved when returning. Preset-only
 models such as MLX Kokoro cannot clone a target voice. This capability check does
 not download or load model weights.
+
+### Native backend crashes in Electron
+
+Crash details and bug reports keep the raw exit code and name recognized Windows
+faults (for example, `3221225477 (0xC0000005 STATUS_ACCESS_VIOLATION)`). The signed
+Windows representation `-1073741819` identifies the same fault. SIGSEGV and SIGILL
+are also identified as native faults. These failures happen below Python, so a
+Python traceback may not exist; include the captured crash details and system/GPU
+information when reporting them. The name identifies the failure category, not
+its cause: it does not by itself prove a driver, model, or memory problem.
+
+### ASR initialization errors
+
+A PyTorch Whisper initialization failure can come from an import, checkpoint,
+network or memory problem. The error preserves the original exception and the
+backend log contains its traceback. “PyTorch should be installed” alone does not
+prove that torch and torchvision versions are mismatched. Save the diagnostic
+bundle and check package versions in the environment running the backend before
+reinstalling anything. Faster Whisper is an alternative when only transcription
+is affected; it does not diagnose or repair the original environment.

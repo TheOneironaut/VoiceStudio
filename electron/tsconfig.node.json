@@ -6,6 +6,7 @@
     "lib": ["ES2023"],
     "module": "esnext",
     "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
     "types": ["node", "electron-vite/node"],
     "skipLibCheck": true,
     "strict": true,
@@ -16,5 +17,14 @@
     "moduleDetection": "force",
     "noEmit": true
   },
-  "include": ["electron.vite.config.ts", "src/main/**/*", "src/preload/**/*", "src/shared/**/*"]
+  "include": [
+    "electron.vite.config.ts",
+    "vite.web.config.ts",
+    "vite.shared.config.ts",
+    "tests/tauri-api-stub.ts",
+    "src/main/**/*",
+    "src/preload/**/*",
+    "src/shared/web-api-routing.ts",
+    "src/shared/repair-request.ts"
+  ]
 }

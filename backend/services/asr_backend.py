@@ -358,12 +358,51 @@ def _decode_audio_16k_mono(audio_path: str):
             "ffmpeg or clear the imageio-ffmpeg cache."
         ) from e
     except subprocess.CalledProcessError as e:
+        from services.ffmpeg_utils import raise_for_audio_extract_failure
+
+        # A file with no audio stream gets the shared actionable error, not
+        # ffmpeg's stream dump (NoAudioTrackError; raw stderr goes to the log).
+        raise_for_audio_extract_failure(e.stderr or b"", audio_path)
         stderr = (e.stderr or b"").decode(errors="replace")[:500]
         raise RuntimeError(f"Failed to decode audio for transcription: {stderr}") from e
     return np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
 
 
 # ── Protocol ────────────────────────────────────────────────────────────────
+
+
+#: Per-request decode options a backend may accept as keyword arguments on
+#: ``transcribe()``. Callers exposing OpenAI's transcription parameters
+#: (``/v1/audio/transcriptions`` and ``/translations``) pass only the ones a
+#: backend's signature declares, so an engine that cannot honour one is never
+#: handed it and never fails on an unexpected keyword.
+TRANSCRIBE_REQUEST_OPTIONS = ("language", "initial_prompt", "temperature", "task")
+
+
+def whisper_request_options(language, initial_prompt, temperature, task) -> dict:
+    """Whisper-family decode kwargs for the options that were actually set."""
+    opts: dict = {}
+    if language:
+        opts["language"] = language
+    if initial_prompt:
+        opts["initial_prompt"] = initial_prompt
+    if temperature is not None:
+        opts["temperature"] = float(temperature)
+    if task and task != "transcribe":
+        opts["task"] = task
+    return opts
+
+
+def whisper_checkpoint_translates(model_name: str | None) -> bool:
+    """Whether a Whisper checkpoint was trained for speech→English translation.
+
+    Turbo (large-v3-turbo) was fine-tuned on transcription data only and
+    returns the source language even with ``task="translate"``; English-only
+    ``*.en`` models and Distil-Whisper checkpoints are English-only too. Those
+    must be refused, not answered with untranslated text labelled English.
+    """
+    name = (model_name or "").lower()
+    return not ("turbo" in name or name.endswith(".en") or "distil" in name)
 
 
 class ASRBackend(ABC):
@@ -398,6 +437,11 @@ class ASRBackend(ABC):
     @abstractmethod
     def is_available(cls) -> tuple[bool, str]:
         ...
+
+    def supports_translation(self) -> bool:
+        """Whether ``transcribe(task="translate")`` really yields English.
+        Default False; Whisper backends answer from their loaded checkpoint."""
+        return False
 
     @abstractmethod
     def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
@@ -964,7 +1008,11 @@ class WhisperXBackend(ASRBackend):
         to faster-whisper's native word timestamps (already in result)."""
         return load_align_model(language_code, self._device)
 
-    def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
+    def supports_translation(self) -> bool:
+        return whisper_checkpoint_translates(self._model_name)
+
+    def transcribe(self, audio_path: str, *, word_timestamps: bool = True,
+                   language: str | None = None, task: str = "transcribe") -> dict:
         import whisperx  # used for whisperx.align() below
         self._ensure_asr()
         logger.info("whisperx transcribing %s (word_timestamps=%s)", audio_path, word_timestamps)
@@ -973,11 +1021,17 @@ class WhisperXBackend(ASRBackend):
         # Windows (#479). Same 16 kHz mono s16le array whisperx expects.
         audio = _decode_audio_16k_mono(audio_path)
         try:
-            result = self._asr.transcribe(audio)
+            # whisperx's pipeline takes language/task per call; prompt and
+            # temperature are fixed load-time asr_options, so this backend
+            # does not advertise them (the OpenAI route passes only what a
+            # backend's signature accepts).
+            result = self._asr.transcribe(
+                audio, **whisper_request_options(language, None, None, task),
+            )
         except IndexError:
             # WhisperX pipeline crashes with IndexError if VAD produces 0 segments
             logger.info("whisperx transcribe threw IndexError (likely 0 VAD segments). Returning empty result.")
-            result = {"segments": [], "language": "en"}
+            result = {"segments": [], "language": language or "en"}
             
         lang = result.get("language", "en")
 
@@ -1144,7 +1198,13 @@ class FasterWhisperBackend(ASRBackend):
             # the last error.
             raise last_err
 
-    def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
+    def supports_translation(self) -> bool:
+        return whisper_checkpoint_translates(self._model_name)
+
+    def transcribe(self, audio_path: str, *, word_timestamps: bool = True,
+                   language: str | None = None, initial_prompt: str | None = None,
+                   temperature: float | None = None,
+                   task: str = "transcribe") -> dict:
         self._ensure_model()
         logger.info(
             "faster-whisper transcribing %s (word_timestamps=%s)",
@@ -1160,6 +1220,7 @@ class FasterWhisperBackend(ASRBackend):
             word_timestamps=word_timestamps,
             vad_filter=True,  # built-in Silero VAD — cleaner segment starts
             **asr_decode_defaults(),
+            **whisper_request_options(language, initial_prompt, temperature, task),
         )
         segments = list(segments_iter)
         # Normalise to the shape segment_transcript(...) expects: a dict with
@@ -1253,7 +1314,13 @@ class MLXWhisperBackend(ASRBackend):
         except (ImportError, OSError, RuntimeError) as e:
             return False, f"mlx-whisper unavailable: {e}"
 
-    def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
+    def supports_translation(self) -> bool:
+        return whisper_checkpoint_translates(self._model_name)
+
+    def transcribe(self, audio_path: str, *, word_timestamps: bool = True,
+                   language: str | None = None, initial_prompt: str | None = None,
+                   temperature: float | None = None,
+                   task: str = "transcribe") -> dict:
         import mlx_whisper
         logger.info(
             "MLX Whisper transcribing %s (model=%s, word_timestamps=%s)",
@@ -1275,6 +1342,7 @@ class MLXWhisperBackend(ASRBackend):
             audio,
             path_or_hf_repo=self._model_name,
             word_timestamps=word_timestamps,
+            **whisper_request_options(language, initial_prompt, temperature, task),
         )
         # Forced alignment, same as WhisperX (#1127). On Apple Silicon this
         # backend replaces WhisperX for dubbing — CTranslate2 has no Metal
@@ -1319,6 +1387,23 @@ class MLXWhisperBackend(ASRBackend):
         except Exception as e:
             dt = time.perf_counter() - t0
             logger.warning("MLX Whisper warmup failed after %.1fs: %s", dt, e)
+
+
+    def unload(self) -> None:
+        # mlx-whisper owns the weights in a library-level singleton, not on
+        # this wrapper. Dropping the wrapper alone retains unified memory.
+        import sys
+        module = sys.modules.get("mlx_whisper.transcribe")
+        holder = getattr(module, "ModelHolder", None)
+        if holder is None:
+            return
+        holder.model = None
+        holder.model_path = None
+        import gc
+        gc.collect()
+        mx = sys.modules.get("mlx.core")
+        if mx is not None:
+            mx.clear_cache()
 
 
 # ── PyTorch Whisper fallback (CUDA / CPU via pipeline) ─────────────────────
@@ -1461,29 +1546,12 @@ class PyTorchWhisperBackend(ASRBackend):
                 device=device,
             )
         except Exception as e:
-            # #549: an incomplete transformers install fails to build the ASR
-            # pipeline (e.g. "Could not import module 'AutoFeatureExtractor'").
-            # The raw error is opaque; re-raise with an actionable next step so
-            # the toast tells the user how to recover instead of "no segments".
-            # #1376: "install is incomplete" is only ONE of the causes. A
-            # torch/torchvision version mismatch fails with the same lazy-import
-            # wording (transformers' __getattr__ wraps the real error), and for
-            # that cause reinstalling transformers alone fixes nothing — the
-            # trio has to move together, at the pinned versions, or the
-            # reinstall can itself resolve a drifted pair (#1357).
-            # Literal versions rather than the constraint file: desktop
-            # installs don't ship deploy/ (greptile on #1377); the lockstep
-            # test in tests/test_failure_classify.py keeps them current.
+            # Pipeline construction can fail for OOM, an unreadable checkpoint,
+            # missing packages or networking. Do not inject AutoFeatureExtractor
+            # into every exception: that makes the failure classifier invent a
+            # dependency mismatch and recommend an unrelated reinstall (#2128).
             raise RuntimeError(
-                "transformers ASR pipeline failed to import (AutoFeatureExtractor) "
-                "— either your transformers install is incomplete, or torch and "
-                "torchvision are mismatched (which fails with this exact wording). "
-                "Reinstall them together at the pinned versions: `uv pip install "
-                "--python .venv --reinstall torch==2.8.0 torchaudio==2.8.0 "
-                "torchvision==0.23.0 transformers` in the project folder — or use faster-whisper "
-                "(VoiceStudio's default ASR), which avoids the transformers "
-                "pipeline. "
-                f"Underlying: {e}"
+                f"PyTorch Whisper ASR initialization failed: {type(e).__name__}: {e}"
             ) from e
 
     #: Batch sizes to try on CUDA, largest first. The VRAM preflight only sizes
@@ -1520,9 +1588,19 @@ class PyTorchWhisperBackend(ASRBackend):
         except Exception:
             pass  # Some builds have no CUDA cache to release.
 
-    def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
+    def supports_translation(self) -> bool:
+        # A reused TTS-model ASR head may differ from the env default: ask the
+        # loaded pipeline first.
+        loaded = getattr(getattr(self._pipe, "model", None), "name_or_path", None)
+        return whisper_checkpoint_translates(loaded or self._model_name())
+
+    def transcribe(self, audio_path: str, *, word_timestamps: bool = True,
+                   language: str | None = None, task: str = "transcribe") -> dict:
         import soundfile as sf
         self._ensure_pipe()
+        # transformers' Whisper generate() takes language/task; a prompt needs
+        # tokenizer-specific prompt_ids, so it is not advertised here.
+        generate_kwargs = whisper_request_options(language, None, None, task)
         # #2039: libsndfile cannot open MP4/M4A (AAC), which /transcribe and
         # the MCP tool both accept. Those decode through the validated ffmpeg
         # path, which resamples to 16 kHz properly. Anything soundfile can
@@ -1541,6 +1619,7 @@ class PyTorchWhisperBackend(ASRBackend):
                 return_timestamps="word" if word_timestamps else True,
                 chunk_length_s=15,
                 batch_size=batch_size,
+                **({"generate_kwargs": generate_kwargs} if generate_kwargs else {}),
             )
 
         if self._on_cuda():
@@ -2479,17 +2558,36 @@ class OpenAICompatASRBackend(ASRBackend):
             http_client=DefaultHttpxClient(follow_redirects=False),
         )
 
-    def transcribe(self, audio_path: str, *, word_timestamps: bool = True) -> dict:
+    def supports_translation(self) -> bool:
+        # The remote server's own /audio/translations decides (and errors).
+        return True
+
+    def transcribe(self, audio_path: str, *, word_timestamps: bool = True,
+                   language: str | None = None, initial_prompt: str | None = None,
+                   temperature: float | None = None,
+                   task: str = "transcribe") -> dict:
         logger.info(
             "OpenAI-compat ASR transcribing %s (base_url=%s, model=%s)",
             audio_path, self._base_url, self._model,
         )
         client = self._client()
+        extra: dict = {}
+        if initial_prompt:
+            extra["prompt"] = initial_prompt
+        if temperature is not None:
+            extra["temperature"] = temperature
+        if task == "translate":
+            endpoint = client.audio.translations
+        else:
+            endpoint = client.audio.transcriptions
+            if language:
+                extra["language"] = language
         try:
             with open(audio_path, "rb") as f:
                 try:
-                    resp = client.audio.transcriptions.create(
+                    resp = endpoint.create(
                         file=f, model=self._model, response_format="verbose_json",
+                        **extra,
                     )
                 except Exception:
                     # Minimal/older compatible servers reject verbose_json
@@ -2497,8 +2595,8 @@ class OpenAICompatASRBackend(ASRBackend):
                     # failure. Re-open: the SDK may have partially consumed
                     # the file handle on the first attempt.
                     f.seek(0)
-                    resp = client.audio.transcriptions.create(
-                        file=f, model=self._model, response_format="json",
+                    resp = endpoint.create(
+                        file=f, model=self._model, response_format="json", **extra,
                     )
         except Exception as exc:
             # Never leak a raw SDK/httpx exception object (auth headers,
@@ -2508,7 +2606,10 @@ class OpenAICompatASRBackend(ASRBackend):
                 f"OpenAI-compatible ASR server at {self._base_url!r} failed: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
-        return self._adapt_response(resp)
+        out = self._adapt_response(resp)
+        if language and not getattr(resp, "language", None):
+            out["language"] = language
+        return out
 
     @staticmethod
     def _adapt_response(resp) -> dict:
@@ -2952,7 +3053,9 @@ class ASRModelMissingError(RuntimeError):
         super().__init__(asr_model_missing_detail(payload))
 
 
-def load_active_asr_backend(*, asr_pipe=None, require_installed: bool = False) -> ASRBackend:
+def load_active_asr_backend(
+    *, asr_pipe=None, require_installed: bool = False, defer_pytorch: bool = False,
+) -> ASRBackend:
     """:func:`get_active_asr_backend` + eager ``ensure_loaded()``, degrading
     past backends whose deep import chain is broken (#1185).
 
@@ -2975,11 +3078,16 @@ def load_active_asr_backend(*, asr_pipe=None, require_installed: bool = False) -
     primary would let the fallback silently auto-download multi-GB weights.
     A fallback without installed weights raises :class:`ASRModelMissingError`
     (typed payload → the caller's download CTA).
+    Reference transcription uses ``defer_pytorch`` to leave that pipeline to
+    the TTS model's installed-only fallback, without eagerly loading a second
+    copy that the reference caller would immediately discard.
     """
     from core.scrub import scrub_text
     tried: set[str] = set()
     while True:
         backend = get_active_asr_backend(asr_pipe=asr_pipe)
+        if defer_pytorch and isinstance(backend, PyTorchWhisperBackend):
+            return backend
         bid = getattr(backend, "id", "?")
         if tried or require_installed:
             # Preflight the SPECIFIC candidate about to load — not the global
@@ -3140,7 +3248,26 @@ def _installed_reference_fallbacks(
 
 
 def _transcribe_reference_candidates(
-    candidates: list[ASRBackend], audio_path: str,
+    candidates: list[ASRBackend], audio_path: str, *, release_after: bool = False,
+) -> str:
+    # Sidecars serialize ASR and TTS; release even preloaded candidates skipped
+    # after the first success before loading the much larger synthesis model.
+    with contextlib.ExitStack() as releases:
+        if release_after:
+            for backend in candidates:
+                releases.callback(_release_reference_backend, backend)
+        return _try_reference_candidates(candidates, audio_path, release_after=release_after)
+
+
+def _release_reference_backend(backend: ASRBackend) -> None:
+    try:
+        backend.unload()
+    except Exception:  # noqa: BLE001 - release is best-effort
+        logger.warning("reference ASR fallback unload failed")
+
+
+def _try_reference_candidates(
+    candidates: list[ASRBackend], audio_path: str, *, release_after: bool,
 ) -> str:
     for backend in candidates:
         try:
@@ -3152,18 +3279,15 @@ def _transcribe_reference_candidates(
             candidate_text = (candidate_text or "").strip()
             if candidate_text:
                 return candidate_text
-        except Exception as exc:  # noqa: BLE001 - try the next local engine
-            logger.warning("transcribe_reference: %s failed (%s)", backend.id, exc)
+        except Exception:  # noqa: BLE001 - try the next local engine
+            logger.warning("transcribe_reference: %s failed", backend.id)
         finally:
-            if getattr(backend, "_reference_ephemeral", False):
-                try:
-                    backend.unload()
-                except Exception:  # noqa: BLE001 - release is best-effort
-                    logger.warning("reference ASR fallback unload failed", exc_info=True)
+            if not release_after and getattr(backend, "_reference_ephemeral", False):
+                _release_reference_backend(backend)
     return ""
 
 
-def transcribe_reference(audio_path: str) -> str | None:
+def transcribe_reference(audio_path: str, *, release_after: bool = False) -> str | None:
     """Transcribe a voice-clone reference clip with the active ASR backend.
 
     Voice cloning without a user-supplied transcript used to fall through to
@@ -3176,6 +3300,8 @@ def transcribe_reference(audio_path: str) -> str | None:
     through and the model's installed-only fallback still gets its chance.
 
     Results are cached by audio content (#1032) — see the cache notes above.
+    ``release_after`` is for serialized sidecar use only: unload all selected
+    ASR weights before TTS loads, without evicting the API's shared live ASR.
     """
     fingerprint = _ref_audio_fingerprint(audio_path)
     if fingerprint is not None:
@@ -3192,18 +3318,23 @@ def transcribe_reference(audio_path: str) -> str | None:
     # introduced spurious words at the start of short generations. Neither
     # branch may download weights implicitly.
     candidates: list[ASRBackend] = []
-    offline_missing = asr_model_missing_error()
+    # This provider is only reachable through an explicit settings/env choice;
+    # it has no local weights to verify and must keep the user's opt-in working.
+    selected_remote = active_backend_id() == "openai-compat-asr"
+    offline_missing = asr_model_missing_error(require_installed=not selected_remote)
     if offline_missing is None:
         try:
             # `load_*`, not `get_*`: a backend whose shallow probe passes but
             # whose deep import chain is broken must fall through cleanly.
-            backend = load_active_asr_backend()
+            backend = load_active_asr_backend(
+                require_installed=not selected_remote, defer_pytorch=True,
+            )
             if not isinstance(backend, PyTorchWhisperBackend):
                 candidates.append(backend)
-        except Exception as e:  # noqa: BLE001 — reference ASR is best-effort
-            logger.warning("transcribe_reference: offline ASR unavailable (%s)", e)
+        except Exception:  # noqa: BLE001 — reference ASR is best-effort
+            logger.warning("transcribe_reference: offline ASR unavailable")
 
-    capture_missing = asr_model_missing_error(purpose="dictation")
+    capture_missing = asr_model_missing_error(purpose="dictation", require_installed=True)
     if capture_missing is None:
         try:
             capture = get_capture_asr_backend()
@@ -3212,14 +3343,14 @@ def transcribe_reference(audio_path: str) -> str | None:
                 for item in candidates
             ):
                 candidates.append(capture)
-        except Exception as e:  # noqa: BLE001 — reference ASR is best-effort
-            logger.warning("transcribe_reference: dictation ASR unavailable (%s)", e)
+        except Exception:  # noqa: BLE001 — reference ASR is best-effort
+            logger.warning("transcribe_reference: dictation ASR unavailable")
 
-    text = _transcribe_reference_candidates(candidates, audio_path)
+    text = _transcribe_reference_candidates(candidates, audio_path, release_after=release_after)
     fallbacks: list[ASRBackend] = []
     if not text:
         fallbacks = _installed_reference_fallbacks(candidates)
-        text = _transcribe_reference_candidates(fallbacks, audio_path)
+        text = _transcribe_reference_candidates(fallbacks, audio_path, release_after=release_after)
 
     if not candidates and not fallbacks:
         logger.info(

@@ -207,13 +207,13 @@ def test_crash_source_is_single_the_frontend_never_emits_one():
     crash source. The frontend SDK wrapper must never grow its own crash
     event (the shell's marker describes the same death the sentinel reports)."""
     ts = os.path.join(
-        os.path.dirname(__file__), "..", "frontend", "src", "utils", "analytics.ts"
+        os.path.dirname(__file__), "..", "electron", "src", "shared", "utils", "analytics.ts"
     )
     with open(ts, encoding="utf-8") as f:
         src = f.read()
     assert "app_crashed" not in src
     crash_ts = os.path.join(
-        os.path.dirname(__file__), "..", "frontend", "src", "utils", "backendCrash.ts"
+        os.path.dirname(__file__), "..", "electron", "src", "shared", "utils", "backendCrash.ts"
     )
     with open(crash_ts, encoding="utf-8") as f:
         assert "app_crashed" not in f.read()
@@ -331,7 +331,7 @@ def test_uninstall_ping_info_written_when_enabled_and_removed_when_not(
     assert info.exists()
     payload = json.loads(info.read_text())
     assert payload["token"] == "phc_test"
-    assert payload["host"] == "https://eu.i.posthog.com"
+    assert payload["host"] == "https://us.i.posthog.com"
     assert payload["distinct_id"] == analytics.installation_id()
     assert payload["app_version"] == analytics._app_version()
     # Consent withdrawn → the file goes with it.
@@ -349,7 +349,7 @@ def test_uninstall_ping_info_written_for_a_source_build_with_the_default_token(
     assert info.exists()
     payload = json.loads(info.read_text())
     assert payload["token"] == analytics._PUBLIC_PROJECT_TOKEN
-    assert payload["host"] == "https://eu.i.posthog.com"
+    assert payload["host"] == "https://us.i.posthog.com"
 
 
 def test_uninstall_ping_info_never_written_without_any_token(sent, monkeypatch, tmp_path):

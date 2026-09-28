@@ -58,6 +58,8 @@ export interface BackendStatus {
   /** Human-readable detail for failed/crashed/port_in_use. */
   message?: string;
   exitCode?: number | null;
+  /** Termination signal for the current backend run, never the persisted crash journal. */
+  exitSignal?: string | null;
   /** Milliseconds since the spawn/attach attempt started. */
   elapsedMs: number;
   /** Last ~40 lines of backend stdout/stderr (newest last) for the splash log. */
@@ -272,6 +274,11 @@ export interface UninstallTarget {
 }
 
 export interface VoiceStudioBridge {
+  pro: {
+    status(): Promise<{ active: boolean; configured: boolean; error?: 'offline' | 'invalid' | 'storage' }>;
+    activate(key: string): Promise<{ active: boolean; configured: boolean; error?: 'offline' | 'invalid' | 'storage' }>;
+    deactivate(): Promise<{ active: boolean; configured: boolean; error?: 'offline' | 'invalid' | 'storage' }>;
+  };
   repair: {
     list(): Promise<RepairAgentInfo[]>;
     getState(): Promise<RepairAgentState>;
@@ -313,7 +320,7 @@ export interface VoiceStudioBridge {
     stop(token: string): Promise<void>;
   };
   app: {
-    /** From frontend/package.json via __APP_VERSION__ / extraMetadata. */
+    /** From the root package.json via __APP_VERSION__ / extraMetadata. */
     version: string;
     platform: NodeJS.Platform;
     isDev: boolean;

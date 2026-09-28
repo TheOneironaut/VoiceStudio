@@ -7,18 +7,18 @@ import { AgentFixButton } from '@/components/agent-fix-button';
 import { getBridge } from '@/components/bridge';
 import { WorkspaceHeader } from '@/components/app-shell/workspace-header';
 import { Switch } from '@/components/ui/switch';
-import { MAX_COOKIE_EXPORT_BYTES } from '../../../../../../frontend/src/utils/cookieExport';
+import { MAX_COOKIE_EXPORT_BYTES } from '@shared/utils/cookieExport';
 import {
   hasCompleteTranslation,
   multiLangTargets,
-} from '../../../../../../frontend/src/utils/multiLang';
-import { segmentGenInputs } from '../../../../../../frontend/src/utils/segments';
-import { clampSegmentEdit } from '../../../../../../frontend/src/utils/timeline';
+} from '@shared/utils/multiLang';
+import { segmentGenInputs } from '@shared/utils/segments';
+import { clampSegmentEdit } from '@shared/utils/timeline';
 import {
   dialectLabel,
   dialectMatchesLang,
   dialectOptionsFor,
-} from '../../../../../../frontend/src/api/dialects';
+} from '@shared/api/dialects';
 import { DubExportPanel } from './dub-export-panel';
 import { DubTimeline } from './dub-timeline';
 import { PasteTranslation } from './paste-translation';
@@ -26,6 +26,7 @@ import { GlossaryPanel } from './glossary-panel';
 import { CastingBoard } from './casting-board';
 import { DubbingDemo } from './dubbing-demo';
 import { CheckpointBanner, type CheckpointStage } from './checkpoint-banner';
+import { ConfirmDialog } from '../clone/confirm-dialog';
 import { useDubOnsets } from './use-dub-onsets';
 import { useDubLivePreview } from './use-dub-live-preview';
 import { setDubQuality, setDubProduction, setDubTranslationOptions } from './dub-session';
@@ -41,7 +42,10 @@ import {
   type DragEvent,
 } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Link } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
+import { runRendererTask } from '@/lib/global-error-recovery';
+import { canCreateStoryFromDub, loadDubIntoStories, storiesDraftOccupied } from './dub-to-story';
+import { useLongformSession } from '../longform/longform-session';
 import { useTranslation } from 'react-i18next';
 import {
   AlertCircleIcon,
@@ -50,6 +54,7 @@ import {
   ChevronDownIcon,
   ClipboardPasteIcon,
   Clock3Icon,
+  AudioLinesIcon,
   FilmIcon,
   GaugeIcon,
   HeadphonesIcon,
@@ -92,10 +97,11 @@ import { apiFetch, apiJson, apiPath, describeError, isAbortError } from '@/lib/a
 import { createObjectUrl, revokeObjectUrl } from '@/lib/audio/object-url';
 import { requestPlaybackSeek } from '@/lib/audio/playback-clock';
 import { beginAppActivity } from '@/lib/app-activity';
-import { LANG_CODES } from '../../../../../../frontend/src/utils/languages';
+import { LANG_CODES } from '@shared/utils/languages';
 import { cn } from '@/lib/utils';
 import {
   useDubSession,
+  useDubCancelling,
   uploadDub,
   translateDub,
   translateDubBatch,
@@ -114,6 +120,7 @@ import {
   redoDubEdit,
   resumeDub,
   discardDubRecovery,
+  resetDubSession,
   dismissDubError,
   applyDubQc,
   applyDubTranslationRows,
@@ -208,6 +215,7 @@ export function DubPage() {
   const { t, i18n } = useTranslation();
   const reviewMode = useReviewMode();
   const session = useDubSession();
+  const cancelling = useDubCancelling();
   const editHistory = useDubEditHistory();
   const input = useRef<HTMLInputElement>(null);
   const subtitles = useRef<HTMLInputElement>(null);
@@ -222,6 +230,7 @@ export function DubPage() {
   const [cookieFile, setCookieFile] = useState<File>();
   const [cookieError, setCookieError] = useState(false);
   const [fetchSubs, setFetchSubs] = useState(false);
+  const [removeVideoOpen, setRemoveVideoOpen] = useState(false);
   const [preview, setPreview] = useState('original');
   const [segmentPreview, setSegmentPreview] = useState<{
     id: string;
@@ -272,6 +281,26 @@ export function DubPage() {
   const llmSkills = useLlmSkills();
   const modelCatalogue = useModelCatalogue();
   const profiles = useProfiles();
+  const navigate = useNavigate();
+  const longform = useLongformSession();
+  const [storyOpen, setStoryOpen] = useState(false);
+  // A dub already knows who says what: diarisation grouped the segments and the
+  // Cast strip gave each speaker a voice. Rebuilding that as a Story by hand
+  // means retyping every line, so offer it once there are segments to carry.
+  const storyFromDub = canCreateStoryFromDub(session);
+  // Loading replaces whatever is in Stories, so ask first — but only when there
+  // is something to lose.
+  const storyOccupied = storiesDraftOccupied(longform.drafts.stories);
+  const createStoryFromDub = () => {
+    if (!profiles.isSuccess) return;
+    const loaded = loadDubIntoStories(session.segments, {
+      profiles: profiles.data,
+      unknownSpeakerLabel: t('dubWorkspace.storySpeaker'),
+    });
+    // Nothing was loaded — a render started while the confirm was open, say.
+    // Navigating would show the old script and look like the action worked.
+    if (loaded) runRendererTask('Create Story from dub', () => navigate({ to: '/stories' }));
+  };
   // The current remote Dubbing producer still prepares a local fallback
   // before dispatch, so do not promise remote-only readiness yet.
   const ttsBlocker = useTtsReadiness('dub');
@@ -621,6 +650,19 @@ export function DubPage() {
     };
   }, [warmPreviewPaths]);
 
+  const removeVideo = () => {
+    if (busy || cancelling || session.recovery || !resetDubSession()) return;
+    livePreview.stop();
+    segmentPreviewAbort.current?.abort();
+    segmentPreviewAbort.current = null;
+    setSegmentPreview(null);
+    setPreviewingSegmentId(null);
+    setPreview('original');
+    setUrl('');
+    setCookieFile(undefined);
+    setCookieError(false);
+  };
+
   const previewDubSegment = async (segment: (typeof session.segments)[number]) => {
     if (!session.jobId || previewingSegmentId) return;
     segmentPreviewAbort.current?.abort();
@@ -817,7 +859,36 @@ export function DubPage() {
         >
           {compactSourceLabel(session.filename)}
         </span>
+        {storyFromDub && (
+          <Button
+            variant="ghost"
+            size="sm"
+            // editLongform is a no-op while a longform render is running, so the
+            // action would navigate to Stories having loaded nothing.
+            disabled={Boolean(longform.active) || !profiles.isSuccess}
+            title={
+              longform.active
+                ? t('dubWorkspace.storyBusy')
+                : !profiles.isSuccess
+                  ? t(profiles.isError ? 'common.error' : 'common.loading')
+                  : undefined
+            }
+            onClick={() => (storyOccupied ? setStoryOpen(true) : createStoryFromDub())}
+          >
+            <AudioLinesIcon />
+            {t('dubWorkspace.createStory')}
+          </Button>
+        )}
       </WorkspaceHeader>
+      <ConfirmDialog
+        open={storyOpen}
+        onOpenChange={setStoryOpen}
+        title={t('dubWorkspace.createStory')}
+        description={t('dubWorkspace.createStoryConfirm')}
+        confirmLabel={t('dubWorkspace.createStory')}
+        destructive
+        onConfirm={createStoryFromDub}
+      />
       <div className="flex min-h-0 flex-1 @max-[40rem]:flex-col">
         <SecondarySidebar
           title={t('dubWorkspace.title')}
@@ -893,14 +964,34 @@ export function DubPage() {
                     }
                   }}
                 >
-                  <Input
-                    type="url"
-                    value={url}
-                    onChange={(event) => setUrl(event.target.value)}
-                    aria-label={t('dub.paste_url')}
-                    placeholder={t('dub.paste_url')}
-                    disabled={busy || Boolean(session.recovery)}
-                  />
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        type="url"
+                        value={url}
+                        onChange={(event) => setUrl(event.target.value)}
+                        aria-label={t('dub.paste_url')}
+                        placeholder={t('dub.paste_url')}
+                        disabled={busy || Boolean(session.recovery)}
+                      />
+                    </div>
+                    {url && (
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        aria-label={t('common.clear')}
+                        disabled={busy || Boolean(session.recovery)}
+                        onClick={() => {
+                          setUrl('');
+                          setCookieFile(undefined);
+                          setCookieError(false);
+                        }}
+                      >
+                        {t('common.clear')}
+                      </Button>
+                    )}
+                  </div>
                   {url && (
                     <details className="space-y-2">
                       <summary className="cursor-pointer text-xs text-muted-foreground">
@@ -976,6 +1067,27 @@ export function DubPage() {
                   onClick={() => input.current?.click()}
                 >
                   {t('dub.change_file')}
+                </Button>
+                <ConfirmDialog
+                  open={removeVideoOpen}
+                  onOpenChange={setRemoveVideoOpen}
+                  title={t('dub.remove_video')}
+                  description={t('dub.remove_video_confirm')}
+                  confirmLabel={t('dub.remove_video')}
+                  onConfirm={removeVideo}
+                />
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  aria-label={t('dub.remove_video')}
+                  disabled={busy || cancelling || Boolean(session.recovery)}
+                  onClick={() => {
+                    if (session.segments.length > 0 || editHistory.undoDepth > 0)
+                      setRemoveVideoOpen(true);
+                    else removeVideo();
+                  }}
+                >
+                  {t('dub.remove_video')}
                 </Button>
               </div>
             )}
@@ -1305,21 +1417,25 @@ export function DubPage() {
                   maxLength={5000}
                   value={session.translationInstructions || ''}
                   disabled={busy || Boolean(session.recovery)}
-                  onChange={(event) => setDubTranslationOptions({ translationInstructions: event.target.value })}
+                  onChange={(event) =>
+                    setDubTranslationOptions({ translationInstructions: event.target.value })
+                  }
                   className="w-full resize-y rounded-lg border border-input bg-background/40 px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                 />
-                <p id="dub-translation-instructions-help" className="text-xs leading-5 text-muted-foreground">
+                <p
+                  id="dub-translation-instructions-help"
+                  className="text-xs leading-5 text-muted-foreground"
+                >
                   {t('dubStyle.help')}
                 </p>
               </div>
             )}
             {session.quality !== 'agent' && (
-              <details className="group space-y-2 border-t border-border/50 pt-2">
-                <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium text-muted-foreground">
+              <div className="space-y-2 border-t border-border/50 pt-2">
+                <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                   <GaugeIcon className="size-3.5" />
                   {t('settings.translate_quality')}
-                  <ChevronDownIcon className="ml-auto size-3.5 transition-transform group-open:rotate-180" />
-                </summary>
+                </div>
                 <p className="text-xs text-muted-foreground">
                   {t('settings.translate_quality_desc')}
                 </p>
@@ -1388,7 +1504,7 @@ export function DubPage() {
                     />
                   </label>
                 </div>
-              </details>
+              </div>
             )}
             {session.translationFallback && (
               <div role="status" className="space-y-2 text-xs text-muted-foreground">

@@ -176,11 +176,16 @@ function writeChannel(channel: UpdateChannel): void {
 export class DesktopUpdater {
   private listeners = new Set<(state: UpdateState) => void>();
   private state: UpdateState;
+  private readonly supported: boolean;
   private checkInFlight: Promise<UpdateState> | null = null;
   private downloadInFlight: Promise<UpdateState> | null = null;
 
-  constructor(private readonly fetcher: typeof fetch = fetch) {
-    const supported = desktopUpdatesSupported(app.isPackaged);
+  constructor(
+    private readonly fetcher: typeof fetch = fetch,
+    edition: 'standard' | 'gemini' = __VOICESTUDIO_EDITION__,
+  ) {
+    const supported = desktopUpdatesSupported(app.isPackaged, edition);
+    this.supported = supported;
     this.state = {
       status: supported ? 'idle' : 'unsupported',
       currentVersion: app.getVersion(),
@@ -276,7 +281,7 @@ export class DesktopUpdater {
   }
 
   async check(quiet = false): Promise<UpdateState> {
-    if (!app.isPackaged || ['downloading', 'downloaded'].includes(this.state.status))
+    if (!this.supported || ['downloading', 'downloaded'].includes(this.state.status))
       return this.snapshot();
     if (this.checkInFlight) return this.checkInFlight;
     const operation = (async () => {
@@ -304,7 +309,7 @@ export class DesktopUpdater {
   }
 
   async download(): Promise<UpdateState> {
-    if (!app.isPackaged || this.state.status !== 'available') return this.snapshot();
+    if (!this.supported || this.state.status !== 'available') return this.snapshot();
     if (this.downloadInFlight) return this.downloadInFlight;
     const operation = (async () => {
       this.patch({
@@ -347,12 +352,13 @@ export class DesktopUpdater {
   }
 
   install(): void {
-    if (!app.isPackaged || this.state.status !== 'downloaded') return;
+    if (!this.supported || this.state.status !== 'downloaded') return;
     autoUpdater.quitAndInstall(false, true);
   }
 
   async setChannel(channel: UpdateChannel): Promise<UpdateState> {
     if (channel !== 'stable' && channel !== 'preview') throw new Error('Invalid update channel');
+    if (!this.supported) return this.snapshot();
     writeChannel(channel);
     this.state = {
       status: app.isPackaged ? 'idle' : 'unsupported',
@@ -367,7 +373,7 @@ export class DesktopUpdater {
   }
 
   private configureFeed(feed: UpdateChannel = this.state.channel): void {
-    if (!app.isPackaged) return;
+    if (!this.supported) return;
     autoUpdater.allowPrerelease = this.state.channel === 'preview';
     const feedChannel = feedChannelName(feed);
     autoUpdater.channel = feedChannel;

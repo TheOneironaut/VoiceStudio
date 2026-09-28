@@ -3,7 +3,7 @@ import type { DubExportPreferences } from './dub-export';
 import {
   MAX_COOKIE_EXPORT_BYTES,
   _cookieTransportAllowed,
-} from '../../../../../../frontend/src/utils/cookieExport';
+} from '@shared/utils/cookieExport';
 import { projectSession, type DubProject } from '../projects/project-format';
 import { DUB_DRAFT_KEY, restoreDubDraft } from './dub-draft';
 import { Store } from '@tanstack/store';
@@ -17,9 +17,13 @@ import { publicFailureFromEvent, type PublicFailure } from '@/lib/api/failure';
 import {
   assignSpeakerProfile,
   applySpeakerCloneDefaults,
+  cueSourceId,
   segmentGenInputs,
-} from '../../../../../../frontend/src/utils/segments';
-import { hasCompleteTranslation } from '../../../../../../frontend/src/utils/multiLang';
+  settleCueSources,
+  withOriginalCueSource,
+  withoutCueSource,
+} from '@shared/utils/segments';
+import { hasCompleteTranslation } from '@shared/utils/multiLang';
 import {
   ATTRIBUTION_FIELDS,
   applyAttribution,
@@ -32,9 +36,9 @@ import {
   nextSegmentId,
   partsFor,
   type SegmentPart,
-} from '../../../../../../frontend/src/utils/segmentParts';
-import { commitMoveResize } from '../../../../../../frontend/src/utils/timeline';
-import type { PasteTranslationRow } from '../../../../../../frontend/src/utils/pasteTranslations';
+} from '@shared/utils/segmentParts';
+import { commitMoveResize } from '@shared/utils/timeline';
+import type { PasteTranslationRow } from '@shared/utils/pasteTranslations';
 import type {
   DubAgentTranslationRequest,
   DubAgentTranslationResult,
@@ -54,6 +58,11 @@ export interface DubSegment {
   instruct?: string;
   target_lang?: string;
   translations?: Record<string, string>;
+  /** The cue a caption import wrote, kept for unchanged exports. */
+  webvtt_source?: { id?: string; text: string; cue: string };
+  srt_source?: { id?: string; text: string; cue: string };
+  /** Set while `text` is still that import's words; cleared by any other write. */
+  cue_source_id?: string;
   merge_parts?: SegmentPart[];
   merge_parts_original?: SegmentPart[];
   original_duration?: number;
@@ -313,11 +322,17 @@ export const setDubTarget = (target: string, code?: string) =>
     ...current,
     target,
     segments: code
-      ? current.segments.map((segment) => ({
-          ...segment,
-          text: segment.translations?.[code] || segment.text_original || segment.text,
-          agent_generated_lang: segment.agent_generated_langs?.includes(code) ? code : undefined,
-        }))
+      ? current.segments.map((segment) => {
+          const translated = segment.translations?.[code];
+          const next = {
+            ...segment,
+            text: translated || segment.text_original || segment.text,
+            agent_generated_lang: segment.agent_generated_langs?.includes(code) ? code : undefined,
+          };
+          // Back on the untouched original, the row shows the import's words
+          // again, so its caption markup applies once more (#2295).
+          return translated ? withoutCueSource(next) : withOriginalCueSource(next);
+        })
       : current.segments,
   }));
 export const setDubMultiTargets = (multiTargets: Array<{ lang: string; code: string }>) => {
@@ -333,6 +348,10 @@ export const setDubMultiTargets = (multiTargets: Array<{ lang: string; code: str
   });
 };
 export const useDubSession = () => useStore(dubSession);
+/** Reactive mirror of the module-level cancel-in-flight flag. Ephemeral by
+ * design: never persisted, so a reload can never wedge the UI disabled. */
+export const dubCancelling = new Store(false);
+export const useDubCancelling = () => useStore(dubCancelling);
 const editHistory = new Store({ undoDepth: 0, redoDepth: 0 });
 const undoStack: DubSegment[][] = [];
 const redoStack: DubSegment[][] = [];
@@ -426,7 +445,13 @@ let controller: AbortController | null = null;
 let cancelling = false;
 let batchRunId = 0;
 const patch = (value: Partial<DubSession>) =>
-  dubSession.setState((current) => ({ ...current, ...value }));
+  dubSession.setState((current) => ({
+    ...current,
+    ...value,
+    // An imported cue whose text no longer matches is dropped for good, so
+    // no writer can revive it by landing on equal text later (#2295).
+    ...(value.segments ? { segments: settleCueSources(value.segments) } : {}),
+  }));
 const QC_INVALIDATING_FIELDS = new Set([
   'text',
   'profile_id',
@@ -449,9 +474,11 @@ const invalidateQc = (segment: DubSegment): DubSegment => {
 };
 const patchSegment = (segment: DubSegment, value: Partial<DubSegment>) => {
   const fields = Object.keys(value);
+  // Any text write (edit, paste) replaces the import's words, even when equal.
+  const base = 'text' in value ? withoutCueSource(segment) : segment;
   const next = fields.some((field) => QC_INVALIDATING_FIELDS.has(field))
-    ? { ...invalidateQc(segment), ...value, id: segment.id }
-    : { ...segment, ...value, id: segment.id };
+    ? { ...invalidateQc(base), ...value, id: segment.id }
+    : { ...base, ...value, id: segment.id };
   if (segment.merge_parts && fields.some((field) => MERGE_PART_FIELDS.has(field))) {
     next.merge_parts = undefined;
     if (fields.some((field) => ATTRIBUTION_FIELD_NAMES.has(field)))
@@ -1138,7 +1165,7 @@ export async function translateDubWithAgent(
           const agentLanguages = new Set(segment.agent_generated_langs || []);
           agentLanguages.add(target);
           return {
-            ...segment,
+            ...withoutCueSource(segment),
             text,
             translations: { ...segment.translations, [target]: text },
             translate_error: undefined,
@@ -1269,7 +1296,7 @@ export async function translateDub(
           if (row?.error) translateErrors[target] = row.error;
           else delete translateErrors[target];
           return {
-            ...segment,
+            ...(row?.error ? segment : withoutCueSource(segment)),
             text: translatedText,
             translations: {
               ...segment.translations,
@@ -1397,6 +1424,8 @@ export async function generateDub(
                 end: segment.end,
                 gain: segment.gain !== undefined && segment.gain !== 1 ? segment.gain : undefined,
                 ...segmentGenInputs(segment),
+                // Keeps the imported caption markup for unchanged exports (#2295).
+                cue_source_id: cueSourceId(segment),
               })),
               segment_ids: current.segments.map((segment) => segment.id),
               regen_only: regenOnly?.length ? regenOnly : null,
@@ -1503,7 +1532,7 @@ export async function generateDub(
             const text = changed.get(segment.id);
             return text
               ? {
-                  ...segment,
+                  ...withoutCueSource(segment),
                   text,
                   translations: { ...segment.translations, [languageCode]: text },
                   sync_ratio: undefined,
@@ -1708,6 +1737,7 @@ export async function cancelDub() {
   batchRunId += 1;
   patch({ batchProgress: undefined });
   cancelling = true;
+  dubCancelling.setState(() => true);
   controller?.abort();
   try {
     const results = await Promise.allSettled([
@@ -1737,6 +1767,7 @@ export async function cancelDub() {
     else patch({ recovery, error: DUB_STOP_FAILED });
   } finally {
     cancelling = false;
+    dubCancelling.setState(() => false);
   }
 }
 
@@ -1772,6 +1803,39 @@ export function discardDubRecovery(): void {
     exportOptions: current.exportOptions,
   }));
   persist();
+}
+
+/** Drop the current source so a new video or URL can be started. Production
+ * preferences (target, quality, voice, timing, …) are kept; everything
+ * source-specific (job, segments, transcript, errors) is cleared. */
+export function resetDubSession(): boolean {
+  if (controller || cancelling) return false;
+  const current = dubSession.state;
+  clearDubEditHistory();
+  dubSession.setState(() => ({
+    ...initial,
+    target: current.target,
+    multiTargets: current.multiTargets,
+    quality: current.quality,
+    agentCli: current.agentCli,
+    autoGlossary: current.autoGlossary,
+    reflectPass: current.reflectPass,
+    condenseSuggest: current.condenseSuggest,
+    dialect: current.dialect,
+    translationInstructions: current.translationInstructions,
+    timingStrategy: current.timingStrategy,
+    voiceMatch: current.voiceMatch,
+    sourceLanguage: current.sourceLanguage,
+    numSpeakers: current.numSpeakers,
+    fitOptions: current.fitOptions,
+    steps: current.steps,
+    guidance: current.guidance,
+    speed: current.speed,
+    instruct: current.instruct,
+    exportOptions: current.exportOptions,
+  }));
+  persist();
+  return true;
 }
 
 export async function resumeDub() {

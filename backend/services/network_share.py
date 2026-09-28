@@ -6,6 +6,7 @@ are untouched (no restart). Disabling stops it, closing the 0.0.0.0 socket.
 Loopback-only by default: nothing binds 0.0.0.0 until enable() is called.
 """
 import asyncio
+import ipaddress
 import logging
 import os
 import secrets
@@ -38,6 +39,62 @@ def backend_port() -> int:
         return _DEFAULT_BACKEND_PORT
 
 
+def backend_self_url() -> str:
+    """Base URL for in-process callers that reach this backend over HTTP.
+
+    ``OMNIVOICE_API_URL`` wins when set (reverse proxy, remote worker).
+    Otherwise the URL follows the host and port the backend actually binds —
+    ``OMNIVOICE_BIND_HOST`` + ``OMNIVOICE_PORT``, the same variables uvicorn
+    and the desktop shells use — so a backend moved off 3900 never calls back
+    into a stale default port. Wildcard binds are reached over loopback,
+    which the auth gates never challenge.
+    """
+    override = os.environ.get("OMNIVOICE_API_URL", "").strip().rstrip("/")
+    if override:
+        return override
+    host = os.environ.get("OMNIVOICE_BIND_HOST", "127.0.0.1").strip()
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        ip = None  # a hostname ("localhost", a LAN name): use it as given
+    if not host or host == "localhost":
+        host = "127.0.0.1"
+    elif ip is not None and ip.is_unspecified:
+        # A wildcard bind also listens on loopback; reach it there.
+        host = "::1" if ip.version == 6 else "127.0.0.1"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{backend_port()}"
+
+
+def backend_auth_headers(base_url: str) -> dict:
+    """Bearer header for an HTTP caller of this backend, if one is warranted.
+
+    ``OMNIVOICE_API_KEY`` is sent only over https or to a loopback host: a
+    remote plain-http target would expose the master key on the wire (the
+    same rule ``backend.speech_client`` enforces). Loopback never needs it,
+    but sending it there is harmless.
+    """
+    from urllib.parse import urlsplit
+
+    key = os.environ.get("OMNIVOICE_API_KEY", "").strip()
+    if not key:
+        return {}
+    target = urlsplit(base_url)
+    host = (target.hostname or "").strip("[]")
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        loopback = False
+    if target.scheme.lower() != "https" and not loopback:
+        logger.warning(
+            "OMNIVOICE_API_KEY not sent to %s: remote API keys require https://",
+            f"{target.scheme}://{target.hostname}",
+        )
+        return {}
+    return {"Authorization": f"Bearer {key}"}
+
+
 def share_port_base() -> int:
     """The first port LAN sharing tries to bind on 0.0.0.0.
 
@@ -68,9 +125,46 @@ class _ShareRuntime:
     state: ShareState = field(default_factory=ShareState)
     server: Optional["uvicorn.Server"] = None
     task: Optional["asyncio.Task"] = None
+    mcp_allowed_hosts: list[str] = field(default_factory=list)
+    mcp_allowed_origins: list[str] = field(default_factory=list)
+    lifecycle_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 _runtime = _ShareRuntime()
+
+
+def _set_mcp_lan_hosts(app, addresses: list[str], *, enabled: bool) -> None:
+    """Open MCP's DNS-rebinding allowlist only while PIN-gated sharing runs."""
+    security = getattr(app.state, "mcp_transport_security", None)
+    if security is None:
+        if not enabled:
+            _runtime.mcp_allowed_hosts = []
+            _runtime.mcp_allowed_origins = []
+        return
+    if enabled:
+        hosts = [f"{address}:*" for address in addresses]
+        added_hosts = []
+        added_origins = []
+        for host in hosts:
+            if host not in security.allowed_hosts:
+                security.allowed_hosts.append(host)
+                added_hosts.append(host)
+            for scheme in ("http", "https"):
+                origin = f"{scheme}://{host}"
+                if origin not in security.allowed_origins:
+                    security.allowed_origins.append(origin)
+                    added_origins.append(origin)
+        _runtime.mcp_allowed_hosts = added_hosts
+        _runtime.mcp_allowed_origins = added_origins
+        return
+    for host in _runtime.mcp_allowed_hosts:
+        while host in security.allowed_hosts:
+            security.allowed_hosts.remove(host)
+    for origin in _runtime.mcp_allowed_origins:
+        while origin in security.allowed_origins:
+            security.allowed_origins.remove(origin)
+    _runtime.mcp_allowed_hosts = []
+    _runtime.mcp_allowed_origins = []
 
 
 def lan_ipv4_addresses() -> list:
@@ -107,6 +201,11 @@ def get_state() -> ShareState:
 
 
 async def enable(app) -> ShareState:
+    async with _runtime.lifecycle_lock:
+        return await _enable(app)
+
+
+async def _enable(app) -> ShareState:
     if _runtime.state.enabled:
         return _runtime.state
     port = _find_free_port(share_port_base())
@@ -134,6 +233,8 @@ async def enable(app) -> ShareState:
                 _runtime.server = server
                 _runtime.state = ShareState(True, port, pin, lan_ipv4_addresses())
             app.state.network_share = _runtime.state
+            if _runtime.state.enabled:
+                _set_mcp_lan_hosts(app, _runtime.state.lan_addresses, enabled=True)
             raise
         except Exception as exc:
             if _runtime.task.done():
@@ -144,6 +245,7 @@ async def enable(app) -> ShareState:
             _runtime.server = server
             _runtime.state = ShareState(True, port, pin, lan_ipv4_addresses())
             app.state.network_share = _runtime.state
+            _set_mcp_lan_hosts(app, _runtime.state.lan_addresses, enabled=True)
             logger.warning("Failed LAN listener startup could not be cleaned up")
             raise RuntimeError(
                 "LAN share listener could not be stopped. Retry Disable before enabling again."
@@ -153,10 +255,16 @@ async def enable(app) -> ShareState:
     _runtime.server = server
     _runtime.state = ShareState(True, port, pin, lan_ipv4_addresses())
     app.state.network_share = _runtime.state
+    _set_mcp_lan_hosts(app, _runtime.state.lan_addresses, enabled=True)
     return _runtime.state
 
 
 async def disable(app) -> ShareState:
+    async with _runtime.lifecycle_lock:
+        return await _disable(app)
+
+
+async def _disable(app) -> ShareState:
     if _runtime.server is not None:
         _runtime.server.should_exit = True
         if _runtime.task is not None:
@@ -167,6 +275,7 @@ async def disable(app) -> ShareState:
                 raise RuntimeError(
                     "LAN sharing could not be disabled. Retry after active connections close."
                 ) from exc
+    _set_mcp_lan_hosts(app, [], enabled=False)
     _runtime.server = _runtime.task = None
     _runtime.state = ShareState()
     app.state.network_share = _runtime.state

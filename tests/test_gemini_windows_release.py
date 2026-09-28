@@ -49,6 +49,7 @@ def test_gemini_windows_release_is_gated_by_electron_runtime_smoke():
 
     assert "paths:" in workflow
     assert '      - "package.json"' in workflow
+    assert "frontend/package.json" not in workflow
     assert '      - "bun.lock"' in workflow
     assert '      - "README.md"' in workflow
     assert '      - "CHANGELOG.md"' in workflow

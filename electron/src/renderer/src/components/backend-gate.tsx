@@ -24,11 +24,11 @@ import {
 import { Spinner } from '@/components/ui/spinner';
 import { ConfirmDialog } from '@/features/clone/confirm-dialog';
 import { useBackendStatus } from '@/hooks/use-backend-status';
-import i18n, { APP_LANGUAGES, setAppLanguage, type AppLocale } from '@/i18n';
+import i18n, { APP_LANGUAGE_ITEMS, APP_LANGUAGES, setAppLanguage, type AppLocale } from '@/i18n';
 import { brandIcon } from '@/lib/brand';
 import { cn } from '@/lib/utils';
 import type { RuntimeRegion } from '../../../preload/index.d';
-import { getBridge } from './bridge';
+import { getBridge, isMac } from './bridge';
 
 interface BackendGateProps {
   children: ReactNode;
@@ -82,6 +82,12 @@ export function BackendGate({ children, repairDock }: BackendGateProps) {
   const [choosingRegion, setChoosingRegion] = useState(false);
   const [cleanConfirmOpen, setCleanConfirmOpen] = useState(false);
   const setup = status.stage === 'setup_required';
+  const regionItems = (['auto', 'global', 'china', 'russia', 'restricted'] as const).map(
+    (region) => ({
+      value: region,
+      label: t(region === 'auto' ? 'bootstrap.auto_detect' : `bootstrap.region_${region}`),
+    }),
+  );
   const installing = status.stage === 'installing';
   const setupFailed = setup && Boolean(status.message);
   const running = status.stage === 'starting' || status.stage === 'attaching' || installing;
@@ -158,7 +164,12 @@ export function BackendGate({ children, repairDock }: BackendGateProps) {
         recovering && 'z-30 bg-background/90 backdrop-blur-sm',
       )}
     >
-      <header className="workspace-titlebar flex shrink-0 items-center gap-2 border-b border-border/50 px-5">
+      <header
+        className={cn(
+          'workspace-titlebar flex shrink-0 items-center gap-2 border-b border-border/50 px-5',
+          isMac() && 'pl-24',
+        )}
+      >
         <img src={brandIcon} alt="" className="size-6 shrink-0" />
         <span className="whitespace-nowrap text-sm font-medium tracking-tight">
           {t('app.name')}
@@ -314,6 +325,7 @@ export function BackendGate({ children, repairDock }: BackendGateProps) {
                 <label className="space-y-1 text-left text-xs text-muted-foreground">
                   <span>{t('settings.language')}</span>
                   <Select
+                    items={APP_LANGUAGE_ITEMS}
                     value={i18n.resolvedLanguage || i18n.language}
                     onValueChange={(value) => void setAppLanguage(value as AppLocale)}
                   >
@@ -335,6 +347,7 @@ export function BackendGate({ children, repairDock }: BackendGateProps) {
                 <label className="space-y-1 text-left text-xs text-muted-foreground">
                   <span>{t('firstrun.region_label')}</span>
                   <Select
+                    items={regionItems}
                     value={status.runtimeRegion || 'auto'}
                     disabled={choosingRegion || restarting}
                     onValueChange={async (value) => {
@@ -353,17 +366,11 @@ export function BackendGate({ children, repairDock }: BackendGateProps) {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent align="end">
-                      {(['auto', 'global', 'china', 'russia', 'restricted'] as const).map(
-                        (region) => (
-                          <SelectItem key={region} value={region}>
-                            {t(
-                              region === 'auto'
-                                ? 'bootstrap.auto_detect'
-                                : `bootstrap.region_${region}`,
-                            )}
-                          </SelectItem>
-                        ),
-                      )}
+                      {regionItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </label>

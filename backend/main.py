@@ -44,6 +44,17 @@ from core.win_subprocess import install as _install_no_window  # noqa: E402
 
 _install_no_window()
 
+# Windows (#2276): one client resetting its connection mid-accept (WinError 64
+# etc., typical of AV/VPN loopback inspection) makes asyncio's ProactorEventLoop
+# close the LISTENING socket, so the backend lives on but never answers again.
+# Re-arm accept on transient errors instead. Class-level patch, so it covers
+# every launch path (`python main.py`, the Electron `uvicorn main:app` CLI
+# which imports this module before binding) and every server on the loop.
+# No-op off Windows. See core/win_accept_guard.py.
+from core.win_accept_guard import install as _install_accept_guard  # noqa: E402
+
+_install_accept_guard()
+
 # #564: also make the project's OWN `omnivoice` package importable from source
 # when the venv's editable install is missing/broken (interrupted/offline
 # `uv sync`, antivirus-quarantined `_editable_impl_omnivoice.pth`, …). Without
@@ -715,6 +726,8 @@ def _phase_a_build_inner() -> None:
     )
     from api.routers import mcp_bindings as _mcp_bindings_router  # noqa: E402
     from api.routers import workers as workers_router  # noqa: E402
+    from api.routers import telephony_twilio as _telephony_twilio_router  # noqa: E402
+    from api.routers import calls as _calls_router  # noqa: E402
     _router_modules.extend([
         system, profiles, profile_images, exports, generation, voice_convert, dub_core, dub_generate,
         dub_export, dub_translate, projects, glossary, engines, tools,
@@ -723,6 +736,7 @@ def _phase_a_build_inner() -> None:
         openai_compat, tts_stream, marketplace, personas, sonitranslate,
         audiobook, longform_jobs, pronunciation, settings_router,
         media_tools_router, auth_router, _mcp_bindings_router, workers_router,
+        _telephony_twilio_router, _calls_router,
     ])
     # Download-acceleration state, once, for triage-from-logs (FDL-03).
     try:
@@ -770,11 +784,12 @@ def _phase_a_finalize() -> None:
         app.mount("/demo_audio", StaticFiles(directory=_demo_dir), name="demo_audio")
 
     # SPA shell LAST so the "/" StaticFiles mount can't shadow any router.
-    _frontend_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    from core.spa_inject import frontend_dist_dir, is_valid_public_api_base, inject_api_base
+
+    _frontend_path = frontend_dist_dir()
     if os.path.exists(_frontend_path):
         # Runtime API-base override (Docker / reverse-proxy): inject
         # OMNIVOICE_PUBLIC_API_BASE into index.html; unset → untouched.
-        from core.spa_inject import is_valid_public_api_base, inject_api_base
 
         _public_api_base = os.environ.get("OMNIVOICE_PUBLIC_API_BASE", "").strip().rstrip("/")
         _index_path = os.path.join(_frontend_path, "index.html")
@@ -805,7 +820,7 @@ def _phase_a_finalize() -> None:
 
         @app.get("/", include_in_schema=False)
         def _dev_fallback():
-            return RedirectResponse(url="http://localhost:3901")
+            return RedirectResponse(url=f"http://localhost:{_ui_port()}")
 
     # An early /docs or /openapi.json hit may have cached a schema without
     # the routers — bust it so the next request rebuilds the full one.
@@ -888,6 +903,11 @@ async def _phase_b(app: FastAPI) -> None:
             logger.info("Startup: marked %d orphaned job(s) as failed.", swept)
     except Exception:
         logger.exception("Startup job-sweep failed (non-fatal).")
+    # #2279: note the voices root in the longform cache before anything can
+    # move the data dir, so legacy-keyed chapters stay findable after a move.
+    from services.longform_render import record_startup_voices_root
+
+    record_startup_voices_root()
 
     _startup_progress.begin_step("services_start")
     # Reapply an explicitly saved speed/quality profile after the local model
@@ -1039,6 +1059,14 @@ async def _phase_b(app: FastAPI) -> None:
     except Exception:
         logger.exception("Worker agent startup failed (continuing without it)")
 
+    # Phone calls (opt-in): the separate loopback telephony listener resumes
+    # only when the user left the Twilio integration enabled.
+    try:
+        from api.routers.telephony_twilio import start_gateway_if_enabled
+        await start_gateway_if_enabled()
+    except Exception:
+        logger.exception("Telephony gateway startup failed (continuing without it)")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1166,6 +1194,11 @@ async def lifespan(app: FastAPI):
         await worker_service.stop()
     except Exception:
         logger.exception("Remote worker shutdown failed")
+    try:
+        from services.telephony import gateway as telephony_gateway
+        await telephony_gateway.stop()
+    except Exception:
+        logger.exception("Telephony gateway shutdown failed")
     logger.info("Shutdown: cleaning up…")
     # Flip model_manager into shutdown mode, so a model load in flight (or
     # still queued) on a GPU-pool thread classifies executor rejections as a
@@ -1366,6 +1399,23 @@ def _safe_validation_input(value):
     return value
 
 
+from core.failure import NoAudioTrackError, no_audio_track_detail  # noqa: E402
+
+
+@app.exception_handler(NoAudioTrackError)
+async def no_audio_track_handler(request: Request, exc: NoAudioTrackError):
+    """422 for an upload with no audio stream, on every route that decodes one.
+
+    The structured detail carries ``docs_topic`` so the desktop client shows
+    its localized message; ffmpeg's own output stays in the backend log.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={"detail": no_audio_track_detail()},
+        headers=_cors_headers_for(request),
+    )
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """422 for a malformed request — never a 500, never an audio-sized body.
@@ -1485,7 +1535,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 
 
-_SHELL_PATHS = {"/", "/index.html", "/favicon.ico", "/health"}
+_SHELL_PATHS = {"/", "/index.html", "/favicon.ico", "/early-error-capture.js", "/health"}
 
 # Paths that answer while deferred startup is still running. The shutdown
 # signal must exist before the ordinary system router so a bounded Windows
@@ -1741,6 +1791,8 @@ _allowed = os.environ.get(
 # Registered FIRST → innermost: the startup gate holds every request except
 # the two probe paths until the deferred startup completes (and is a no-op
 # forever after).
+from core.render_trace import RenderTraceMiddleware
+app.add_middleware(RenderTraceMiddleware)
 app.add_middleware(StartupGateMiddleware)
 
 # Inert unless a PIN is set. CORS is registered after both auth gates below so
@@ -1790,7 +1842,7 @@ _mimetypes.add_type("audio/wav",  ".wav")
 _mimetypes.add_type("audio/flac", ".flac")
 
 # ── Health check ────────────────────────────────────────────────────────
-# Used by Docker health checks, load balancers, and the Tauri desktop shell.
+# Used by Docker health checks, load balancers, and the Electron desktop shell.
 # Answers from the moment the socket binds: 503 with the current startup step
 # while the deferred phases run (curl -f / the shell's probes treat that as
 # not-ready, exactly like the connection-refused it replaces), the full body
@@ -1948,11 +2000,11 @@ if __name__ == "__main__":
     # Distinct exit code for "the port was already taken" (#1223), so the
     # desktop shell can tell that apart from a crash without parsing an
     # OS-translated error string. Kept out of the 0-2 range the interpreter
-    # itself uses, and mirrored in frontend/src-tauri/src/backend.rs.
+    # itself uses, and mirrored in electron/src/main/backend.ts.
     _EXIT_PORT_IN_USE = 78  # EX_CONFIG, sysexits.h
 
     # Port 3900 picked to dodge common 8000 conflicts (Django/Rails/Jupyter).
-    # Rust sidecar launcher in lib.rs::BACKEND_PORT must stay in sync.
+    # Electron's backend supervisor must stay in sync.
     #
     # SECURITY: default to loopback (127.0.0.1) so the API isn't reachable
     # from the LAN out of the box. VoiceStudio ships no authentication; binding

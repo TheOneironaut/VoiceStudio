@@ -1,4 +1,4 @@
-import { readTextFile } from '../../../../../../frontend/src/utils/readTextFile';
+import { readTextFile } from '@shared/utils/readTextFile';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import {
   BookOpenTextIcon,
@@ -12,7 +12,9 @@ import { AudioLinesIcon } from 'lucide-react';
 import { SecondarySidebar } from '@/components/workspace-sidebar';
 import { WorkspaceHeader } from '@/components/app-shell/workspace-header';
 import { PipelineFailure } from '@/components/pipeline-failure';
-import { importToText } from '../../../../../../frontend/src/utils/importStory';
+import { importToText } from '@shared/utils/importStory';
+import { cueSheetFor } from './cue-sheet';
+import { saveLocalFile } from '@/lib/local-export';
 import { StoryCast, StoryEditor } from './story-editor';
 import { clearedScriptPatch, scriptSize } from './story-clear';
 import { ConfirmDialog } from '../clone/confirm-dialog';
@@ -29,14 +31,14 @@ import {
   scriptStats,
   formatRuntimeClock,
   validateScript,
-} from '../../../../../../frontend/src/utils/audiobookScript';
+} from '@shared/utils/audiobookScript';
 import { BookSettings } from './book-settings';
 import { duplicateWords } from './book-options';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { DownloadIcon, SparklesIcon } from 'lucide-react';
+import { DownloadIcon, ListIcon, SparklesIcon } from 'lucide-react';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { WaveformPlayer } from '@/components/waveform-player';
@@ -50,16 +52,17 @@ import { useProfiles } from '@/hooks/use-profiles';
 import { apiJson, apiPath, describeError } from '@/lib/api/client';
 import { saveExport } from '@/lib/export-history';
 import { EngineLanguagePicker } from '@/features/clone/engine-language-picker';
-import { LANG_CODES } from '../../../../../../frontend/src/utils/languages';
+import { LANG_CODES } from '@shared/utils/languages';
 import {
   editLongform,
   dismissLongformError,
   renderLongform,
   stopLongform,
   useLongformSession,
+  storiesImportEpoch,
   type Mode,
 } from './longform-session';
-import { SAMPLE_AUDIOBOOK_SCRIPT } from '../../../../../../frontend/src/data/sampleAudiobook';
+import { SAMPLE_AUDIOBOOK_SCRIPT } from '@shared/data/sampleAudiobook';
 import { useTtsReadiness } from '@/hooks/use-tts-readiness';
 interface Recovery {
   job_id: string;
@@ -141,11 +144,12 @@ export function LongformPage({ mode }: { mode: Mode }) {
     />
   );
   const importFile = async (file: File) => {
+    const importEpoch = storiesImportEpoch.current;
     setImporting(true);
     setLocalError(null);
     try {
       let text: string;
-      if (mode === 'stories' && /\.(txt|md|srt)$/i.test(file.name))
+      if (mode === 'stories' && /\.(txt|md|srt|vtt)$/i.test(file.name))
         text = importToText(file.name, await readTextFile(file));
       else {
         const body = new FormData();
@@ -156,8 +160,10 @@ export function LongformPage({ mode }: { mode: Mode }) {
         });
         text = data.text;
       }
+      if (mode === 'stories' && importEpoch !== storiesImportEpoch.current) return;
       set(mode === 'audiobook' ? { script: text } : { importText: text });
     } catch (cause) {
+      if (mode === 'stories' && importEpoch !== storiesImportEpoch.current) return;
       setLocalError(describeError(cause));
     } finally {
       setImporting(false);
@@ -180,6 +186,25 @@ export function LongformPage({ mode }: { mode: Mode }) {
       setLocalError(describeError(cause));
     } finally {
       setExporting(false);
+    }
+  };
+  // The m4b embeds its chapters, but mp3 has no portable way to carry them, and
+  // players, podcast hosts and show-notes want the timestamps as text. What
+  // belongs in the sheet is decided in cue-sheet.ts; this only saves it.
+  const cueSheet = cueSheetFor(draft.outputChapters, draft.output, (n) =>
+    t('audiobook.chapter_n', { n }),
+  );
+  const downloadCueSheet = async () => {
+    if (!cueSheet) return;
+    setLocalError(null);
+    try {
+      // Native save dialog under Electron, like every other local export.
+      await saveLocalFile(
+        new Blob([cueSheet.body], { type: 'text/plain;charset=utf-8' }),
+        cueSheet.filename,
+      );
+    } catch (cause) {
+      setLocalError(describeError(cause));
     }
   };
   return (
@@ -349,7 +374,9 @@ export function LongformPage({ mode }: { mode: Mode }) {
                 <input
                   aria-label={t('audiobook.import')}
                   type="file"
-                  accept={mode === 'stories' ? '.txt,.md,.srt,.epub,.pdf' : '.txt,.md,.epub,.pdf'}
+                  accept={
+                    mode === 'stories' ? '.txt,.md,.srt,.vtt,.epub,.pdf' : '.txt,.md,.epub,.pdf'
+                  }
                   disabled={locked}
                   className="sr-only"
                   onChange={(e) => {
@@ -483,15 +510,23 @@ export function LongformPage({ mode }: { mode: Mode }) {
                       </p>
                     )}
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={exporting}
-                    onClick={() => void download()}
-                  >
-                    <DownloadIcon />
-                    {t('audiobook.download')}
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    {cueSheet && (
+                      <Button variant="ghost" size="sm" onClick={() => void downloadCueSheet()}>
+                        <ListIcon />
+                        {t('audiobook.download_cues')}
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={exporting}
+                      onClick={() => void download()}
+                    >
+                      <DownloadIcon />
+                      {t('audiobook.download')}
+                    </Button>
+                  </div>
                 </div>
                 {mode === 'audiobook' ? (
                   <SyncedAudiobookPlayer

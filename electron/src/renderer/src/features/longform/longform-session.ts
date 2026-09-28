@@ -2,16 +2,16 @@ import {
   DEFAULT_OVERRIDES,
   overridesToRequest,
   type Overrides,
-} from '../../../../../../frontend/src/utils/longformOverrides';
+} from '@shared/utils/longformOverrides';
 import { castVoice } from './cast-map';
-import { parseCastNames } from '../../../../../../frontend/src/utils/audiobookScript';
+import { parseCastNames } from '@shared/utils/audiobookScript';
 import { restoreBookOptions, lexiconMap, type BookOptions } from './book-options';
-import { createCoalescedJsonStorage } from '../../../../../../frontend/src/utils/coalescedJsonStorage';
+import { createCoalescedJsonStorage } from '@shared/utils/coalescedJsonStorage';
 import { Store } from '@tanstack/store';
 import { useStore } from '@tanstack/react-store';
 import { apiFetch } from '@/lib/api/client';
-import { consumeLongformStream } from '../../../../../../frontend/src/utils/longformStream';
-import { storyToSpans } from '../../../../../../frontend/src/utils/storyToSpans';
+import { consumeLongformStream } from '@shared/utils/longformStream';
+import { storyToSpans } from '@shared/utils/storyToSpans';
 import { beginAppActivity } from '@/lib/app-activity';
 import { publicFailureFromEvent, type PublicFailure } from '@/lib/api/failure';
 export type Mode = 'stories' | 'audiobook';
@@ -31,6 +31,8 @@ export interface AudiobookRenderChapter {
   title: string;
   status: string;
   duration_s?: number;
+  /** Exact length in the embedded m4b chapters; sent by newer backends only. */
+  duration_ms?: number;
   error?: string;
 }
 export interface Draft extends BookOptions {
@@ -153,6 +155,8 @@ export const longformSession = new Store<Session>({
   stopped: false,
 });
 export const useLongformSession = () => useStore(longformSession);
+/** Fences document imports that finish after a new dub replaces the Stories draft. */
+export const storiesImportEpoch = { current: 0 };
 const patch = (value: Partial<Session>) => longformSession.setState((s) => ({ ...s, ...value }));
 export function editLongform(mode: Mode, value: Partial<Draft>) {
   if (longformSession.state.active) return;
@@ -284,6 +288,9 @@ export async function renderLongform(mode: Mode, resumeId?: string) {
               status: event.type === 'chapter_error' ? 'failed' : event.cached ? 'cached' : 'done',
               ...(Number.isFinite(Number(event.duration_s))
                 ? { duration_s: Number(event.duration_s) }
+                : {}),
+              ...(event.duration_ms != null && Number.isFinite(Number(event.duration_ms))
+                ? { duration_ms: Number(event.duration_ms) }
                 : {}),
               ...(event.type === 'chapter_error'
                 ? {

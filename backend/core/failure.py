@@ -49,6 +49,51 @@ _SECRET_NAME_RE = re.compile(r"(TOKEN|KEY|SECRET)", re.IGNORECASE)
 _HTTP_401 = re.compile(r"(?<![\w.-])401(?![\w-])(?!\.\d)")
 _REDACTED_VALUE = "***REDACTED***"
 
+#: VoiceStudio-owned sentence for a media file with no audio stream. Every
+#: audio-extract site raises :class:`NoAudioTrackError` with it (probed with
+#: ffprobe first, recognized from ffmpeg's stderr as a fallback), so the user
+#: sees this instead of ffmpeg's exit-234 dump, and ``classify`` names the
+#: class from it on every surface.
+NO_AUDIO_TRACK_MESSAGE = (
+    "This file has no audio track, so there is no speech to transcribe, dub "
+    "or clone. Choose a video or audio file that contains sound."
+)
+
+
+class NoAudioTrackError(ValueError):
+    """The input media has no audio stream — nothing to extract, transcribe or clone."""
+
+    code = "no_audio_track"
+    docs_topic = "NO_AUDIO_TRACK"
+
+    def __init__(self, message: str = NO_AUDIO_TRACK_MESSAGE):
+        super().__init__(message)
+
+
+def is_no_audio_stream_stderr(text: "str | bytes | None") -> bool:
+    """True when ffmpeg's stderr says the input had no audio stream to extract.
+
+    ``-vn`` extraction prints "Output file does not contain any stream" (older
+    builds: "Output file #0 does not contain any stream"); an explicit audio
+    map prints "Stream map '0:a:0' matches no streams".
+    """
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    low = (text or "").lower()
+    return "does not contain any stream" in low or (
+        "stream map '0:a" in low and "matches no streams" in low
+    )
+
+
+def no_audio_track_detail() -> dict[str, str]:
+    """Structured HTTP ``detail`` for a no-audio upload (the client localizes it)."""
+    return {
+        "code": NoAudioTrackError.code,
+        "docs_topic": NoAudioTrackError.docs_topic,
+        "message": NO_AUDIO_TRACK_MESSAGE,
+        "hint": _HINTS["NO_AUDIO_TRACK"],
+    }
+
 # One-line "what to do" per docs-taxonomy key. Keys mirror error_docs_map's
 # taxonomy; the docs URL itself stays owned by error_docs_map.
 _HINTS: dict[str, str] = {
@@ -97,7 +142,7 @@ _HINTS: dict[str, str] = {
     # fail with "file not found" for exactly the users most likely to need it
     # (greptile on #1377). tests/test_failure_classify.py pins these literals
     # to the constraint file so they cannot drift when the pins bump.
-    "TRANSFORMERS_IMPORT": "Your transformers install is incomplete, or a package it loads models through (torchaudio, torchvision) is missing or mismatched with your torch — a torch/torchvision version mismatch fails with exactly this wording. Reinstall them together at the pinned versions (`uv pip install --python .venv --reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 transformers` in the project folder), then restart the backend. If only transcription is affected, switching ASR to faster-whisper (Use on its row in Model Catalogue) also works around it.",
+    "TRANSFORMERS_IMPORT": "A transformers component could not load. Missing packages and torch/torchvision version mismatches are possible causes, not a diagnosis. Check the underlying traceback and installed package versions first. If a package mismatch or incomplete install is confirmed, reinstall them together at the pinned versions (`uv pip install --python .venv --reinstall torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 transformers` in the project folder), then restart the backend. If only transcription is affected, switching ASR to faster-whisper (Use on its row in Model Catalogue) also works around it.",
     "WINDOWS_APP_CONTROL_BLOCKED": "Windows refused to load a file VoiceStudio needs — an Application Control policy (Smart App Control, WDAC, or AppLocker) blocked it. On a personal PC: Windows Security → App & browser control → Smart App Control → Off (Windows only lets you turn it off once — re-enabling requires a Windows reset), then restart VoiceStudio. On a managed/work PC, ask IT to allow the VoiceStudio install folder.",
     "WINDOWS_PAGING_FILE_TOO_SMALL": "Windows ran out of virtual memory while mapping the model into memory — its paging file is smaller than the model needs. This is not the same as your RAM being full, and closing other apps usually won't fix it: Windows has to be allowed to back the mapping. Set a bigger paging file — Settings → System → About → Advanced system settings → Performance → Settings → Advanced → Virtual memory → Change: untick \"Automatically manage\", pick your system drive, choose \"Custom size\" and set both Initial and Maximum to at least 32768 MB (more than the model's size), then OK and restart Windows. A smaller/quantized engine (OmniVoice GGUF, Supertonic-3) also avoids the large mapping entirely.",
     "WINDOWS_UNTRUSTED_MOUNT": "Windows refused to walk a folder on the way to this file because the path crosses a mount point it does not trust (WinError 448). That is a Windows rule about the VOLUME, not about VoiceStudio or the file itself — it turns up on Dev Drives, on mounted VHD/ReFS volumes, and on junctions pointing into another user profile, so retrying the same link cannot help. Point VoiceStudio at a folder on an ordinary local drive instead: Settings → Storage → data directory, or the download/output folder named in the message. If that folder has to stay where it is, trust the volume with `fsutil devdrv trust <drive>:` from an elevated prompt and restart.",
@@ -130,6 +175,11 @@ _HINTS: dict[str, str] = {
     "MODEL_DOWNLOAD_INTERRUPTED": "A model download was cut off mid-request, and the component it was fetching then failed to load. Nothing is wrong with your install — reinstalling won't help, and the partial download is resumed rather than restarted. Just retry. If it keeps happening, check your connection (and any VPN, proxy or HF mirror setting); if only transcription is affected, switching ASR to faster-whisper in Model Catalogue avoids the pipeline that downloads this component.",
     "BROKEN_VENV": "The Python backend environment was moved or damaged. VoiceStudio rebuilds it automatically on the next launch; if it keeps failing, use Clean & Retry on the setup screen.",
     "MODEL_CACHE_CORRUPT": "A model file is missing or damaged — a download that stopped part-way, a broken link to downloaded data, or a file changed on disk after it arrived (interrupted renames and antivirus interference both cause this). VoiceStudio repairs it automatically and retries the load once, re-downloading the damaged file where a resume would not have replaced it. If the error persists, quit VoiceStudio, delete the model's models--<org>--<name> folder inside the Hugging Face cache, and restart — the model re-downloads automatically.",
+    # A video (or a mis-labelled file) with no audio stream at all. ffmpeg
+    # answered the extract with exit 234 and "Output file does not contain any
+    # stream … Error opening output files: Invalid argument", which the dub
+    # page showed verbatim and which read as a disk/permission problem.
+    "NO_AUDIO_TRACK": "Check that the file plays with sound in a media player. If its audio is in a separate file, choose that file instead, or merge the audio into the video first.",
     # HF_MIRROR_UNREACHABLE has a DYNAMIC hint (it names the configured mirror)
     # — see hf_mirror_hint(); build_failure special-cases it.
 }
@@ -352,6 +402,9 @@ _CONTEXT_FREE_HINT_CLASSES = frozenset({
     # its hint there would leave the user with no way to know a redownload
     # is the fix.
     "MODEL_CACHE_CORRUPT",
+    # Triggered by a VoiceStudio-authored sentence or ffmpeg's own no-stream
+    # wording; it reaches the user through an upload's error response.
+    "NO_AUDIO_TRACK",
 })
 
 
@@ -367,6 +420,8 @@ _CONTEXT_FREE_HINT_CLASSES = frozenset({
 _TERMINAL_FAILURE_CLASSES = frozenset({
     "GPU_ARCH_UNSUPPORTED",
     "WINDOWS_APP_CONTROL_BLOCKED",
+    # The same file has no audio on every retry.
+    "NO_AUDIO_TRACK",
 })
 
 
@@ -441,6 +496,11 @@ def classify(reason: str) -> str:
     # "Generation failed. Check the selected engine and try again."
     if "no kernel image is available" in low:
         return "GPU_ARCH_UNSUPPORTED"
+    # Before the errno / "invalid argument" rules: ffmpeg's no-stream failure
+    # ends in "Error opening output files: Invalid argument", which is not an
+    # OS write refusal and must not be handed the TEMP-folder remedy.
+    if NO_AUDIO_TRACK_MESSAGE.lower() in low or is_no_audio_stream_stderr(low):
+        return "NO_AUDIO_TRACK"
     if "pkg_resources" in low:
         return "PKG_RESOURCES_MISSING"
     if "quarantine" in low or "is damaged" in low or "gatekeeper" in low:
@@ -721,7 +781,10 @@ def classify(reason: str) -> str:
 #
 # The real diagnosis is always AFTER the banner. Strip the boilerplate so the
 # message starts at the first line that is actually about this run.
-_FFMPEG_BANNER_START = re.compile(r"^\s*(ffmpeg|ffprobe)\s+version\s", re.IGNORECASE)
+_FFMPEG_BANNER_START = re.compile(
+    r"^\s*(?:(?P<prefix>[^\n]{1,200}?):\s*)?(ffmpeg|ffprobe)\s+version\s",
+    re.IGNORECASE,
+)
 _FFMPEG_BANNER_CONT = re.compile(
     r"^\s+(built with|configuration:|lib[a-z]+\s+\d)", re.IGNORECASE
 )
@@ -739,7 +802,11 @@ def strip_ffmpeg_banner(text: Optional[str]) -> str:
     lines = str(text).splitlines()
     kept, in_banner = [], False
     for line in lines:
-        if _FFMPEG_BANNER_START.match(line):
+        banner = _FFMPEG_BANNER_START.match(line)
+        if banner:
+            prefix = (banner.group("prefix") or "").strip()
+            if prefix:
+                kept.append(f"{prefix}:")
             in_banner = True
             continue
         if in_banner:

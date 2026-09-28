@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   _resetBackendContactForTests,
   lastBackendContact,
-} from '../../../../../../frontend/src/utils/backendContact';
+} from '@shared/utils/backendContact';
 import {
   ApiError,
   apiFetch,
@@ -12,7 +12,10 @@ import {
   describeError,
   errorFromResponse,
   profileAudioUrl,
+  resolveApiBase,
+  joinApiPath,
 } from './client';
+import { rewriteDevApiProxyPath } from '../../../../shared/web-api-routing';
 
 beforeEach(() => {
   _resetBackendContactForTests();
@@ -118,12 +121,53 @@ describe('url helpers', () => {
   it('builds same-origin audio URLs', () => {
     expect(audioUrl('take 1.wav')).toBe('/api/audio/take%201.wav');
     expect(profileAudioUrl('abc')).toBe('/api/profiles/abc/audio');
+    expect(profileAudioUrl('abc', null)).toBe('/api/profiles/abc/audio');
+    // The versioned URL changes when the reference is replaced (#2282).
+    expect(profileAudioUrl('abc', '/profiles/abc/audio?v=42')).toBe('/api/profiles/abc/audio?v=42');
   });
 
   it('describes errors for toasts', () => {
     expect(describeError(new ApiError(500, 'boom'))).toBe('boom');
     expect(describeError(new Error('plain'))).toBe('plain');
     expect(describeError('str')).toBe('str');
+  });
+});
+
+describe('deployment API base', () => {
+  it('keeps Electron and web development on the /api proxy', () => {
+    expect(resolveApiBase(false, false)).toBe('/api');
+    expect(resolveApiBase(true, true)).toBe('/api');
+  });
+
+  it('uses backend-root routes in the production web bundle', () => {
+    expect(resolveApiBase(true, false)).toBe('');
+  });
+
+  it('honors the runtime Docker/reverse-proxy override', () => {
+    const win = { __OMNIVOICE_API_BASE__: 'https://voice.example/studio/' } as Window & {
+      __OMNIVOICE_API_BASE__?: string;
+    };
+    expect(resolveApiBase(true, false, win)).toBe('https://voice.example/studio');
+  });
+
+  it('keeps transport prefixes separate from logical /api routes', () => {
+    expect(joinApiPath('https://voice.example/studio', '/engines')).toBe(
+      'https://voice.example/studio/engines',
+    );
+    expect(joinApiPath('https://voice.example/api', '/api/settings/analytics')).toBe(
+      'https://voice.example/api/api/settings/analytics',
+    );
+  });
+
+  it('strips only the development transport prefix', () => {
+    expect(rewriteDevApiProxyPath('/api/engines')).toBe('/engines');
+    expect(rewriteDevApiProxyPath('/api/ws/events')).toBe('/ws/events');
+    expect(rewriteDevApiProxyPath('/api/settings/analytics')).toBe('/api/settings/analytics');
+    expect(rewriteDevApiProxyPath('/api/auth/session')).toBe('/api/auth/session');
+    expect(rewriteDevApiProxyPath('/api/integrations/twilio/state')).toBe(
+      '/api/integrations/twilio/state',
+    );
+    expect(rewriteDevApiProxyPath('/api/mcp/bindings')).toBe('/api/mcp/bindings');
   });
 });
 
@@ -190,6 +234,26 @@ it('localizes structured profile language failures', async () => {
   }
 });
 
+it('localizes a no-audio-track upload rejection (422)', async () => {
+  const translate = vi.spyOn(i18next, 't').mockReturnValue('Localized no-audio guidance');
+  try {
+    const detail = {
+      code: 'no_audio_track',
+      docs_topic: 'NO_AUDIO_TRACK',
+      message: 'This file has no audio track, so there is no speech to transcribe, dub or clone.',
+      hint: 'English hint',
+    };
+    const error = await errorFromResponse(
+      new Response(JSON.stringify({ detail }), { status: 422 }),
+    );
+    expect(error.message).toBe('Localized no-audio guidance');
+    expect(error.payload?.detail).toEqual(detail);
+    expect(translate).toHaveBeenCalledWith('tts_errors.no_audio_track');
+  } finally {
+    translate.mockRestore();
+  }
+});
+
 it.each([false, true])('localizes HTTP failure topics (nested: %s)', async (nested) => {
   const translate = vi.spyOn(i18next, 't').mockReturnValue('Localized recovery');
   try {
@@ -202,4 +266,15 @@ it.each([false, true])('localizes HTTP failure topics (nested: %s)', async (nest
   } finally {
     translate.mockRestore();
   }
+});
+
+it('shows top-level API recovery errors without exposing raw JSON', async () => {
+  const payload = {
+    error: 'Install the Argos language pack for en → es before translating.',
+    code: 'argos_pack_missing',
+    pairs: [{ source_lang: 'en', target_lang: 'es', installed: false }],
+  };
+  const error = await errorFromResponse(new Response(JSON.stringify(payload), { status: 400 }));
+  expect(error.message).toBe(payload.error);
+  expect(error.payload).toEqual(payload);
 });

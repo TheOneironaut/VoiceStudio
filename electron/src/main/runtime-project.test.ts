@@ -8,6 +8,11 @@ import {
   installRuntime,
   promoteLegacyRuntimeCaches,
   CUDNN8_COMPAT_PIN,
+  ROCM_TORCH_INDEX,
+  ROCM_TORCH_PINS,
+  RUNTIME_IMPORT_PROBE,
+  RUNTIME_NATIVE_IMPORT_PROBE,
+  RUNTIME_REPAIR_PACKAGES,
   clearCtranslate2ExecutableStack,
   runtimePython,
   runtimeReady,
@@ -30,6 +35,7 @@ async function fixture() {
   const bundle = join(root, 'bundle');
   const project = join(root, 'runtime');
   await mkdir(join(bundle, 'backend'), { recursive: true });
+  await mkdir(join(bundle, 'frontend', 'dist'), { recursive: true });
   await mkdir(join(bundle, 'omnivoice'));
   for (const file of [
     'pyproject.toml',
@@ -37,6 +43,7 @@ async function fixture() {
     'README.md',
     'LICENSE',
     'backend/main.py',
+    'frontend/dist/index.html',
     'omnivoice/__init__.py',
   ]) {
     await writeFile(join(bundle, file), file);
@@ -158,6 +165,203 @@ describe('packaged runtime setup', () => {
     const syncEnv = run.mock.calls[0]?.[3];
     expect(syncEnv?.UV_CACHE_DIR).toBe(join(project, '..', '.uv-cache'));
     expect(syncEnv?.UV_PYTHON_INSTALL_DIR).toBe(join(project, '..', '.python'));
+  });
+  it('uses managed Python for new runtime setup and verifies native tokenizer imports', async () => {
+    const { bundle, project } = await fixture();
+    const run = vi.fn(
+      async (_command: string, _args: string[], _cwd: string, _env?: NodeJS.ProcessEnv) => {
+        await interpreter(project);
+      },
+    );
+    await installRuntime(
+      bundle,
+      project,
+      'uv',
+      run,
+      new AbortController().signal,
+      undefined,
+      'global',
+    );
+    const sync = run.mock.calls.find(([, args]) => args[0] === 'sync');
+    expect(sync?.[1]).toContain('--managed-python');
+    const verify = run.mock.calls.find(
+      ([, args]) => args[0] === '-c' && args[1]?.includes('import fastapi'),
+    );
+    expect(verify?.[1][1]).toContain('sentencepiece');
+  });
+  it('reinstalls the pinned ROCm stack only after an explicit opt-in', async () => {
+    const { bundle, project } = await fixture();
+    vi.stubEnv('OMNIVOICE_TORCH_VARIANT', ' ROCm ');
+    vi.stubEnv('OMNIVOICE_TORCH_INDEX', 'https://mirror.invalid/rocm');
+    const run = vi.fn(
+      async (_command: string, _args: string[], _cwd: string, _env?: NodeJS.ProcessEnv) => {
+        await interpreter(project);
+      },
+    );
+    await installRuntime(bundle, project, 'uv', run, new AbortController().signal);
+    const reinstall = run.mock.calls.find(([, args]) => args[0] === 'pip');
+    expect(reinstall?.[1]).toEqual([
+      'pip',
+      'install',
+      '--reinstall',
+      '--python',
+      runtimePython(project),
+      ...ROCM_TORCH_PINS,
+      '--index-url',
+      'https://mirror.invalid/rocm',
+    ]);
+    expect(ROCM_TORCH_INDEX).toContain('/rocm');
+  });
+  it('does not reuse a default runtime after ROCm is selected', async () => {
+    const { bundle, project } = await fixture();
+    const run = vi.fn(
+      async (_command: string, _args: string[], _cwd: string, _env?: NodeJS.ProcessEnv) => {
+        await interpreter(project);
+      },
+    );
+    await installRuntime(bundle, project, 'uv', run, new AbortController().signal);
+    expect(await runtimeReady(bundle, project)).toBe(true);
+    expect(await runtimeCompatible(bundle, project)).toBe(true);
+
+    vi.stubEnv('OMNIVOICE_TORCH_VARIANT', 'rocm');
+    expect(await runtimeReady(bundle, project)).toBe(false);
+    expect(await runtimeCompatible(bundle, project)).toBe(false);
+  });
+  it('does not mark a runtime ready if the native tokenizer crashes during verification', async () => {
+    const { bundle, project } = await fixture();
+    const run = vi.fn(async (_command: string, args: string[]) => {
+      await interpreter(project);
+      if (args[0] === '-c' && args[1]?.includes('import fastapi')) {
+        throw new Error('native import failed');
+      }
+    });
+    await expect(
+      installRuntime(bundle, project, 'uv', run, new AbortController().signal, undefined, 'global'),
+    ).rejects.toThrow('native import failed');
+    expect(await runtimeReady(bundle, project)).toBe(false);
+    expect(await runtimeInstallInterrupted(project)).toBe(true);
+  });
+  it('keeps the selected interpreter when updating an existing runtime', async () => {
+    const { bundle, project } = await fixture();
+    await interpreter(project);
+    const run = vi.fn(async (_command: string, _args: string[]) => {});
+    await installRuntime(
+      bundle,
+      project,
+      'uv',
+      run,
+      new AbortController().signal,
+      undefined,
+      'global',
+    );
+    const sync = run.mock.calls.find(([, args]) => args[0] === 'sync');
+    expect(sync?.[1]).not.toContain('--managed-python');
+    expect(sync?.[1]).not.toContain('--reinstall-package');
+    expect(sync?.[1]).toContain(runtimePython(project));
+  });
+  it('does not reuse an existing interpreter with the wrong Python version', async () => {
+    const { bundle, project } = await fixture();
+    await interpreter(project);
+    const run = vi.fn(async (_command: string, args: string[]) => {
+      if (args[1]?.includes('sys.version_info')) throw new Error('broken interpreter');
+    });
+    await installRuntime(
+      bundle,
+      project,
+      'uv',
+      run,
+      new AbortController().signal,
+      undefined,
+      'global',
+    );
+    const sync = run.mock.calls.find(([, args]) => args[0] === 'sync');
+    expect(sync?.[1]).toContain('--managed-python');
+    expect(sync?.[1]).not.toContain(runtimePython(project));
+    const cleanIndex = run.mock.calls.findIndex(([, args]) => args[0] === 'cache');
+    expect(cleanIndex).toBe(-1);
+  });
+  it('repairs a broken native PyTorch stack without replacing the interpreter', async () => {
+    const { bundle, project } = await fixture();
+    await interpreter(project);
+    let repaired = false;
+    const run = vi.fn(async (command: string, args: string[]) => {
+      if (args[0] === 'sync') repaired = true;
+      if (
+        !repaired &&
+        command === runtimePython(project) &&
+        (args[1] === RUNTIME_IMPORT_PROBE || args[1] === RUNTIME_NATIVE_IMPORT_PROBE)
+      ) {
+        throw new Error('missing libtorchaudio.pyd');
+      }
+    });
+    await installRuntime(bundle, project, 'uv', run, new AbortController().signal);
+    const sync = run.mock.calls.find(([, args]) => args[0] === 'sync');
+    expect(sync?.[1]).toContain(runtimePython(project));
+    expect(sync?.[1]).not.toContain('--managed-python');
+    for (const name of RUNTIME_REPAIR_PACKAGES) {
+      expect(sync?.[1]).toContain(name);
+    }
+    expect(run.mock.calls.find(([, args]) => args[0] === 'cache')?.[1]).toEqual([
+      'cache',
+      'clean',
+      ...RUNTIME_REPAIR_PACKAGES,
+    ]);
+  });
+  it('repairs sentencepiece without evicting healthy PyTorch wheels', async () => {
+    const { bundle, project } = await fixture();
+    await interpreter(project);
+    let synced = false;
+    const run = vi.fn(async (command: string, args: string[]) => {
+      if (args[0] === 'sync') synced = true;
+      if (!synced && command === runtimePython(project) && args[1]?.includes('sentencepiece')) {
+        throw new Error('broken sentencepiece native library');
+      }
+    });
+    await installRuntime(bundle, project, 'uv', run, new AbortController().signal);
+    expect(run.mock.calls.find(([, args]) => args[0] === 'cache')?.[1]).toEqual([
+      'cache', 'clean', 'sentencepiece',
+    ]);
+    const sync = run.mock.calls.find(([, args]) => args[0] === 'sync');
+    expect(sync?.[1]).toContain('sentencepiece');
+    for (const name of ['torch', 'torchaudio', 'torchvision']) {
+      expect(sync?.[1]).not.toContain(name);
+    }
+  });
+  it('repairs an unrelated missing dependency without evicting native wheels', async () => {
+    const { bundle, project } = await fixture();
+    await interpreter(project);
+    let synced = false;
+    const run = vi.fn(async (command: string, args: string[]) => {
+      if (args[0] === 'sync') synced = true;
+      if (!synced && command === runtimePython(project) && args[1] === RUNTIME_IMPORT_PROBE) {
+        throw new Error('No module named fastapi');
+      }
+    });
+    await installRuntime(bundle, project, 'uv', run, new AbortController().signal);
+    const sync = run.mock.calls.find(([, args]) => args[0] === 'sync');
+    expect(sync?.[1]).not.toContain('--reinstall-package');
+    expect(run.mock.calls.some(([, args]) => args[0] === 'cache')).toBe(false);
+    expect(
+      run.mock.calls.some(
+        ([command, args]) =>
+          command === runtimePython(project) && args[1] === RUNTIME_NATIVE_IMPORT_PROBE,
+      ),
+    ).toBe(true);
+  });
+  it('does not continue a cancelled interpreter probe into dependency installation', async () => {
+    const { bundle, project } = await fixture();
+    await interpreter(project);
+    const controller = new AbortController();
+    const run = vi.fn(async (_command: string, args: string[]) => {
+      if (args[1]?.includes('sys.version_info')) {
+        controller.abort();
+        throw new Error('probe aborted');
+      }
+    });
+    await expect(
+      installRuntime(bundle, project, 'uv', run, controller.signal, undefined, 'global'),
+    ).rejects.toThrow();
+    expect(run.mock.calls.some(([, args]) => args[0] === 'sync')).toBe(false);
   });
   it('moves legacy in-project caches before a clean retry can remove them', async () => {
     const { project } = await fixture();
@@ -368,10 +572,10 @@ describe('packaged runtime setup', () => {
   });
   it('pins the release workflow installer version', async () => {
     const release = await readFile(
-      new URL('../../../.github/workflows/release.yml', import.meta.url),
+      new URL('../../../.github/workflows/electron-release.yml', import.meta.url),
       'utf8',
     );
-    expect(release).toContain(`UV_VERSION: "${UV_VERSION}"`);
+    expect(release).toContain(`version: '${UV_VERSION}'`);
   });
 });
 
