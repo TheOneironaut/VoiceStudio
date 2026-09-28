@@ -45,6 +45,9 @@ it('decrypts the complete stored payload', async () => {
   mocks.fetch.mockResolvedValue({ ok: true, json: async () => ({ deactivated: true }) });
   expect(await deactivateProLicense()).toMatchObject({ active: false });
   expect(mocks.decrypt).toHaveBeenCalledWith(Buffer.from('encrypted'));
+  const [url, init] = mocks.fetch.mock.calls[0];
+  expect(url).toBe('https://api.lemonsqueezy.com/v1/licenses/deactivate');
+  expect(init.body.toString()).toBe('license_key=test-license-123456&instance_id=instance');
   expect(mocks.unlink).toHaveBeenCalledWith('/test/pro-license.json');
 });
 it('preserves invalid deactivation errors without deleting the local license', async () => {
