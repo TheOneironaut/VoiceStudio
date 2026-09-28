@@ -31,8 +31,21 @@ it.each([false, true])('refuses plaintext storage before consuming an activation
 });
 it('persists only encrypted license material', async () => {
   expect(await activateProLicense(key)).toMatchObject({ active: true });
+  expect(mocks.encrypt).toHaveBeenCalledWith(JSON.stringify({ key, instanceId: 'instance' }));
   expect(mocks.write.mock.calls[0][1]).not.toContain(key);
-  expect(JSON.parse(mocks.write.mock.calls[0][1])).toEqual({ encryptedKey: Buffer.from('encrypted').toString('base64'), instanceId: 'instance' });
+  expect(JSON.parse(mocks.write.mock.calls[0][1])).toEqual({
+    encryptedPayload: Buffer.from('encrypted').toString('base64'),
+  });
+});
+it('decrypts the complete stored payload', async () => {
+  mocks.read.mockResolvedValue(JSON.stringify({
+    encryptedPayload: Buffer.from('encrypted').toString('base64'),
+  }));
+  mocks.decrypt.mockReturnValue(JSON.stringify({ key, instanceId: 'instance' }));
+  mocks.fetch.mockResolvedValue({ ok: true, json: async () => ({ deactivated: true }) });
+  expect(await deactivateProLicense()).toMatchObject({ active: false });
+  expect(mocks.decrypt).toHaveBeenCalledWith(Buffer.from('encrypted'));
+  expect(mocks.unlink).toHaveBeenCalledWith('/test/pro-license.json');
 });
 it('preserves invalid deactivation errors without deleting the local license', async () => {
   mocks.read.mockResolvedValue(JSON.stringify({ fileKey: key, instanceId: 'instance' }));
