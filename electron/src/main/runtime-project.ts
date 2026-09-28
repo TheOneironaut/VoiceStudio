@@ -15,12 +15,35 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const SOURCES = ['backend', 'omnivoice', 'pyproject.toml', 'uv.lock', 'README.md', 'LICENSE'];
-export const UV_VERSION = '0.12.13'; // Kept in sync with the Tauri tools contract.
+const SOURCES = [
+  'backend',
+  'frontend',
+  'omnivoice',
+  'pyproject.toml',
+  'uv.lock',
+  'README.md',
+  'LICENSE',
+];
+export const UV_VERSION = '0.12.13';
 export const CUDNN8_COMPAT_PIN = 'nvidia-cudnn-cu12==8.9.7.29';
+export const ROCM_TORCH_INDEX = 'https://download.pytorch.org/whl/rocm6.4';
+export const ROCM_TORCH_PINS = [
+  'torch==2.8.0',
+  'torchaudio==2.8.0',
+  'torchvision==0.23.0',
+] as const;
+export const RUNTIME_REPAIR_PACKAGES = [
+  'torch',
+  'torchaudio',
+  'torchvision',
+] as const;
+export const RUNTIME_NATIVE_IMPORT_PROBE =
+  'import torch, torchaudio, torchvision';
+export const RUNTIME_IMPORT_PROBE =
+  'import fastapi, uvicorn, omnivoice, faster_whisper, sentencepiece, torch, torchaudio, torchvision';
 const RUNTIME_SCHEMA = 'electron-runtime-v2-cudnn8';
 const CUDNN8_PROBE_PREFIX = 'VOICESTUDIO_CUDNN8_PROBE=';
-const REQUIRED_ENV_BYTES = 9 * 1024 ** 3; // Tauri setup.rs: REQUIRED_ENV_BYTES.
+const REQUIRED_ENV_BYTES = 9 * 1024 ** 3;
 export type RuntimePhase = 'checking' | 'downloading_uv' | 'installing_deps' | 'verifying';
 export type RuntimeRegion = 'auto' | 'global' | 'china' | 'russia' | 'restricted';
 export type RuntimeRunner = (
@@ -85,6 +108,9 @@ export function runtimePython(root: string, platform = process.platform): string
 async function dependencyStamp(bundle: string): Promise<string> {
   const hash = createHash('sha256');
   hash.update(RUNTIME_SCHEMA);
+  if (process.env.OMNIVOICE_TORCH_VARIANT?.trim().toLowerCase() === 'rocm') {
+    hash.update(':torch=rocm');
+  }
   for (const file of ['pyproject.toml', 'uv.lock']) hash.update(await readFile(join(bundle, file)));
   return hash.digest('hex');
 }
@@ -261,7 +287,7 @@ export async function runtimeDependenciesReady(project: string): Promise<boolean
   return new Promise((resolve) => {
     execFile(
       runtimePython(project),
-      ['-c', 'import fastapi, uvicorn, omnivoice, faster_whisper'],
+      ['-c', RUNTIME_IMPORT_PROBE],
       {
         cwd: project,
         windowsHide: true,
@@ -314,7 +340,9 @@ export async function runtimeCompatible(bundle: string, project: string): Promis
       config.isFile() &&
       bundledProject.equals(installedProject) &&
       bundledLock.equals(installedLock) &&
-      (marker === null || marker === (await dependencyStamp(bundle)))
+      (marker === null
+        ? process.env.OMNIVOICE_TORCH_VARIANT?.trim().toLowerCase() !== 'rocm'
+        : marker === (await dependencyStamp(bundle)))
     );
   } catch {
     return false;
@@ -423,18 +451,89 @@ export async function installRuntime(
     uv = join(tools, windows ? 'uv.exe' : 'uv');
   }
   signal.throwIfAborted();
-  // uv owns platform resolution; the same frozen dependency graph is used by Tauri.
+  // New environments must not borrow another application's Python from PATH.
+  // Existing compatible environments are kept; Clean & Retry rebuilds explicitly.
   phase('installing_deps');
-  await run(uv, ['sync', '--frozen', '--no-dev', '--python', '3.11'], project, env);
+  const interpreterExists = await stat(runtimePython(project)).then(
+    (info) => info.isFile(),
+    () => false,
+  );
+  let existingPython = false;
+  const repairPackages: string[] = [];
+  if (interpreterExists) {
+    try {
+      await run(
+        runtimePython(project),
+        ['-c', 'import sys; assert sys.version_info[:2] == (3, 11)'],
+        project,
+      );
+      existingPython = true;
+      try {
+        await run(runtimePython(project), ['-c', RUNTIME_IMPORT_PROBE], project);
+      } catch {
+        // Classify the failed full probe before evicting multi-GB native wheels.
+        // A missing FastAPI/uvicorn install is repaired by ordinary frozen sync
+        // and must retain the app-private wheel cache for offline recovery.
+        try {
+          await run(runtimePython(project), ['-c', RUNTIME_NATIVE_IMPORT_PROBE], project);
+        } catch {
+          // A native wheel can be missing or ABI-broken while its dist-info
+          // still convinces uv sync that it is installed. Reinstall only then.
+          repairPackages.push(...RUNTIME_REPAIR_PACKAGES);
+        }
+        // Sentencepiece has its own native wheel, independent of PyTorch.
+        signal.throwIfAborted();
+        try {
+          await run(runtimePython(project), ['-c', 'import sentencepiece'], project);
+        } catch {
+          repairPackages.push('sentencepiece');
+        }
+      }
+    } catch {
+      // Retry must not keep a wrong-base or native-crashing interpreter simply
+      // because its executable survived interrupted setup. uv selects the managed
+      // replacement; immutable downloads and user data remain outside the venv.
+      signal.throwIfAborted();
+    }
+  }
+  const pythonArgs = existingPython
+    ? ['--python', runtimePython(project)]
+    : ['--managed-python', '--python', '3.11'];
+  // A failed native import may leave distribution metadata intact, so uv's
+  // ordinary sync would otherwise consider the broken wheel already satisfied.
+  const repairArgs = repairPackages.flatMap((name) => ['--reinstall-package', name]);
   signal.throwIfAborted();
+  if (repairArgs.length) {
+    // uv may hardlink installed files to its unpacked wheel cache. A corrupted
+    // native file can therefore poison the cached copy too; evict only this
+    // package from the app-private cache before reinstalling its locked wheel.
+    await run(uv, ['cache', 'clean', ...repairPackages], project, env);
+    signal.throwIfAborted();
+  }
+  await run(uv, ['sync', '--frozen', '--no-dev', ...pythonArgs, ...repairArgs], project, env);
+  signal.throwIfAborted();
+  if (process.env.OMNIVOICE_TORCH_VARIANT?.trim().toLowerCase() === 'rocm') {
+    await run(
+      uv,
+      [
+        'pip',
+        'install',
+        '--reinstall',
+        '--python',
+        runtimePython(project),
+        ...ROCM_TORCH_PINS,
+        '--index-url',
+        process.env.OMNIVOICE_TORCH_INDEX || ROCM_TORCH_INDEX,
+      ],
+      project,
+      env,
+    );
+    signal.throwIfAborted();
+  }
   await ensureCudnn8Compat(uv, project, run, env, signal);
   signal.throwIfAborted();
   phase('verifying');
-  await run(
-    runtimePython(project),
-    ['-c', 'import fastapi, uvicorn, omnivoice, faster_whisper'],
-    project,
-  );
+  await run(runtimePython(project), ['-c', RUNTIME_IMPORT_PROBE], project);
   signal.throwIfAborted();
   await writeFile(join(project, '.runtime-ready'), await dependencyStamp(bundle));
   await rm(join(project, '.runtime-installing'), { force: true });

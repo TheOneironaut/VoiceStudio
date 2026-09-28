@@ -7,14 +7,14 @@ import {
   SPLIT_MODES,
   splitStoryText,
   type SplitMode,
-} from '../../../../../../frontend/src/utils/splitStoryText';
+} from '@shared/utils/splitStoryText';
 import { useEffect, useRef, useState } from 'react';
-import { buildAutoCast } from '../../../../../../frontend/src/utils/autoCast';
+import { buildAutoCast } from '@shared/utils/autoCast';
 import {
   SAMPLE_STORY_CAST,
   SAMPLE_STORY_LINES,
   SAMPLE_STORY_NAME,
-} from '../../../../../../frontend/src/data/sampleStory';
+} from '@shared/data/sampleStory';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowDownIcon,
@@ -46,7 +46,7 @@ import {
 } from '@/components/ui/select';
 import { PipelineFailure } from '@/components/pipeline-failure';
 import { describeError } from '@/lib/api/client';
-import { reorder } from '../../../../../../frontend/src/utils/storyReorder';
+import { reorder } from '@shared/utils/storyReorder';
 import type { Draft } from './longform-session';
 interface Props {
   draft: Draft;
@@ -373,6 +373,10 @@ export function StoryEditor({
             <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
               {t('stories.splitMode')}
               <Select
+                items={SPLIT_MODES.map((mode) => ({
+                  value: mode,
+                  label: t(`stories.split_${mode}`),
+                }))}
                 value={splitMode}
                 disabled={disabled}
                 onValueChange={(value) => setSplitMode(value as SplitMode)}

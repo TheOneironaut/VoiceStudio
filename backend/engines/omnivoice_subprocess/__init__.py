@@ -57,6 +57,40 @@ class OmniVoiceSubprocessBackend(SubprocessBackend):
     # Keep the bound below the 300-second generation budget while avoiding the
     # repeated false kill captured in #1711.
     spawn_ready_timeout_s = 120.0
+    # Same model as OmniVoiceBackend, so the same reference-length truth (#2281).
+    max_ref_seconds = 20.0
+    ref_strategy = "best_window"
+
+    def generate(self, text: str, **kw):
+        # The sidecar calls model.generate() directly, so it bypasses the
+        # in-process prompt cache where a whole-clip transcript on an over-long
+        # reference is dropped. Apply the same rule before the request leaves.
+        passage = None
+        audio = kw.get("ref_audio")
+        if isinstance(audio, str):
+            from omnivoice.utils.audio import CLONE_REF_TEXT_MAX_SECONDS
+            from services.tts_backend import (
+                _reuse_or_rank_passage,
+                omnivoice_ref_text,
+                reference_duration_s,
+            )
+
+            duration = reference_duration_s(audio)
+            if duration is not None and duration > CLONE_REF_TEXT_MAX_SECONDS:
+                selected = _reuse_or_rank_passage(audio)
+                if selected is not None:
+                    kw["ref_audio"], kw["ref_text"] = selected
+                    passage = selected[0]
+                elif kw.get("ref_text"):
+                    kw["ref_text"] = omnivoice_ref_text(audio, kw["ref_text"])
+        try:
+            return super().generate(text, **kw)
+        finally:
+            if passage is not None:
+                try:
+                    os.remove(passage)
+                except OSError:
+                    pass
 
     @classmethod
     def is_available(cls) -> tuple[bool, str]:

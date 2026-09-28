@@ -81,6 +81,7 @@ None of them are required — the defaults are chosen for the common case.
 | Variable | Default | What it does |
 |---|---|---|
 | `OMNIVOICE_DEVICE` | `auto` | Pin the compute device (`cuda` / `rocm` / `xpu` / `mps` / `cpu`) instead of auto-detect. Same control lives in **Settings → Performance & Device** (the env var wins over the UI pick). Honored only for devices the host actually has — a family that isn't detected is noted and ignored, never obeyed blindly. Applies at the next backend start. |
+| `CUDA_VISIBLE_DEVICES` | all NVIDIA GPUs | On a multi-GPU NVIDIA host, expose only the selected physical adapter to VoiceStudio and its engine subprocesses. **Settings → Performance & Device → CUDA** lists adapters by index and name, persists their stable GPU UUID, and applies the choice after restart. An externally supplied environment variable wins over the saved UI choice. |
 | `OMNIVOICE_FLASHINFER` | `0` | CUDA-only accelerated decoding for the default engine via [FlashInfer](https://github.com/flashinfer-ai/flashinfer) kernels (packed CFG attention, fused RMSNorm/RoPE/GEMM) — ~2x on upstream's benchmarks. `1` enables it; `graph` also captures CUDA graphs (best when you render one thing at a time). Requires installing the optional `flashinfer-python` package into the backend environment first (`uv pip install flashinfer-python flashinfer-jit-cache --extra-index-url https://flashinfer.ai/whl/cu128/`, matching your CUDA build). Replaces `torch.compile` for that session, pins inference to a single GPU thread (the FlashInfer attention plan is per-generation state), and keeps fused copies of the attention/MLP weights resident (~roughly half the LLM's weight size extra VRAM) — leave it off on tight-VRAM cards. If the package is missing or a FlashInfer/CUDA-graph kernel fails at runtime, the app logs the reason and falls back to the standard path; failures outside those kernels (e.g. a genuine out-of-memory) surface normally. |
 | `OMNIVOICE_PROMPT_DISK_CACHE` | `1` | Persist encoded voice-clone references (`prompt_cache/` in the app data dir, ~10 KB per voice, 32 newest kept) so the first generation with a known voice after a restart skips the reference re-encode and any auto-transcription. Set `0` to keep the cache in memory only. |
 | `OMNIVOICE_IDLE_TIMEOUT_S` | `900` | Seconds of idle before the TTS model unloads to free memory. Raise it (e.g. `3600`) if you generate in bursts and dislike the ~8 s reload; lower it on tight-memory machines. |
@@ -177,6 +178,18 @@ holds its VRAM until it does, so a Flush (or a retry) issued seconds after a
 timeout is competing with a job that is still on the device. Wait for it to
 drain, or restart the backend, and then Flush.
 
+Audiobook and Stories chapters are the exception: an abandoned chapter does
+not start another chunk. It stops using the GPU once the chunk it is rendering
+returns. A chunk that is itself stalled still holds the device until it returns.
+Each line (span) is cached once all of its chunks are done, so a retry or resume
+reuses every finished line. It re-renders only the line that was interrupted.
+
+A render that keeps finishing chunks (a long Generate text or an audiobook
+chapter) is not abandoned when it reaches its budget. It gets extra time while
+chunks keep landing, up to three times its own budget or 30 minutes, whichever
+is longer (#2287). A render that finishes no chunk within 5 minutes after its
+budget is still abandoned.
+
 **Where it lives:**
 
 - **Top toolbar → Flush** (the button next to the model-status badge). The
@@ -188,7 +201,7 @@ drain, or restart the backend, and then Flush.
   switched away from it is marked *"not active — safe to unload"*. Below the
   list are the two bulk actions:
   - **Flush caches** — runs a multi-pass garbage collection and releases the
-    accelerator's cached memory (CUDA/MPS/XPU `empty_cache`). Models stay
+    accelerator's cached memory (CUDA/MPS/XPU/NPU `empty_cache`). Models stay
     loaded, so there's no reload cost; this recovers cache/fragmentation
     memory only.
   - **Unload all + flush** — the above **plus** fully unloads the resident
@@ -325,3 +338,33 @@ so a slow client cannot inflate it. The backend log records the same values, so 
 - **`OMNIVOICE_PRELOAD_TTS_ASR`** exists for a legacy in-process Whisper
   fallback; enabling it costs memory on every start and speeds up nothing on
   a default install.
+
+## Local render diagnostics
+
+For a slow Studio, Stories or Audiobook render, save a diagnostic bundle from
+**Settings → About → Save diagnostic bundle** before restarting the backend.
+`render_traces.json` contains the last 32 completed or interrupted render
+requests in this backend process. The same compact records appear in the backend
+log. Nothing is uploaded automatically; you choose whether to share the bundle.
+
+Each record has a random correlation ID, render surface, total elapsed seconds,
+transport outcome, and per-stage elapsed seconds, call counts and failure counts:
+`synthesis`, `join`, `effects`, `save`, `watermark`, `cache`, and `mux` where used.
+Scripts, voice names, file paths, audio and exception messages are never recorded.
+The recorder is in-memory, bounded, and behaves the same on every supported OS.
+
+Timings cover the full HTTP response, including streamed work and GPU-pool jobs.
+They are inclusive wall-clock durations: overlapping/nested stages must not be
+added together. Model loading, queueing, network waits and other uninstrumented
+work remain in the total. Remote workers' internal synthesis is not measured by
+the requesting backend. `complete` means the HTTP stream completed; a stream can
+still contain a handled generation error, so check stage failures and the error
+log too. Disconnects preserve partial timings; abandoned worker completions
+cannot rewrite a finished trace. A backend crash loses unfinished in-memory
+traces, so attach the crash log as well.
+
+`tests/test_render_trace.py` protects 100- and 400-chunk Studio/long-form renders
+with hardware-independent budgets: one synthesis per chunk, one assembly,
+one final Studio effects pass, and linear copied sample volume. No model download
+or wall-clock speed threshold is involved. These complement the streaming/dub
+budgets in `tests/test_perf_operation_budgets.py`.

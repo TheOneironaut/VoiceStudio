@@ -6,7 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { apiJson } from '@/lib/api/client';
-import type { PreflightReport } from '../../../../../frontend/src/api/setup-types';
+import type { PreflightReport } from '@shared/api/setup-types';
 import { SystemPreflight } from '@/features/settings/system-preflight';
 import { PermissionsSettings } from '@/features/settings/permissions-settings';
 import { SetupMediaEngine } from '@/features/settings/media-tools';
@@ -16,8 +16,10 @@ import { MirrorSettings } from '@/features/settings/mirror-settings';
 import { PrivacySettings } from '@/features/settings/privacy-settings';
 import { ShortcutSettings } from '@/features/settings/shortcut-settings';
 import { brandIcon } from '@/lib/brand';
+import { cn } from '@/lib/utils';
 import { appearanceScales, useAppearance } from '@/hooks/use-appearance';
 import { FIRST_SOUND_EVENT } from '@/lib/first-sound';
+import { isMac } from './bridge';
 import {
   rememberSetupCompleted,
   rememberSetupStarted,
@@ -97,7 +99,12 @@ export function SetupGate({ children }: { children: ReactNode }) {
           : true);
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-      <header className="workspace-titlebar flex shrink-0 items-center gap-2 border-b border-border/50 px-5">
+      <header
+        className={cn(
+          'workspace-titlebar flex shrink-0 items-center gap-2 border-b border-border/50 px-5',
+          isMac() && 'pl-24',
+        )}
+      >
         <img src={brandIcon} alt="" className="size-6" />
         <h1 className="text-sm font-medium">{t('app.name')}</h1>
         {advanced && (
@@ -194,7 +201,7 @@ export function SetupGate({ children }: { children: ReactNode }) {
               {step === 2 && (
                 <>
                   <AnalyticsConsent onRequirementChange={setConsentRequired} />
-                  {advanced && <PrivacySettings showAnalytics={false} />}
+                  <PrivacySettings showAnalytics={false} />
                 </>
               )}
               {step === 3 && (

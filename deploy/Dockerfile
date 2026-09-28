@@ -15,13 +15,15 @@ WORKDIR /app
 # Monorepo — bun workspace with lockfile at repo root. Copy manifests first
 # so `bun install` caches independently of source edits.
 COPY package.json bun.lock ./
-COPY frontend/package.json ./frontend/
+COPY electron/package.json ./electron/
 
 RUN bun install --frozen-lockfile
 
-# Build static files (output lands in /app/frontend/dist)
+# Build the maintained Electron renderer as the browser UI. `electron/src/shared`
+# contains transitional shared modules only; it has no app entry point.
 COPY frontend/ ./frontend/
-RUN bun run --cwd frontend build
+COPY electron/ ./electron/
+RUN bun run --cwd electron build:web
 
 # ==========================================
 # Runtime Stage: Python & PyTorch Backend

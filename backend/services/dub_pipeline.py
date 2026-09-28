@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import html
 import json
 import logging
 import os
@@ -45,7 +44,15 @@ import soundfile as sf
 
 from core.config import DUB_DIR
 from fastapi import HTTPException
-from services.ffmpeg_utils import find_ffmpeg, find_ffprobe, _get_semaphore, _spawn_with_retry
+from services.ffmpeg_utils import (
+    _get_semaphore,
+    _spawn_with_retry,
+    find_ffmpeg,
+    find_ffprobe,
+    raise_for_audio_extract_failure,
+    require_audio_stream,
+)
+from services.srt_parser import spoken_cue_text
 from services.model_manager import get_best_device
 # Process lifecycle moved to its own leaf module so ffmpeg_utils can import
 # it at module top (no dub_pipeline ↔ ffmpeg_utils cycle). Re-exported here —
@@ -1222,12 +1229,7 @@ def parse_vtt_segments(vtt_path: str) -> list[dict]:
             end = _ts(right)
         except Exception:
             continue
-        text = " ".join(ln.strip() for ln in lines[1:]).strip()
-        # Strip inline styling like <c.colorE5E5E5>foo</c> or <00:00:01.200>
-        text = re.sub(r"<[^>]+>", "", text)
-        # WebVTT escapes `&`, `<` and `>` in cue text ("Q&amp;A"); decode
-        # them once the markup is gone so the dub gets the words.
-        text = html.unescape(text).strip()
+        text = spoken_cue_text(" ".join(ln.strip() for ln in lines[1:]), webvtt=True)
         if text:
             segments.append({"start": start, "end": end, "text": text})
     return segments
@@ -1342,11 +1344,18 @@ async def ingest_pipeline(
 
         yield prep_event("extract_start")
         try:
+            # A video with no audio stream has nothing to transcribe or dub.
+            # Name that instead of letting ffmpeg fail with exit 234 and a
+            # stream dump ending in "Invalid argument".
+            await asyncio.to_thread(require_audio_stream, video_path)
             p, _, stderr = await run_proc([
                 ffmpeg, "-i", video_path, "-vn", "-acodec", "pcm_s16le",
                 "-ar", "16000", "-ac", "1", audio_path, "-y",
             ])
             if p.returncode != 0:
+                # The probe can be undetermined (no ffprobe); recognize the
+                # same cause from ffmpeg's own wording.
+                await asyncio.to_thread(raise_for_audio_extract_failure, stderr, video_path)
                 msg = _media_process_error("FFmpeg", p.returncode, stderr, paths=(video_path, audio_path, job_dir))
                 raise Exception(msg)
             # Second, FULL-QUALITY extraction for source separation. audio.wav

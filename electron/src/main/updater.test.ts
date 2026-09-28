@@ -80,6 +80,22 @@ test('disables upstream desktop updates for the Gemini fork edition', () => {
   expect(desktopUpdatesSupported(false, 'standard')).toBe(false);
 });
 
+test('never contacts or configures upstream update feeds for the Gemini edition', async () => {
+  const fetcher = vi.fn();
+  const updater = new DesktopUpdater(fetcher as unknown as typeof fetch, 'gemini');
+
+  await expect(updater.check()).resolves.toMatchObject({ status: 'unsupported' });
+  await expect(updater.setChannel('preview')).resolves.toMatchObject({ status: 'unsupported' });
+  await expect(updater.download()).resolves.toMatchObject({ status: 'unsupported' });
+  updater.install();
+
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(mocks.autoUpdater.setFeedURL).not.toHaveBeenCalled();
+  expect(mocks.autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+  expect(mocks.autoUpdater.downloadUpdate).not.toHaveBeenCalled();
+  expect(mocks.autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+});
+
 function emit(event: string, value?: unknown) {
   for (const listener of mocks.handlers.get(event) || []) listener(value);
 }

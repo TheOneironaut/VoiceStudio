@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omnivoice"
-version = "0.5.4"
+version = "0.5.6"
 description = "VoiceStudio — a private, local-first studio for voice cloning, speech generation, dubbing, transcription, and audiobooks"
 readme = "README.md"
 # Free and open-source under the GNU Affero General Public License v3 (see
@@ -211,6 +211,11 @@ dependencies = [
     # Cloud TTS adapter for Gemini 3.1 Flash TTS Preview. The SDK is inert
     # unless the user explicitly selects the Gemini engine and supplies a key.
     "google-genai>=2.21.0,<3",
+    # Security floors for pyannote-audio's checkpoint loader (GHSA-qqmf-gpg7-g8gw).
+    # Declared here, not only in uv.lock, so `uv pip install .` (Docker, Colab)
+    # cannot keep a preinstalled 2.6.5 that pyannote's `lightning>=2.0.1` allows.
+    "lightning>=2.6.6",
+    "pytorch-lightning>=2.6.6",
     "nvidia-ml-py>=13.0",
 ]
 

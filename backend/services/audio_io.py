@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import io
 import logging
+
+from core.render_trace import timed as _render_timed
 import os
 import shutil
 import tempfile
@@ -65,6 +67,46 @@ logger = logging.getLogger("omnivoice.audio_io")
 # both; we forward whichever the caller hands us.
 PathOrBuf = Union[str, "os.PathLike[str]", BinaryIO, io.IOBase]
 
+# Opus is carried in Ogg for both .opus and .ogg filenames.
+OPUS_CODEC_ARGS = ["-c:a", "libopus", "-b:a", "64k"]
+OPUS_SAMPLE_RATE = 48000
+
+
+async def encode_ogg_opus(wav: bytes | str | os.PathLike[str]) -> bytes:
+    """Transcode a WAV render or saved WAV to Ogg/Opus; never return WAV on error."""
+    import asyncio
+    from core.failure import strip_ffmpeg_banner
+    from services.ffmpeg_utils import find_ffmpeg, run_ffmpeg
+
+    ffmpeg = await asyncio.to_thread(find_ffmpeg)
+    if not ffmpeg:
+        raise RuntimeError(
+            "Ogg/Opus output requires ffmpeg. Install it (Settings → Audio tools) "
+            "or set FFMPEG_PATH."
+        )
+    temporary = None
+    try:
+        if isinstance(wav, bytes):
+            fd, temporary = tempfile.mkstemp(suffix=".wav")
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(wav)
+            src = temporary
+        else:
+            src = os.fspath(wav)
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-i", src, "-ar", str(OPUS_SAMPLE_RATE),
+            *OPUS_CODEC_ARGS, "-f", "ogg", "pipe:1",
+        ]
+        rc, out, err = await run_ffmpeg(cmd, timeout=300.0)
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+    if rc != 0 or not out:
+        detail = strip_ffmpeg_banner((err or b"").decode("utf-8", "replace")).strip()[-300:]
+        raise RuntimeError(f"Ogg/Opus encoding failed: {detail or f'ffmpeg exit {rc}'}")
+    return out
+
 
 def _ensure_audio_parent(path_or_buf: PathOrBuf) -> None:
     """Recover app output folders removed after backend initialization."""
@@ -72,6 +114,7 @@ def _ensure_audio_parent(path_or_buf: PathOrBuf) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(path_or_buf)), exist_ok=True)
 
 
+@_render_timed('save')
 def _safe_torchaudio_save(
     path_or_buf: PathOrBuf,
     tensor: torch.Tensor,
@@ -123,12 +166,12 @@ def _safe_torchaudio_save(
     if tensor.device.type != "cpu":
         tensor = tensor.cpu()
 
-    # ── Failure mode 4: wrong dtype. TorchCodec 2.9+ requires
-    # float32-in-[-1, 1]; soundfile accepts int16 / int32 / float32 /
-    # float64 but treats each differently. Coerce to float32 so the
-    # subsequent clamp and the explicit encoding kwarg have a single,
-    # predictable input shape.
-    if tensor.dtype != torch.float32:
+    # Integer PCM is full-scale, not normalized: casting int16 without
+    # scaling clips nearly every sample and libvorbis rejects s16 input.
+    if tensor.dtype in (torch.int16, torch.int32):
+        scale = 32768.0 if tensor.dtype == torch.int16 else 2147483648.0
+        tensor = tensor.to(torch.float32).div_(scale)
+    elif tensor.dtype != torch.float32:
         tensor = tensor.to(torch.float32)
 
     # ── Failure mode 3: out-of-range values. apply_mastering produces
@@ -172,13 +215,13 @@ def _safe_torchaudio_save(
                 encoding=encoding,
                 bits_per_sample=bits_per_sample,
             )
+        elif fmt == "ogg":
+            # libvorbis only accepts float planar samples, not PCM_S (s16).
+            torchaudio.save(path_or_buf, tensor, sample_rate, format=fmt)
         else:
-            # FLAC accepts encoding + bits_per_sample; mp3/ogg ignore
-            # them with newer torchaudio but older versions raise. Try
-            # with the kwargs first, fall back without them so we stay
-            # backward-compatible with the openai_compat.py callers
-            # that previously passed only ``format=`` and relied on
-            # codec defaults.
+            # FLAC accepts encoding + bits_per_sample; mp3 ignores
+            # them on newer torchaudio but older versions raise. Try
+            # with kwargs first, then without them for compatibility.
             try:
                 torchaudio.save(
                     path_or_buf,
@@ -369,6 +412,8 @@ def atomic_save_wav(
     target_path: str,
     audio: torch.Tensor,
     sample_rate: int,
+    *,
+    durable: bool = False,
     **kwargs: Any,
 ) -> None:
     """Write a WAV to ``target_path`` atomically.
@@ -386,6 +431,10 @@ def atomic_save_wav(
         target_path: Final destination. Missing parent directories are recreated.
         audio: ``(channels, samples)`` or ``(samples,)`` tensor.
         sample_rate: WAV sample rate in Hz.
+        durable: Also survive a power loss — flush the data before the rename
+            and the directory entry after it (``core.durable_io``). Costs a
+            disk flush per file, so it is for files that are expensive to
+            recreate (longform chapter/segment cache, #2279), not every write.
         **kwargs: Forwarded to ``_safe_torchaudio_save`` (``format``,
             ``bits_per_sample``). Legacy callers that pass other kwargs
             are tolerated for back-compat.
@@ -420,7 +469,13 @@ def atomic_save_wav(
         if "bits_per_sample" in kwargs:
             safe_kwargs["bits_per_sample"] = kwargs["bits_per_sample"]
         _safe_torchaudio_save(tmp_path, audio, sample_rate, **safe_kwargs)
+        if durable:
+            from core.durable_io import flush_file
+            flush_file(tmp_path)
         os.replace(tmp_path, target_path)
+        if durable:
+            from core.durable_io import flush_dir
+            flush_dir(target_dir)
     except BaseException:
         # BaseException so we clean up on KeyboardInterrupt + SystemExit too.
         try:

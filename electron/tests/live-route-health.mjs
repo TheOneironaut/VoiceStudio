@@ -14,9 +14,11 @@ const routes = [
   '/batch',
   '/gallery',
   '/transcriptions',
+  '/calls',
   '/design',
   '/audiobook',
   '/projects',
+  '/pro',
   '/tools',
   '/integrations',
   '/settings/general',
@@ -91,8 +93,12 @@ socket.addEventListener('message', ({ data }) => {
   }
   if (message.method === 'Network.responseReceived') {
     const { response } = message.params;
-    if (response.status >= 400 && response.url.includes('/api/')) {
-      failedResponses.push({ status: response.status, url: new URL(response.url).pathname });
+    const path = new URL(response.url).pathname;
+    // Calls feature-detects its API: a 404 there is the "update the backend" state.
+    const callsFallback =
+      response.status === 404 && (path === '/api/calls' || path.startsWith('/api/calls/'));
+    if (response.status >= 400 && response.url.includes('/api/') && !callsFallback) {
+      failedResponses.push({ status: response.status, url: path });
     }
   }
   if (message.method === 'Network.loadingFailed' && !message.params.canceled) {

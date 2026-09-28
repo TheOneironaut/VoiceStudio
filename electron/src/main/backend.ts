@@ -10,6 +10,8 @@ import {
   type RuntimeRegion,
 } from './runtime-project';
 import { CrashJournal } from './crash-journal';
+import { availableBackendPort } from './backend-port';
+import { legacyStorageEnv } from './legacy-storage';
 import { spawn, spawnSync, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
@@ -315,7 +317,17 @@ function childEnv(
   region: RuntimeRegion = 'auto',
   platform = process.platform,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env: NodeJS.ProcessEnv = {
+    ...(app.isPackaged ? legacyStorageEnv(legacyTauriRoots()) : {}),
+    ...process.env,
+  };
+  const packagedToken =
+    typeof __POSTHOG_PROJECT_TOKEN__ === 'string' ? __POSTHOG_PROJECT_TOKEN__ : '';
+  const packagedHost = typeof __POSTHOG_HOST__ === 'string' ? __POSTHOG_HOST__ : '';
+  if (packagedToken && !env.POSTHOG_PROJECT_TOKEN) {
+    env.POSTHOG_PROJECT_TOKEN = packagedToken;
+  }
+  if (packagedHost && !env.POSTHOG_HOST) env.POSTHOG_HOST = packagedHost;
   delete env.PYTHONHOME;
   delete env.PYTHONPATH;
   env.PYTHONUNBUFFERED = '1';
@@ -373,8 +385,11 @@ export class BackendSupervisor extends EventEmitter<{
     __APP_VERSION__,
   );
   private readonly remotePath = join(app.getPath('userData'), 'remote-backend.json');
-  readonly port = resolvePort();
-  private readonly localBaseUrl = `http://127.0.0.1:${this.port}`;
+  private readonly configuredPort = resolvePort();
+  private localPort = this.configuredPort;
+  get port(): number {
+    return this.localPort;
+  }
   private remoteUrl = loadRemoteBackend(this.remotePath);
   private remoteSession: RemoteSession | null = null;
   private testedRemote: { url: string; session: RemoteSession | null } | null = null;
@@ -383,6 +398,7 @@ export class BackendSupervisor extends EventEmitter<{
   private managed = false;
   private message: string | undefined;
   private exitCode: number | null | undefined;
+  private exitSignal: string | null | undefined;
   private startedAt = Date.now();
   private child: ChildProcess | null = null;
   private readonly log: string[] = [];
@@ -401,7 +417,7 @@ export class BackendSupervisor extends EventEmitter<{
   private runtimeRegion: RuntimeRegion = loadRuntimeRegion();
 
   get baseUrl(): string {
-    return this.remoteUrl || this.localBaseUrl;
+    return this.remoteUrl || `http://127.0.0.1:${this.port}`;
   }
 
   get connection(): BackendConnection {
@@ -455,6 +471,7 @@ export class BackendSupervisor extends EventEmitter<{
     }
     if (this.message !== undefined) status.message = this.message;
     if (this.exitCode !== undefined) status.exitCode = this.exitCode;
+    if (this.exitSignal !== undefined) status.exitSignal = this.exitSignal;
     return status;
   }
 
@@ -477,6 +494,7 @@ export class BackendSupervisor extends EventEmitter<{
     this.shuttingDown = false;
     this.startedAt = Date.now();
     this.exitCode = undefined;
+    this.exitSignal = undefined;
     this.setStage('attaching', { managed: false, message: undefined });
     try {
       if (await this.probe()) {
@@ -504,6 +522,20 @@ export class BackendSupervisor extends EventEmitter<{
         return;
       }
 
+      // A previous fallback is only useful while its backend still answers.
+      // Once it is gone, retry the configured endpoint before spawning anew.
+      if (this.localPort !== this.configuredPort) {
+        this.localPort = this.configuredPort;
+        const attached = await this.probe();
+        if (gen !== this.generation) return;
+        if (attached) {
+          this.runtimeInterrupted = false;
+          this.setStage('ready');
+          this.supervise(gen);
+          return;
+        }
+      }
+
       if (app.isPackaged && !parseBackendCmdOverride(process.env.OMNIVOICE_BACKEND_CMD)) {
         const { project, ready } = await this.resolveRuntimeProject();
         if (!ready) {
@@ -516,6 +548,35 @@ export class BackendSupervisor extends EventEmitter<{
         this.runtimeInterrupted = false;
         await stageRuntimeSources(backendRoot(), project);
         if (gen !== this.generation) return;
+      }
+      // Explicit ports/custom commands are contracts with external callers. Only
+      // the default managed launch may move away from an OS-reserved port.
+      if (
+        !process.env.OMNIVOICE_PORT?.trim() &&
+        !parseBackendCmdOverride(process.env.OMNIVOICE_BACKEND_CMD)
+      ) {
+        let identifiedBackend = false;
+        const port = await availableBackendPort(this.port, async (candidate) => {
+          identifiedBackend = await this.probe(`http://127.0.0.1:${candidate}`, true);
+          return identifiedBackend;
+        });
+        if (gen !== this.generation) return;
+        this.localPort = port;
+        if (port !== this.configuredPort) {
+          const attached = await this.probe();
+          if (gen !== this.generation) return;
+          if (attached) {
+            this.setStage('ready');
+            this.supervise(gen);
+            return;
+          }
+          if (identifiedBackend) {
+            // Another instance owns this listener but is still loading. Never
+            // spawn over it; attachment has the same bounded startup budget.
+            void this.waitUntilReady(gen, startupBudgetMs());
+            return;
+          }
+        }
       }
       const plan = await resolveSpawnPlan(this.port, this.runtimeProject ?? undefined);
       if (gen !== this.generation) return;
@@ -727,6 +788,7 @@ export class BackendSupervisor extends EventEmitter<{
     this.installation?.abort();
     await this.killChild(true);
     this.exitCode = undefined;
+    this.exitSignal = undefined;
     this.setStage('idle', { managed: false, message: undefined });
   }
 
@@ -986,6 +1048,7 @@ export class BackendSupervisor extends EventEmitter<{
       if (await this.probe()) {
         if (gen !== this.generation || this.shuttingDown) return;
         this.exitCode = undefined;
+        this.exitSignal = undefined;
         this.pushLog('out', 'Attached to the replacement VoiceStudio backend.');
         this.setStage('ready', { managed: false, message: undefined });
         this.supervise(gen);
@@ -1001,6 +1064,7 @@ export class BackendSupervisor extends EventEmitter<{
     this.generation++;
     this.crashes.record(code, signal, Date.now() - this.startedAt, this.log);
     this.exitCode = code;
+    this.exitSignal = signal;
     if (code === EXIT_PORT_IN_USE) {
       this.setStage('port_in_use', {
         message: `Port ${this.port} is already in use by another process. Stop it or set OMNIVOICE_PORT.`,
@@ -1014,15 +1078,21 @@ export class BackendSupervisor extends EventEmitter<{
     });
   }
 
-  private async probe(): Promise<boolean> {
+  private async probe(baseUrl = this.baseUrl, identityOnly = false): Promise<boolean> {
     try {
       // This runs for the entire desktop session. Use the canonical, tiny
       // liveness response instead of repeatedly serializing full hardware,
       // settings and path information from /system/info.
-      const res = await fetch(`${this.baseUrl}/health`, {
+      const res = await fetch(`${baseUrl}/health`, {
         headers: this.requestHeaders(),
         signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        redirect: this.remoteUrl ? 'follow' : 'error',
       });
+      // Fallback ports were not explicitly chosen by the user. A generic
+      // health JSON must never redirect renderer content to another service.
+      const marked = Boolean(res.headers.get('x-omnivoice-backend'));
+      if (identityOnly) return marked;
+      if (!this.remoteUrl && this.port !== this.configuredPort && !marked) return false;
       if (!res.ok) return false;
       const body: unknown = await res.json();
       return (
@@ -1038,18 +1108,18 @@ export class BackendSupervisor extends EventEmitter<{
 
   private async waitUntilReady(gen: number, budgetMs: number): Promise<void> {
     const deadline = this.startedAt + budgetMs;
-    while (gen === this.generation) {
-      if (await this.probe()) {
-        if (gen !== this.generation) return;
+    const waitingStage = this.stage;
+    while (gen === this.generation && this.stage === waitingStage) {
+      const ready = await this.probe();
+      // Child-exit recovery owns its own grace period. Its transition from
+      // starting to attaching must retire this launch's readiness deadline.
+      if (gen !== this.generation || this.stage !== waitingStage) return;
+      if (ready) {
         this.setStage('ready', { message: undefined });
         this.supervise(gen);
         return;
       }
-      if (gen !== this.generation || this.stage !== 'starting') {
-        if (gen === this.generation && this.stage === 'attaching') {
-          await delay(READY_POLL_MS);
-          continue;
-        }
+      if (gen !== this.generation || (this.stage !== 'starting' && this.stage !== 'attaching')) {
         return;
       }
       if (Date.now() > deadline) {

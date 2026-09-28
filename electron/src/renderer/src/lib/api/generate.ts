@@ -1,14 +1,17 @@
-import { generationFailureMessage } from '../../../../../../frontend/src/utils/generationFailureMessage.ts';
+import { generationFailureMessage } from '@shared/utils/generationFailureMessage.ts';
 import i18next from 'i18next';
-import { languageRejectionMessage } from '../../../../../../frontend/src/utils/languageRejection.ts';
+import { languageRejectionMessage } from '@shared/utils/languageRejection.ts';
 import { ApiError, apiFetch, isAbortError } from './client';
 import type { CloneGenerateInput, GenerateResult } from './types';
 import { beginAppActivity } from '@/lib/app-activity';
 import { createStreamingPreview } from '@/lib/audio/streaming-preview';
 
-/** Above this, cloning quality degrades — the UI suggests trimming. */
+/** Upper end of the recommended 5–15 s reference; longer clips get an engine-aware note. */
 export const CLONE_MAX_SECONDS = 15;
-/** Above this, the engine refuses the clip without a transcript — rejected outright. */
+/**
+ * Hard cap. OmniVoice's automatic passage selection examines at most five 15 s
+ * windows (omnivoice/utils/audio.py CLONE_REF_MAX_WINDOWS) — rejected outright.
+ */
 export const REF_HARD_MAX_SECONDS = 75;
 /**
  * Client-side abort backstop. The first /generate may cold-load the model;
@@ -131,7 +134,8 @@ export function toGenerateForm(input: CloneGenerateInput): FormData {
   form.append('text', input.text);
   if (input.seed !== undefined && Number.isInteger(input.seed))
     form.append('seed', String(input.seed));
-  if (input.language && input.language !== 'Auto') form.append('language', input.language);
+  // Auto must be explicit: omission inherits the saved profile's default.
+  if (input.language) form.append('language', input.language);
   form.append('num_step', String(input.steps));
   form.append('guidance_scale', String(input.cfg));
   form.append('speed', String(input.speed));

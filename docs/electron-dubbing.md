@@ -13,6 +13,11 @@ the selected Settings > Models > Translation provider. Choose a target language,
 translate, review the text, then generate. Completed tracks can be previewed and
 exported through the native save dialog.
 
+The import card can clear a pasted URL and its cookie attachment before ingest.
+After loading a source, Remove video returns to the import card, discarding the
+transcript and edit history while retaining production settings. It asks for
+confirmation when transcript edits or segments would be discarded.
+
 Segment rows scan as compact source/translation pairs: speaker, voice, fit state,
 selection and timestamp stay visible, while row actions reveal on hover or keyboard
 focus. Inset hairline separators preserve the reading rhythm; source text and metadata
@@ -68,8 +73,8 @@ parsed 165 usable cues.
 A disconnected preparation or generation stream retains its existing task for Resume or Cancel. Editing and new jobs remain disabled until that task finishes or cancellation is confirmed; reconnecting never creates a replacement generation. A task already absent from the backend counts as cancelled. If the backend cannot confirm cancellation, Change file explicitly abandons the unreachable local recovery record so the workspace cannot become permanently blocked.
 
 The setup sidebar groups the source, target language and translation engine, timing,
-production overrides and export choices into stable sections. Advanced controls stay
-collapsed until requested. Before media is loaded, the main workspace presents the
+production overrides and export choices into stable sections. Translation quality and
+its options stay visible; other advanced controls open when requested. Before media is loaded, the main workspace presents the
 three actual steps—upload and transcribe, translate, generate—and hides inactive
 generation actions.
 
@@ -266,8 +271,8 @@ The field accepts up to 5,000 characters and is locked while work is running.
 
 Translation and timing rewrites use the same footer area as Repair Agent. It opens
 with live CLI stdout/stderr in **Logs**; **Translations** shows original text beside
-validated translated output. Collapse **Details** to keep the status, language,
-elapsed time and Cancel action visible. Output from each language stays available
+validated translated output. The details stay open during and after translation;
+the status, language, elapsed time and Cancel action remain visible. Output from each language stays available
 until dismissed, the app reloads, or translation starts in another project. Logs are bounded to the
 latest 250,000 characters per run and are not saved into project files.
 
@@ -298,3 +303,16 @@ repairing an older transcript.
 Video watermark exports and visual-context keyframes resolve FFmpeg through the
 app’s shared media-tool resolver, including its bundled binary. They do not
 require a separate system FFmpeg installation.
+
+A dub that has segments offers **Create Story**, which carries its speakers and
+lines into the Stories editor: one character per speaker, one line per segment,
+each character keeping its saved Cast voice. Auto-clone voices are matched by
+speaker name against saved profiles; designed-voice presets, deleted profiles
+and unmatched auto-clones fall back to the cast default rather than a reference
+that would dangle. A merged row is split back onto the speakers its attribution
+bookkeeping records, so a merge spanning two speakers becomes two lines instead
+of one in the wrong voice, while a merge within one speaker stays a single line.
+The dub itself is not changed. Loading replaces the current Stories script, cast,
+pending import and previous render output, and asks first when there is something
+to replace; it is unavailable until saved profiles load or while a Stories or
+Audiobook render is running.
