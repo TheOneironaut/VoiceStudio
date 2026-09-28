@@ -42,7 +42,7 @@ logger = logging.getLogger("omnivoice.generate")
 # render cannot block cache hits or unrelated audio.
 _OGG_CACHE_LIMIT = 32 * 1024 * 1024
 _ogg_cache: OrderedDict[tuple[str, int, int, int], bytes] = OrderedDict()
-_ogg_cache_bytes = 0
+_ogg_cache_state = {"bytes": 0}
 _ogg_state_lock = threading.Lock()
 _ogg_encode_locks = weakref.WeakValueDictionary()
 
@@ -102,12 +102,11 @@ async def generated_ogg_opus(audio_id: str):
                 logger.warning("Ogg/Opus encoding failed: %s", exc)
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             if len(encoded) <= _OGG_CACHE_LIMIT:
-                global _ogg_cache_bytes
                 with _ogg_state_lock:
-                    while _ogg_cache_bytes + len(encoded) > _OGG_CACHE_LIMIT:
-                        _ogg_cache_bytes -= len(_ogg_cache.popitem(last=False)[1])
+                    while _ogg_cache_state["bytes"] + len(encoded) > _OGG_CACHE_LIMIT:
+                        _ogg_cache_state["bytes"] -= len(_ogg_cache.popitem(last=False)[1])
                     _ogg_cache[key] = encoded
-                    _ogg_cache_bytes += len(encoded)
+                    _ogg_cache_state["bytes"] += len(encoded)
     return Response(encoded, media_type="audio/ogg")
 
 

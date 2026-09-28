@@ -427,7 +427,7 @@ def test_opus_url_reuses_encoded_audio_until_wav_changes(monkeypatch, tmp_path):
         changed = client.get("/audio/ab12cd34.opus")
         assert changed.status_code == 200 and changed.content != first.content
         assert calls == [str(wav), str(wav)]
-        assert generation._ogg_cache_bytes <= generation._OGG_CACHE_LIMIT
+        assert generation._ogg_cache_state["bytes"] <= generation._OGG_CACHE_LIMIT
 
 
 def test_slow_opus_encode_does_not_block_other_renders(monkeypatch, tmp_path):

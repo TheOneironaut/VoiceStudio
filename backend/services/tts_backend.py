@@ -19,6 +19,7 @@ dub generator consumes whole segments today.
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 import os
 import re
@@ -744,9 +745,9 @@ def _clone_prompt_key(ref_audio: str, ref_text, preprocess_prompt: bool = True, 
     except OSError:
         mtime = 0.0
     # The selected passage changes conditioning even if two windows have the
-    # same transcript. Keep short-reference keys unchanged.
+    # same transcript. Keep the outer key shape stable for every call.
     key = (os.path.abspath(ref_audio), mtime, ref_text or "", bool(preprocess_prompt))
-    return key if passage is None else (*key, passage)
+    return key, passage
 
 
 def reference_duration_s(path) -> Optional[float]:
@@ -1116,6 +1117,7 @@ def _omnivoice_installed_passage(ref_audio: str) -> Optional[tuple[str, str]]:
                 try:
                     os.remove(best_path)
                 except OSError:
+                    # Best-effort cleanup; the temporary file may already be gone.
                     pass
             best_score = score
             best_activity = activity
@@ -1126,6 +1128,7 @@ def _omnivoice_installed_passage(ref_audio: str) -> Optional[tuple[str, str]]:
             try:
                 os.remove(path)
             except OSError:
+                # Best-effort cleanup; the temporary file may already be gone.
                 pass
     if best_path is None:
         _remember_passage(ref_audio, _NO_PASSAGE, "")
@@ -1160,6 +1163,7 @@ def _materialize_window(ref_audio: str, index: int) -> Optional[str]:
         try:
             os.remove(path)
         except OSError:
+            # Best-effort cleanup; the temporary file may already be gone.
             pass
         return None
     return path
@@ -1248,9 +1252,13 @@ def _get_clone_prompt(
                     ref_audio, None, preprocess_prompt
                 )
             except Exception:
+                # Cache eviction is optional when the preliminary key cannot be built.
                 pass
             try:
-                from services.asr_backend import transcribe_reference
+                transcribe_reference = getattr(
+                    importlib.import_module("services.asr_backend"),
+                    "transcribe_reference",
+                )
 
                 ref_text = transcribe_reference(ref_audio)
             except Exception as e:  # noqa: BLE001 — model fallback remains available
@@ -1312,7 +1320,10 @@ def _get_clone_prompt(
                         "releasing allocator caches and retrying once", e,
                     )
                     try:
-                        from services.model_manager import free_vram
+                        free_vram = getattr(
+                            importlib.import_module("services.model_manager"),
+                            "free_vram",
+                        )
                         free_vram()
                     except Exception:  # noqa: BLE001 — reclaim is best-effort
                         logger.debug("VRAM reclaim before OOM retry failed", exc_info=True)
